@@ -47,21 +47,21 @@ class SourceSeekingConfig:
     ymin: float = 4794500
     ymax: float = 4797000
     resolution: float = 10
-    
+
     # Agent
     max_velocity: float = 1.5  # m/s
     sensor_radius: float = 50  # m
     n_sensors: int = 8  # punti di campionamento attorno all'agente
-    
+
     # Episode
     dt: float = 10.0  # s
     max_steps: int = 500
-    
+
     # Spawn
     spawn_margin: float = 100  # m dal bordo
     spawn_mode: str = "random"  # "random", "fixed", "far_from_source"
     fixed_spawn: Optional[Tuple[float, float]] = None
-    
+
     # Reward
     source_distance_threshold: float = 30  # m
     source_found_reward: float = 100.0
@@ -69,13 +69,16 @@ class SourceSeekingConfig:
     boundary_penalty: float = -10.0
     gradient_reward_scale: float = 10.0
     concentration_reward_scale: float = 1.0
-    
+
+    # Source detection
+    auto_detect_source: bool = False  # Se True, rileva sorgente dal max globale
+
     # Observation
     include_velocity: bool = True
     include_position: bool = True
     include_gradient: bool = True
     normalize_observations: bool = True
-    
+
     # Action
     action_type: str = "continuous"  # "continuous" o "discrete"
     n_discrete_actions: int = 8
@@ -84,21 +87,21 @@ class SourceSeekingConfig:
 class SourceSeekingEnv(gym.Env):
     """
     Ambiente Gymnasium per il source seeking di inquinanti marini.
-    
+
     L'agente (AUV) deve navigare in un campo di concentrazione
     per trovare la sorgente dell'inquinante.
-    
+
     Observation Space:
         - Concentrazioni campionate in n_sensors punti attorno all'agente
         - Concentrazione nel punto corrente
         - Gradiente della concentrazione (opzionale)
         - Posizione normalizzata (opzionale)
         - Velocità normalizzata (opzionale)
-    
+
     Action Space:
         - Continuous: [vx, vy] velocità normalizzate in [-1, 1]
         - Discrete: 8 direzioni cardinali + stazionario
-    
+
     Reward:
         - Bonus grande per trovare la sorgente
         - Reward proporzionale all'aumento di concentrazione
@@ -106,9 +109,9 @@ class SourceSeekingEnv(gym.Env):
         - Penalità per step (incentiva velocità)
         - Penalità per uscire dai bordi
     """
-    
+
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 10}
-    
+
     def __init__(
         self,
         config: Optional[SourceSeekingConfig] = None,
@@ -162,7 +165,18 @@ class SourceSeekingEnv(gym.Env):
             self._init_field()
 
         # Posizione sorgente
-        self.source_position = np.array(self.field.source_position)
+        # Opzione 1: usa coordinate hardcodate
+        # Opzione 2: rileva automaticamente dal massimo globale di concentrazione
+        if getattr(self.config, 'auto_detect_source', False):
+            detected_source = self.field.find_source_from_concentration()
+            self.source_position = np.array(detected_source)
+            print(f"  Source auto-detected at: ({detected_source[0]:.0f}, {detected_source[1]:.0f})")
+        elif self.field.source_position is not None:
+            self.source_position = np.array(self.field.source_position)
+        else:
+            # Fallback: rileva automaticamente
+            detected_source = self.field.find_source_from_concentration()
+            self.source_position = np.array(detected_source)
 
         # Stato agente
         self.state: Optional[AgentState] = None
@@ -252,9 +266,16 @@ class SourceSeekingEnv(gym.Env):
             # Spawn vicino alla costa (come da specifiche relatore)
             return self._spawn_near_shore()
 
+        elif self.config.spawn_mode == "strong_gradient":
+            # Spawn dove il gradiente è forte (vicino alla sorgente)
+            return self._spawn_strong_gradient(min_grad=0.3)
+
+        elif self.config.spawn_mode == "near_source":
+            # Spawn entro una certa distanza dalla sorgente
+            return self._spawn_near_source(max_dist=300)
+
         elif self.config.spawn_mode == "curriculum":
             # Curriculum learning: distanza aumenta con il training
-            # Usa self._curriculum_distance che viene aggiornato esternamente
             max_dist = getattr(self, '_curriculum_distance', 200)
             return self._spawn_near_plume(min_dist=50, max_dist=max_dist)
 
@@ -287,6 +308,79 @@ class SourceSeekingEnv(gym.Env):
                 self.config.ymax - margin
             )
             return (x, y)
+
+    def _spawn_strong_gradient(self, min_grad: float = 0.3) -> Tuple[float, float]:
+        """
+        Spawn in un punto con gradiente forte.
+        Questi punti sono tipicamente vicini alla sorgente.
+        """
+        # Imposta timestep dove il plume è sviluppato
+        if self.field.n_timesteps > 1:
+            mid_time = self.field.n_timesteps // 2
+            self.field.set_time(mid_time)
+
+        # Ottieni il campo corrente
+        field_data = self.field.get_current_field()
+        field_clean = np.nan_to_num(field_data, nan=0.0)
+
+        # Calcola il gradiente su tutto il campo
+        grad_y, grad_x = np.gradient(field_clean)
+        grad_magnitude = np.sqrt(grad_x**2 + grad_y**2)
+
+        # Trova punti con gradiente forte E concentrazione > 0
+        valid_mask = (grad_magnitude > min_grad) & (field_clean > 0.5)
+        valid_indices = np.where(valid_mask)
+
+        if len(valid_indices[0]) == 0:
+            # Fallback: riduci soglia gradiente
+            valid_mask = (grad_magnitude > min_grad / 2) & (field_clean > 0.1)
+            valid_indices = np.where(valid_mask)
+
+        if len(valid_indices[0]) == 0:
+            # Fallback estremo: spawn on_plume
+            print("WARNING: No strong gradient points, falling back to on_plume")
+            return self._spawn_on_plume()
+
+        # Scegli un punto random tra quelli con gradiente forte
+        idx = np.random.randint(len(valid_indices[0]))
+        y_idx = valid_indices[0][idx]
+        x_idx = valid_indices[1][idx]
+
+        x = float(self.field.x_coords[x_idx])
+        y = float(self.field.y_coords[y_idx])
+
+        # Aggiungi piccolo rumore
+        x += np.random.uniform(-5, 5)
+        y += np.random.uniform(-5, 5)
+
+        return (x, y)
+
+    def _spawn_near_source(self, max_dist: float = 300) -> Tuple[float, float]:
+        """
+        Spawn entro una certa distanza dalla sorgente, MA solo su celle con concentrazione > 0.
+        """
+        max_attempts = 1000
+
+        for _ in range(max_attempts):
+            # Genera punto random attorno alla sorgente
+            angle = np.random.uniform(0, 2 * np.pi)
+            dist = np.random.uniform(50, max_dist)  # minimo 50m dalla sorgente
+
+            x = self.source_position[0] + dist * np.cos(angle)
+            y = self.source_position[1] + dist * np.sin(angle)
+
+            # Verifica bounds
+            if (self.config.xmin < x < self.config.xmax and
+                self.config.ymin < y < self.config.ymax):
+
+                # Verifica che sia sulla scia (conc > 0.5) e non sulla terra
+                conc = self.field.get_concentration(x, y)
+                if not np.isnan(conc) and conc > 0.5:
+                    return (x, y)
+
+        # Fallback: spawn on_plume se non troviamo punti validi
+        print("WARNING: near_source fallback to on_plume")
+        return self._spawn_on_plume()
 
     def _spawn_near_shore(self, max_dist_from_shore: float = 200) -> Tuple[float, float]:
         """
@@ -583,19 +677,14 @@ class SourceSeekingEnv(gym.Env):
             info['boundary'] = self.config.boundary_penalty
 
         # ============================================================
-        # 4. REWARD GRADIENTE (gradient following) - PRINCIPALE
-        #    Reward per muoversi nella direzione del gradiente
-        #    Il gradiente punta verso concentrazione crescente → sorgente
+        # 4. REWARD GRADIENTE (gradient following) - SECONDARIO
+        #    Il gradiente può avere massimi locali, quindi lo usiamo
+        #    solo come bonus quando siamo sulla scia
         # ============================================================
-        if grad_magnitude > 1e-6 and vel_magnitude > 1e-6:
-            # Coseno dell'angolo tra velocità e gradiente
-            # +1 = stessa direzione (ottimo)
-            # -1 = direzione opposta (male)
+        if grad_magnitude > 1e-6 and vel_magnitude > 1e-6 and current_conc > 1.0:
+            # Solo se siamo sulla scia (conc > 1)
             alignment = np.dot(gradient, velocity) / (grad_magnitude * vel_magnitude)
-
-            # Reward proporzionale all'allineamento e alla magnitudine del gradiente
-            # Più forte il gradiente, più importante seguirlo
-            gradient_reward = alignment * min(grad_magnitude * 10, 5.0)  # max +5 per step
+            gradient_reward = alignment * 5.0  # max +5 per step
             reward += gradient_reward
             info['gradient_alignment'] = alignment
             info['gradient_magnitude'] = grad_magnitude
@@ -606,11 +695,11 @@ class SourceSeekingEnv(gym.Env):
             info['gradient_reward'] = 0.0
 
         # ============================================================
-        # 5. REWARD DISTANZA (distance accuracy)
-        #    Backup: se non c'è gradiente, usa la distanza
+        # 5. REWARD DISTANZA (distance accuracy) - PRINCIPALE
+        #    La distanza dalla sorgente è il segnale più affidabile
         # ============================================================
         distance_improvement = self.prev_distance - current_distance
-        distance_reward = distance_improvement * 0.5  # meno peso della distanza
+        distance_reward = distance_improvement * 1.0  # AUMENTATO: principale
         reward += distance_reward
         info['distance_reward'] = distance_reward
 
@@ -666,7 +755,15 @@ class SourceSeekingEnv(gym.Env):
             self.field, self.source_id = self._data_manager.get_random_field()
             self.source_position = np.array(self.field.source_position)
 
-        # Determina posizione iniziale
+        # PRIMA: Imposta timestep dove la concentrazione è massima (vicino alla sorgente)
+        if self.field.n_timesteps > 1:
+            # Trova il timestep con la concentrazione massima globale
+            data_clean = np.nan_to_num(self.field.data, nan=0.0)
+            max_idx = np.unravel_index(np.argmax(data_clean), data_clean.shape)
+            best_time = max_idx[0]  # timestep del max globale
+            self.field.set_time(best_time)
+
+        # POI: Determina posizione iniziale (ora usa il timestep corretto)
         if options and 'spawn_position' in options:
             spawn_pos = options['spawn_position']
         else:
@@ -689,12 +786,6 @@ class SourceSeekingEnv(gym.Env):
 
         # Reset esplorazione
         self._visited_cells = set()
-
-        # Imposta timestep dove il plume è sviluppato (non t=0!)
-        if self.field.n_timesteps > 1:
-            # Usa timestep a metà simulazione dove il plume è ben sviluppato
-            start_time = self.field.n_timesteps // 2
-            self.field.set_time(start_time)
 
         observation = self._get_observation()
         info = {

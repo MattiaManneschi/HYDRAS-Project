@@ -7,7 +7,7 @@ agent:
   n_discrete_actions: 8
   sensor_radius: 50
   spawn_margin: 100
-  spawn_mode: near_shore
+  spawn_mode: near_source
 data:
   concentration_var: Concentration - component 1
   fill_value: 0.0
@@ -30,9 +30,10 @@ environment:
   normalize_obs: true
   normalize_reward: false
   reward:
+    auto_detect_source: true
     boundary_penalty: -10.0
     concentration_gradient_scale: 10.0
-    distance_threshold: 50
+    distance_threshold: 100
     source_reached_bonus: 100.0
     source_threshold: 0.8
     step_penalty: -0.1

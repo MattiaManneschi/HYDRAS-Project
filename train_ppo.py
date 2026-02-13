@@ -46,39 +46,39 @@ class SourceSeekingCallback(BaseCallback):
     """
     Callback personalizzato per logging aggiuntivo durante il training.
     """
-    
+
     def __init__(self, verbose: int = 0):
         super().__init__(verbose)
         self.episode_rewards = []
         self.episode_lengths = []
         self.success_rate = []
         self.avg_final_distance = []
-        
+
     def _on_step(self) -> bool:
         # Raccogli info dagli ambienti
         infos = self.locals.get('infos', [])
-        
+
         for info in infos:
             if 'episode' in info:
                 self.episode_rewards.append(info['episode']['r'])
                 self.episode_lengths.append(info['episode']['l'])
-            
+
             if 'source_reached' in info:
                 self.success_rate.append(float(info['source_reached']))
-            
+
             if 'distance_to_source' in info:
                 self.avg_final_distance.append(info['distance_to_source'])
-        
+
         # Log ogni 1000 steps
         if self.num_timesteps % 1000 == 0 and len(self.success_rate) > 0:
             recent_success = np.mean(self.success_rate[-100:]) if len(self.success_rate) >= 100 else np.mean(self.success_rate)
             recent_distance = np.mean(self.avg_final_distance[-100:]) if len(self.avg_final_distance) >= 100 else np.mean(self.avg_final_distance)
-            
+
             self.logger.record('custom/success_rate', recent_success)
             self.logger.record('custom/avg_final_distance', recent_distance)
-        
+
         return True
-    
+
     def _on_training_end(self) -> None:
         if self.verbose > 0:
             print(f"\nTraining completed!")
@@ -122,7 +122,10 @@ def create_env(
         gradient_reward_scale=env_config.get('reward', {}).get('concentration_gradient_scale', 10),
         source_distance_threshold=env_config.get('reward', {}).get('distance_threshold', 30),
         action_type=agent_config.get('action_type', 'continuous'),
+        auto_detect_source=env_config.get('reward', {}).get('auto_detect_source', False),
     )
+
+    print(f"  [DEBUG] spawn_mode={env_kwargs.spawn_mode}, threshold={env_kwargs.source_distance_threshold}m, auto_detect={env_kwargs.auto_detect_source}")
 
     # Crea ambiente
     env = SourceSeekingEnv(
