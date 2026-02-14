@@ -46,7 +46,7 @@ print("-" * 50)
 from utils.data_loader import DataManager
 
 dm = DataManager(data_dir='data/')
-field = dm._nc_loader.load(
+field = dm.nc_loader.load(
     'data/CMEMS_S1_01_conc_grid_10m.nc',
     concentration_var="Concentration - component 1"
 )

@@ -48,7 +48,7 @@ agent:
   max_depth: 50.0  # m - profondità massima
   
   # Initial position
-  spawn_mode: "on_plume"  # Start con on_plume, curriculum switch a 50k
+  spawn_mode: "far_from_source"  # Hard evaluation: spawn lontano dalla sorgente
   spawn_margin: 100  # m dal bordo se random
 
 # Environment configuration

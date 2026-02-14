@@ -42,6 +42,52 @@ from envs.source_seeking_env import SourceSeekingEnv, SourceSeekingConfig
 from utils.data_loader import DataManager, ConcentrationField
 
 
+class CurriculumCallback(BaseCallback):
+    """
+    Curriculum learning: Cambia spawn_mode e reward scaling in base ai timesteps completati.
+    0-50k: on_plume (impara gradiente)
+    50k+: far_from_source (impara ricerca) + distance_reward x2
+    """
+
+    def __init__(self, verbose: int = 0):
+        super().__init__(verbose)
+        self.current_phase = "on_plume"
+        self.phase_switch_timestep = 50000
+        self.switched = False
+
+    def _on_step(self) -> bool:
+        # Controlla se dovremmo switchare fase
+        if self.num_timesteps >= self.phase_switch_timestep and not self.switched:
+            self.switched = True
+            new_phase = "far_from_source"
+            reward_multiplier = 2.0  # RADDOPPIA il distance reward nella fase 2
+            
+            if self.verbose > 0:
+                print(f"\n{'='*60}")
+                print(f"CURRICULUM SWITCH at {self.num_timesteps} timesteps")
+                print(f"  {self.current_phase} → {new_phase}")
+                print(f"  distance_reward x{reward_multiplier}")
+                print(f"{'='*60}\n")
+            
+            # Cambia spawn_mode e reward scaling su tutti gli env
+            if hasattr(self.model.env, 'envs'):
+                # VecEnv: accedi a lista di env
+                for env in self.model.env.envs:
+                    if hasattr(env, 'config'):
+                        env.config.spawn_mode = new_phase
+                        env.config.distance_reward_multiplier = reward_multiplier
+                    elif hasattr(env, 'env') and hasattr(env.env, 'config'):
+                        # Se wrapped (Monitor, etc)
+                        env.env.config.spawn_mode = new_phase
+                        env.env.config.distance_reward_multiplier = reward_multiplier
+            
+            self.current_phase = new_phase
+            self.logger.record('curriculum/phase', 1.0)
+            self.logger.record('curriculum/reward_multiplier', reward_multiplier)
+
+        return True
+
+
 class SourceSeekingCallback(BaseCallback):
     """
     Callback personalizzato per logging aggiuntivo durante il training.
@@ -198,7 +244,7 @@ def train(
 
     # Setup directories
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = f"ppo_ALL_{timestamp}" if data_dir else f"ppo_{source_id}_{timestamp}"
+    run_name = f"ppo_{source_id}_ALL_{timestamp}" if data_dir else f"ppo_{source_id}_{timestamp}"
     run_dir = Path(output_dir) / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -336,6 +382,11 @@ def train(
 
     # Setup callbacks
     callbacks = []
+
+    # Curriculum callback (se training è long enough)
+    if total_timesteps and total_timesteps >= 100000:
+        curriculum_callback = CurriculumCallback(verbose=1)
+        callbacks.append(curriculum_callback)
 
     # Evaluation callback
     eval_callback = EvalCallback(

@@ -69,6 +69,7 @@ class SourceSeekingConfig:
     boundary_penalty: float = -10.0
     gradient_reward_scale: float = 10.0
     concentration_reward_scale: float = 1.0
+    distance_reward_multiplier: float = 1.0  # Moltiplicatore dinamico per reward scaling
 
     # Source detection
     auto_detect_source: bool = False  # Se True, rileva sorgente dal max globale
@@ -155,7 +156,8 @@ class SourceSeekingEnv(gym.Env):
                 data_dir=data_dir,
                 use_synthetic=True,
                 domain_config=self.domain,
-                preload_all=False  # NON precaricare - carica on-demand per risparmiare RAM
+                preload_all=False,  # NON precaricare - carica on-demand per risparmiare RAM
+                source_id_filter=source_id  # Filtra solo file della sorgente specificata
             )
 
         # Campo di concentrazione
@@ -527,6 +529,8 @@ class SourceSeekingEnv(gym.Env):
 
         # Concentrazione al centro
         center_conc = self.field.get_concentration(self.state.x, self.state.y)
+        if np.isnan(center_conc):
+            center_conc = 0.0
 
         # Concentrazioni campionate attorno all'agente
         sensor_concs = self._sample_concentrations()
@@ -539,6 +543,7 @@ class SourceSeekingEnv(gym.Env):
         # Gradiente
         if self.config.include_gradient:
             gradient = self.field.get_gradient(self.state.x, self.state.y)
+            gradient = np.nan_to_num(gradient, nan=0.0)
             # Normalizza il gradiente
             grad_norm = np.linalg.norm(gradient)
             if grad_norm > 1e-6:
@@ -569,6 +574,8 @@ class SourceSeekingEnv(gym.Env):
             x = self.state.x + r * np.cos(angle)
             y = self.state.y + r * np.sin(angle)
             c = self.field.get_concentration(x, y)
+            if np.isnan(c):
+                c = 0.0
             concentrations.append(c)
 
         return np.array(concentrations)
@@ -677,14 +684,13 @@ class SourceSeekingEnv(gym.Env):
             info['boundary'] = self.config.boundary_penalty
 
         # ============================================================
-        # 4. REWARD GRADIENTE (gradient following) - SECONDARIO
-        #    Il gradiente può avere massimi locali, quindi lo usiamo
-        #    solo come bonus quando siamo sulla scia
+        # 4. REWARD GRADIENTE (gradient following) - PRINCIPALE
+        #    Il gradiente fornisce il segnale direzionale verso la sorgente
         # ============================================================
-        if grad_magnitude > 1e-6 and vel_magnitude > 1e-6 and current_conc > 1.0:
-            # Solo se siamo sulla scia (conc > 1)
+        if grad_magnitude > 1e-6 and vel_magnitude > 1e-6 and current_conc > 0.1:
+            # Segui il gradiente se siamo sopra lo 0.1 di concentrazione
             alignment = np.dot(gradient, velocity) / (grad_magnitude * vel_magnitude)
-            gradient_reward = alignment * 5.0  # max +5 per step
+            gradient_reward = alignment * 10.0  # AUMENTATO: max +10 per step
             reward += gradient_reward
             info['gradient_alignment'] = alignment
             info['gradient_magnitude'] = grad_magnitude
@@ -699,7 +705,7 @@ class SourceSeekingEnv(gym.Env):
         #    La distanza dalla sorgente è il segnale più affidabile
         # ============================================================
         distance_improvement = self.prev_distance - current_distance
-        distance_reward = distance_improvement * 1.0  # AUMENTATO: principale
+        distance_reward = distance_improvement * 2.0 * self.config.distance_reward_multiplier  # SCALABILE
         reward += distance_reward
         info['distance_reward'] = distance_reward
 
@@ -775,6 +781,8 @@ class SourceSeekingEnv(gym.Env):
 
         # Inizializza valori per il reward
         self.prev_concentration = self.field.get_concentration(self.state.x, self.state.y)
+        if np.isnan(self.prev_concentration):
+            self.prev_concentration = 0.0
         self.prev_distance = np.sqrt(
             (self.state.x - self.source_position[0])**2 +
             (self.state.y - self.source_position[1])**2
@@ -823,6 +831,8 @@ class SourceSeekingEnv(gym.Env):
         # Avanza il tempo del campo se time-varying
         if self.field.n_timesteps > 1:
             time_idx = int(self.steps * self.config.dt / 60)  # assumendo dt NC = 1 min
+            # Clamp index to valid range
+            time_idx = max(0, min(time_idx, max(0, self.field.n_timesteps - 1)))
             self.field.set_time(time_idx)
 
         # Calcola reward
@@ -830,9 +840,10 @@ class SourceSeekingEnv(gym.Env):
 
         # Registra traiettoria
         self.trajectory.append(self.state.position.copy())
-        self.concentration_history.append(
-            self.field.get_concentration(self.state.x, self.state.y)
-        )
+        conc_now = self.field.get_concentration(self.state.x, self.state.y)
+        if np.isnan(conc_now):
+            conc_now = 0.0
+        self.concentration_history.append(conc_now)
 
         # Controlla terminazione
         terminated = False

@@ -497,7 +497,8 @@ class DataManager:
         data_dir: Optional[Union[str, Path]] = None,
         use_synthetic: bool = True,
         domain_config: Optional[DomainConfig] = None,
-        preload_all: bool = False
+        preload_all: bool = False,
+        source_id_filter: Optional[str] = None
     ):
         """
         Args:
@@ -505,9 +506,11 @@ class DataManager:
             use_synthetic: Usa dati sintetici se NC non disponibile
             domain_config: Configurazione del dominio (usa default se None)
             preload_all: Se True, precarica tutti i file NC in memoria
+            source_id_filter: Filtra solo file di una sorgente ('S1', 'S2', 'S3'). None = tutti.
         """
         self.data_dir = Path(data_dir) if data_dir else None
         self.use_synthetic = use_synthetic
+        self.source_id_filter = source_id_filter
 
         # Domain config di default basata sul report
         self.domain = domain_config or DomainConfig(
@@ -523,8 +526,15 @@ class DataManager:
 
         if self.data_dir and self.data_dir.exists():
             self._nc_loader = NetCDFLoader(self.data_dir)
-            self._nc_files = list(self.data_dir.glob("*.nc"))
-            print(f"Found {len(self._nc_files)} NC files in {self.data_dir}")
+            all_nc_files = list(self.data_dir.glob("*.nc"))
+            
+            # Applica filtro source_id se specificato
+            if source_id_filter:
+                self._nc_files = [f for f in all_nc_files if source_id_filter in f.name]
+                print(f"Found {len(self._nc_files)} NC files for {source_id_filter} in {self.data_dir}")
+            else:
+                self._nc_files = all_nc_files
+                print(f"Found {len(self._nc_files)} NC files in {self.data_dir}")
 
             if preload_all and self._nc_files:
                 self._preload_all_files()
@@ -649,6 +659,10 @@ class DataManager:
         if self._nc_loader:
             return self._nc_loader.available_runs
         return []
+
+    @property
+    def nc_loader(self):
+        return self._nc_loader
 
 
 if __name__ == "__main__":
