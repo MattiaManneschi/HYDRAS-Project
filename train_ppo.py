@@ -42,6 +42,84 @@ from envs.source_seeking_env import SourceSeekingEnv, SourceSeekingConfig
 from utils.data_loader import DataManager, ConcentrationField
 
 
+class SourceWeights:
+    """Gestisce i pesi per randomizzare source_id durante curriculum learning."""
+    
+    def __init__(self, total_timesteps: int = 800000):
+        self.total_timesteps = total_timesteps
+        self.current_timestep = 0
+        self.weights = np.array([1/3, 1/3, 1/3])  # S1, S2, S3 inizialmente uguali
+        self.source_ids = ['S1', 'S2', 'S3']
+    
+    def update(self, timestep: int):
+        """Aggiorna i pesi basato sulla fase di curriculum."""
+        self.current_timestep = timestep
+        
+        if timestep < 200000:
+            # Fase 1 (0-200k): Focus su S1 (70%), poi S2 (20%) e S3 (10%)
+            # Impara prima i pattern difficili di S1
+            self.weights = np.array([0.70, 0.20, 0.10])
+        elif timestep < 500000:
+            # Fase 2 (200k-500k): Bilancia (40% S1, 30% S2, 30% S3)
+            # Consolida i pattern di ognuna
+            self.weights = np.array([0.40, 0.30, 0.30])
+        else:
+            # Fase 3 (500k-800k): Distribuzione uniforme (33% ciascuno)
+            # Generalizzazione finale
+            self.weights = np.array([1/3, 1/3, 1/3])
+    
+    def sample_source_id(self) -> str:
+        """Restituisce un source_id casuale secondo i weights attuali."""
+        return np.random.choice(self.source_ids, p=self.weights)
+    
+    def get_phase(self) -> str:
+        """Restituisce la fase attuale."""
+        if self.current_timestep < 200000:
+            return "Phase 1: Focus S1"
+        elif self.current_timestep < 500000:
+            return "Phase 2: Balance"
+        else:
+            return "Phase 3: Equal"
+
+
+class SourceCurriculumCallback(BaseCallback):
+    """
+    Curriculum learning per source_id: cambia i pesi per S1, S2, S3 nel tempo.
+    Fase 1 (0-200k): 70% S1, 20% S2, 10% S3
+    Fase 2 (200k-500k): 40% S1, 30% S2, 30% S3
+    Fase 3 (500k-800k): 33% S1, 33% S2, 33% S3
+    """
+    
+    def __init__(self, source_weights: SourceWeights, verbose: int = 0):
+        super().__init__(verbose)
+        self.source_weights = source_weights
+        self.last_phase = None
+    
+    def _on_step(self) -> bool:
+        # Aggiorna i weights basato sul timestep
+        self.source_weights.update(self.num_timesteps)
+        
+        # Log la fase quando cambia
+        current_phase = self.source_weights.get_phase()
+        if current_phase != self.last_phase:
+            self.last_phase = current_phase
+            if self.verbose > 0:
+                print(f"\n{'='*60}")
+                print(f"SOURCE CURRICULUM: {current_phase}")
+                print(f"Weights (S1, S2, S3): {self.source_weights.weights}")
+                print(f"{'='*60}\n")
+            self.logger.record('curriculum/source_phase', 
+                             {'Phase 1': 0, 'Phase 2': 1, 'Phase 3': 2}.get(current_phase.split(':')[0], 0))
+        
+        # Log periodicamente i weights
+        if self.num_timesteps % 50000 == 0:
+            self.logger.record('curriculum/s1_weight', self.source_weights.weights[0])
+            self.logger.record('curriculum/s2_weight', self.source_weights.weights[1])
+            self.logger.record('curriculum/s3_weight', self.source_weights.weights[2])
+        
+        return True
+
+
 class CurriculumCallback(BaseCallback):
     """
     Curriculum learning: Cambia spawn_mode e reward scaling in base ai timesteps completati.
@@ -195,11 +273,24 @@ def make_env_fn(
     rank: int,
     seed: int,
     data_dir: Optional[str] = None,
-    randomize_field: bool = False
+    randomize_field: bool = False,
+    randomize_source_id: bool = False,
+    source_weights: Optional[SourceWeights] = None
 ) -> Callable[[], gym.Env]:
     """Factory function per la creazione di ambienti paralleli."""
     def _init() -> gym.Env:
-        env = create_env(config, concentration_field, source_id, seed + rank, data_dir, randomize_field)
+        # Determina il source_id da usare
+        if source_weights:
+            # Curriculum learning pesato: usa i weights attuali
+            actual_source_id = source_weights.sample_source_id()
+        elif randomize_source_id:
+            # Randomizzazione uniforme: alle probabilità uguali
+            actual_source_id = np.random.choice(['S1', 'S2', 'S3'])
+        else:
+            # Source_id fisso
+            actual_source_id = source_id
+        
+        env = create_env(config, concentration_field, actual_source_id, seed + rank, data_dir, randomize_field)
         env.reset(seed=seed + rank)
         return env
     return _init
@@ -215,7 +306,9 @@ def train(
     resume_from: Optional[str] = None,
     use_nc_data: bool = False,
     nc_file: Optional[str] = None,
-    data_dir: Optional[str] = None
+    data_dir: Optional[str] = None,
+    randomize_source_id: bool = False,
+    curriculum_source: bool = False
 ):
     """
     Funzione principale di training.
@@ -244,7 +337,10 @@ def train(
 
     # Setup directories
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = f"ppo_{source_id}_ALL_{timestamp}" if data_dir else f"ppo_{source_id}_{timestamp}"
+    if randomize_source_id:
+        run_name = f"ppo_MULTI_ALL_{timestamp}" if data_dir else f"ppo_MULTI_{timestamp}"
+    else:
+        run_name = f"ppo_{source_id}_ALL_{timestamp}" if data_dir else f"ppo_{source_id}_{timestamp}"
     run_dir = Path(output_dir) / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -262,7 +358,8 @@ def train(
     print(f"=" * 60)
     print(f"Run name: {run_name}")
     print(f"Output directory: {run_dir}")
-    print(f"Source ID: {'ALL (randomized)' if data_dir else source_id}")
+    source_mode = "S1+S2+S3 (multi-source)" if randomize_source_id else ("ALL (randomized)" if data_dir else source_id)
+    print(f"Source ID: {source_mode}")
     print(f"Number of parallel environments: {n_envs}")
 
     # Carica dati
@@ -294,8 +391,18 @@ def train(
     # Crea ambienti vettorizzati
     print(f"\nCreating {n_envs} parallel environments...")
 
+    # Crea SourceWeights se curriculum_source è abilitato
+    source_weights = None
+    timesteps = total_timesteps or training_config.get('total_timesteps', 1000000)
+    if randomize_source_id and curriculum_source:
+        source_weights = SourceWeights(total_timesteps=timesteps)
+        print(f"Source Curriculum Learning: ENABLED")
+        print(f"  Phase 1 (0-200k): 70% S1, 20% S2, 10% S3")
+        print(f"  Phase 2 (200k-500k): 40% S1, 30% S2, 30% S3")
+        print(f"  Phase 3 (500k+): 33% S1, 33% S2, 33% S3")
+
     env_fns = [
-        make_env_fn(config, concentration_field, source_id, i, seed, data_dir, randomize_field)
+        make_env_fn(config, concentration_field, source_id, i, seed, data_dir, randomize_field, randomize_source_id, source_weights)
         for i in range(n_envs)
     ]
 
@@ -388,6 +495,11 @@ def train(
         curriculum_callback = CurriculumCallback(verbose=1)
         callbacks.append(curriculum_callback)
 
+    # Source curriculum callback (curriculum learning per source_id)
+    if randomize_source_id and curriculum_source and source_weights is not None:
+        source_curriculum_callback = SourceCurriculumCallback(source_weights, verbose=1)
+        callbacks.append(source_curriculum_callback)
+
     # Evaluation callback
     eval_callback = EvalCallback(
         eval_env,
@@ -414,7 +526,7 @@ def train(
 
     callback = CallbackList(callbacks)
 
-    # Training
+    # Calcola timesteps totali
     timesteps = total_timesteps or training_config.get('total_timesteps', 1000000)
     print(f"\nStarting training for {timesteps:,} timesteps...")
     print(f"=" * 60)
@@ -808,6 +920,16 @@ def main():
         default=None,
         help='Directory with multiple NC files (enables randomization)'
     )
+    train_parser.add_argument(
+        '--randomize-source',
+        action='store_true',
+        help='Randomize source ID (S1, S2, S3) for each episode'
+    )
+    train_parser.add_argument(
+        '--curriculum-source',
+        action='store_true',
+        help='Enable curriculum learning for source ID (requires --randomize-source)'
+    )
 
     # Evaluate command
     eval_parser = subparsers.add_parser('eval', help='Evaluate a trained model')
@@ -884,7 +1006,9 @@ def main():
             resume_from=args.resume,
             use_nc_data=args.nc_file is not None or args.data_dir is not None,
             nc_file=args.nc_file,
-            data_dir=args.data_dir
+            data_dir=args.data_dir,
+            randomize_source_id=args.randomize_source,
+            curriculum_source=args.curriculum_source
         )
 
     elif args.command == 'eval':
