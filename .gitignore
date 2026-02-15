@@ -1,0 +1,41 @@
+# Data files (NetCDF) - raw data stays local
+data/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+*.egg
+
+# Virtual environment
+.venv/
+venv/
+.idea/
+*.pth
+*.h5
+.DS_Store
+
+# IDE
+.vscode/
+*.swp
+*.swo
+
+# Training logs and tensorboard - keep models and evaluations
+**/logs/
+**/tensorboard/
+
+# Jupyter notebooks
+.ipynb_checkpoints/
+*.ipynb
+
+# Large model files that shouldn't be committed
+outputs/**/checkpoints/
+outputs/**/final_model.zip
+outputs/**/vec_normalize.pkl
