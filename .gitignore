@@ -35,7 +35,5 @@ venv/
 .ipynb_checkpoints/
 *.ipynb
 
-# Large model files that shouldn't be committed
+# Large model checkpoints (keep only final models for repo)
 trained_models/**/checkpoints/
-trained_models/**/final_model.zip
-trained_models/**/vec_normalize.pkl
