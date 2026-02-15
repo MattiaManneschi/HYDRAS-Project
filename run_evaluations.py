@@ -16,7 +16,7 @@ from evaluate_ppo import evaluate_and_visualize
 
 
 def run_comprehensive_evaluations(
-    model_path: str = "outputs/ppo_MULTI_ALL_20260214_161241/models/final_model.zip",
+    model_path: str = "trained_models/ppo_MULTI_ALL_20260214_161241/models/best/best_model.zip",
     config_path: str = "configs/config.yaml",
     base_output_dir: str = "evaluations",
     data_dir: str = "data/",
@@ -113,7 +113,7 @@ def main():
     )
     parser.add_argument(
         "--model",
-        default="outputs/ppo_MULTI_ALL_20260214_161241/models/final_model.zip",
+        default="trained_models/ppo_MULTI_ALL_20260214_161241/models/best/best_model.zip",
         help="Path to trained model"
     )
     parser.add_argument(

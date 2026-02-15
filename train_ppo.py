@@ -298,7 +298,7 @@ def make_env_fn(
 
 def train(
     config_path: str = "configs/config.yaml",
-    output_dir: str = "outputs",
+    output_dir: str = "trained_models",
     source_id: str = "S1",
     n_envs: int = 4,
     total_timesteps: Optional[int] = None,
@@ -878,7 +878,7 @@ def main():
     )
     train_parser.add_argument(
         '--output', '-o',
-        default='outputs',
+        default='trained_models',
         help='Output directory'
     )
     train_parser.add_argument(
