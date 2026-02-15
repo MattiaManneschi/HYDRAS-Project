@@ -284,11 +284,11 @@ class SourceSeekingEnv(gym.Env):
         elif self.config.spawn_mode == "far_from_source":
             # Spawn lontano dalla sorgente
             while True:
-                x = np.random.uniform(
+                x = self.np_random.uniform(
                     self.config.xmin + margin,
                     self.config.xmax - margin
                 )
-                y = np.random.uniform(
+                y = self.np_random.uniform(
                     self.config.ymin + margin,
                     self.config.ymax - margin
                 )
@@ -301,11 +301,11 @@ class SourceSeekingEnv(gym.Env):
                     return (x, y)
 
         else:  # random
-            x = np.random.uniform(
+            x = self.np_random.uniform(
                 self.config.xmin + margin,
                 self.config.xmax - margin
             )
-            y = np.random.uniform(
+            y = self.np_random.uniform(
                 self.config.ymin + margin,
                 self.config.ymax - margin
             )
@@ -344,7 +344,7 @@ class SourceSeekingEnv(gym.Env):
             return self._spawn_on_plume()
 
         # Scegli un punto random tra quelli con gradiente forte
-        idx = np.random.randint(len(valid_indices[0]))
+        idx = self.np_random.integers(len(valid_indices[0]))
         y_idx = valid_indices[0][idx]
         x_idx = valid_indices[1][idx]
 
@@ -352,8 +352,8 @@ class SourceSeekingEnv(gym.Env):
         y = float(self.field.y_coords[y_idx])
 
         # Aggiungi piccolo rumore
-        x += np.random.uniform(-5, 5)
-        y += np.random.uniform(-5, 5)
+        x += self.np_random.uniform(-5, 5)
+        y += self.np_random.uniform(-5, 5)
 
         return (x, y)
 
@@ -365,8 +365,8 @@ class SourceSeekingEnv(gym.Env):
 
         for _ in range(max_attempts):
             # Genera punto random attorno alla sorgente
-            angle = np.random.uniform(0, 2 * np.pi)
-            dist = np.random.uniform(50, max_dist)  # minimo 50m dalla sorgente
+            angle = self.np_random.uniform(0, 2 * np.pi)
+            dist = self.np_random.uniform(50, max_dist)  # minimo 50m dalla sorgente
 
             x = self.source_position[0] + dist * np.cos(angle)
             y = self.source_position[1] + dist * np.sin(angle)
@@ -425,7 +425,7 @@ class SourceSeekingEnv(gym.Env):
             return self._spawn_random_sea()
 
         # Scegli un punto random tra quelli vicini alla costa
-        idx = np.random.randint(len(valid_indices[0]))
+        idx = self.np_random.integers(len(valid_indices[0]))
         y_idx = valid_indices[0][idx]
         x_idx = valid_indices[1][idx]
 
@@ -433,8 +433,8 @@ class SourceSeekingEnv(gym.Env):
         y = float(self.field.y_coords[y_idx])
 
         # Aggiungi piccolo rumore
-        x += np.random.uniform(-5, 5)
-        y += np.random.uniform(-5, 5)
+        x += self.np_random.uniform(-5, 5)
+        y += self.np_random.uniform(-5, 5)
 
         return (x, y)
 
@@ -443,8 +443,8 @@ class SourceSeekingEnv(gym.Env):
         max_attempts = 1000
 
         for _ in range(max_attempts):
-            x = np.random.uniform(self.config.xmin, self.config.xmax)
-            y = np.random.uniform(self.config.ymin, self.config.ymax)
+            x = self.np_random.uniform(self.config.xmin, self.config.xmax)
+            y = self.np_random.uniform(self.config.ymin, self.config.ymax)
 
             conc = self.field.get_concentration(x, y)
 
@@ -477,12 +477,12 @@ class SourceSeekingEnv(gym.Env):
             # Nessuna cella valida, fallback vicino alla sorgente
             print("WARNING: No plume cells found, spawning near source")
             return (
-                self.source_position[0] + np.random.uniform(-50, 50),
-                self.source_position[1] + np.random.uniform(-50, 50)
+                self.source_position[0] + self.np_random.uniform(-50, 50),
+                self.source_position[1] + self.np_random.uniform(-50, 50)
             )
 
         # Scegli una cella random tra quelle valide
-        idx = np.random.randint(len(valid_indices[0]))
+        idx = self.np_random.integers(len(valid_indices[0]))
         y_idx = valid_indices[0][idx]
         x_idx = valid_indices[1][idx]
 
@@ -491,8 +491,8 @@ class SourceSeekingEnv(gym.Env):
         y = self.field.y_coords[y_idx]
 
         # Aggiungi piccolo rumore per non essere esattamente sul centro cella
-        x += np.random.uniform(-5, 5)
-        y += np.random.uniform(-5, 5)
+        x += self.np_random.uniform(-5, 5)
+        y += self.np_random.uniform(-5, 5)
 
         return (float(x), float(y))
 
@@ -505,8 +505,8 @@ class SourceSeekingEnv(gym.Env):
 
         for _ in range(max_attempts):
             # Genera punto a distanza random dalla scia
-            angle = np.random.uniform(0, 2 * np.pi)
-            dist = np.random.uniform(min_dist, max_dist)
+            angle = self.np_random.uniform(0, 2 * np.pi)
+            dist = self.np_random.uniform(min_dist, max_dist)
 
             x = plume_x + dist * np.cos(angle)
             y = plume_y + dist * np.sin(angle)

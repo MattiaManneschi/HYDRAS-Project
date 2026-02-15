@@ -71,13 +71,20 @@ def evaluate_and_visualize(
     success_count = 0
     total_reward = 0
     
-    # Load concentration field once if variant is specified
-    concentration_field = None
-    if variant:
-        from utils.data_loader import DataManager
-        dm = DataManager(data_dir=data_dir if data_dir else "data/")
-        run_id = f"CMEMS_{source_id}_{variant}"
-        concentration_field = dm.get_concentration_field(source_id=source_id, run_id=run_id)
+    # Load concentration field only if variant is specified
+    # Otherwise, let SourceSeekingEnv handle loading/randomization directly
+    variant_concentration_field = None
+    if variant and data_dir:
+        from utils.data_loader import NetCDFLoader
+        try:
+            loader = NetCDFLoader(data_dir)
+            nc_files = sorted(Path(data_dir).glob(f"CMEMS_{source_id}_{variant}_*.nc"))
+            if nc_files:
+                variant_concentration_field = loader.load(str(nc_files[0]), concentration_var="Concentration - component 1")
+                print(f"Loaded variant field: {nc_files[0].name}")
+        except Exception as e:
+            print(f"Warning: Could not load variant field: {e}")
+            variant_concentration_field = None
     
     for ep in range(n_episodes):
         print(f"\n  Episode {ep+1}/{n_episodes}...", end=" ")
@@ -102,11 +109,11 @@ def evaluate_and_visualize(
         # Create environment
         env = SourceSeekingEnv(
             config=env_kwargs,
-            concentration_field=concentration_field,
+            concentration_field=variant_concentration_field,  # Use variant field if loaded
             source_id=source_id,
             seed=ep,
             data_dir=data_dir if data_dir else None,
-            randomize_field=randomize and not concentration_field  # Only randomize if no specific field
+            randomize_field=randomize and not variant_concentration_field  # Only randomize if no variant field
         )
         
         # Wrap with vec_normalize if needed

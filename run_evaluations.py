@@ -83,7 +83,7 @@ def run_comprehensive_evaluations(
                     output_dir=str(eval_dir),
                     source_id=source_id,
                     data_dir=data_dir,
-                    randomize=True,
+                    randomize=False,  # Don't randomize when variant is specified - load specific file
                     variant=variant  # Pass specific variant (01, 02, 03, 04)
                 )
                 

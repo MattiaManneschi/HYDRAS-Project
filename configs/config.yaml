@@ -65,7 +65,7 @@ environment:
     boundary_penalty: -10.0
     source_threshold: 0.8  # frazione della concentrazione max per "trovato"
     distance_threshold: 100  # m - distanza dalla sorgente per "trovato"
-    auto_detect_source: true  # USA LA SORGENTE RILEVATA DAL MAX CONCENTRAZIONE
+    auto_detect_source: true  # Usa il max concentrazione globale come fonte
 
   # Normalization
   normalize_obs: true

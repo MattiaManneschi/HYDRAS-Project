@@ -239,7 +239,7 @@ def create_env(
         n_sensors=agent_config.get('n_concentration_samples', 8),
         dt=env_config.get('dt', 10),
         max_steps=env_config.get('max_episode_steps', 500),
-        spawn_mode=agent_config.get('spawn_mode', 'random'),
+        spawn_mode=agent_config.get('spawn_mode', 'on_plume'),
         source_found_reward=env_config.get('reward', {}).get('source_reached_bonus', 100),
         step_penalty=env_config.get('reward', {}).get('step_penalty', -0.1),
         boundary_penalty=env_config.get('reward', {}).get('boundary_penalty', -10),
