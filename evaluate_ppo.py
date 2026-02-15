@@ -31,7 +31,8 @@ def evaluate_and_visualize(
     output_dir: str = "evaluation_plots",
     source_id: str = "S1",
     data_dir: str = "data/",
-    randomize: bool = False
+    randomize: bool = False,
+    variant: str = None
 ):
     """
     Valuta il modello e crea visualizzazioni delle traiettorie.
@@ -44,6 +45,7 @@ def evaluate_and_visualize(
         source_id: ID sorgente (S1, S2, S3)
         data_dir: Directory con file NC
         randomize: Se True, randomizza i file NC
+        variant: Variante specifica (01, 02, 03, 04) per caricare un file .nc particolare
     """
     
     # Setup output directory
@@ -69,6 +71,14 @@ def evaluate_and_visualize(
     success_count = 0
     total_reward = 0
     
+    # Load concentration field once if variant is specified
+    concentration_field = None
+    if variant:
+        from utils.data_loader import DataManager
+        dm = DataManager(data_dir=data_dir if data_dir else "data/")
+        run_id = f"CMEMS_{source_id}_{variant}"
+        concentration_field = dm.get_concentration_field(source_id=source_id, run_id=run_id)
+    
     for ep in range(n_episodes):
         print(f"\n  Episode {ep+1}/{n_episodes}...", end=" ")
         
@@ -92,11 +102,11 @@ def evaluate_and_visualize(
         # Create environment
         env = SourceSeekingEnv(
             config=env_kwargs,
-            concentration_field=None,
+            concentration_field=concentration_field,
             source_id=source_id,
             seed=ep,
             data_dir=data_dir if data_dir else None,
-            randomize_field=randomize
+            randomize_field=randomize and not concentration_field  # Only randomize if no specific field
         )
         
         # Wrap with vec_normalize if needed
