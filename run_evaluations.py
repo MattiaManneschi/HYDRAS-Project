@@ -64,35 +64,29 @@ def run_comprehensive_evaluations(
     for idx, (source_id, variant) in enumerate(scenarios, 1):
         scenario_name = f"{source_id}_{variant}"
         scenario_dir = eval_base_dir / source_id / scenario_name
+        scenario_dir.mkdir(parents=True, exist_ok=True)
         
         print(f"[{idx}/{total_scenarios}] Evaluating {scenario_name}...")
         
-        # Create subdirectories for each evaluation
-        for eval_num in range(1, 4):
-            eval_dir = scenario_dir / f"eval_{eval_num}"
-            eval_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            # Run evaluation with 3 episodes directly (episode_01, 02, 03)
+            evaluate_and_visualize(
+                model_path=model_path,
+                config_path=config_path,
+                n_episodes=3,  # 3 episodes per scenario
+                output_dir=str(scenario_dir),
+                source_id=source_id,
+                data_dir=data_dir,
+                randomize=False,  # Don't randomize when variant is specified - load specific file
+                variant=variant  # Pass specific variant (01, 02, 03, 04)
+            )
             
-            try:
-                print(f"  → eval_{eval_num}...", end=" ", flush=True)
-                
-                # Run evaluation with specific variant
-                evaluate_and_visualize(
-                    model_path=model_path,
-                    config_path=config_path,
-                    n_episodes=1,  # 1 episode per eval folder
-                    output_dir=str(eval_dir),
-                    source_id=source_id,
-                    data_dir=data_dir,
-                    randomize=False,  # Don't randomize when variant is specified - load specific file
-                    variant=variant  # Pass specific variant (01, 02, 03, 04)
-                )
-                
-                print("✓")
-                completed += 1
-                
-            except Exception as e:
-                print(f"✗ ERROR: {e}")
-                failed += 1
+            print("✓")
+            completed += 3
+            
+        except Exception as e:
+            print(f"✗ ERROR: {e}")
+            failed += 3
     
     # Summary
     print(f"\n{'='*70}")
