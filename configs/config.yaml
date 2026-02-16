@@ -55,7 +55,7 @@ agent:
 environment:
   # Time settings
   dt: 10  # s - timestep della simulazione
-  max_episode_steps: 500  # passi massimi per episodio
+  max_episode_steps: 8640  # passi massimi per episodio (24 ore: 86400s / 10s = 8640 steps)
 
   # Reward shaping
   reward:
@@ -64,7 +64,7 @@ environment:
     step_penalty: -0.1
     boundary_penalty: -10.0
     source_threshold: 0.8  # frazione della concentrazione max per "trovato"
-    distance_threshold: 100  # m - distanza dalla sorgente per "trovato"
+    distance_threshold: 120  # m - distanza dalla sorgente per "trovato"
     auto_detect_source: true  # Usa il max concentrazione globale come fonte
 
   # Normalization
