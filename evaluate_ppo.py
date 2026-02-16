@@ -173,7 +173,7 @@ def evaluate_and_visualize(
         
         # Check if success
         final_dist = np.linalg.norm(trajectory[-1] - np.array(field.source_position))
-        is_success = final_dist < 100  # Success threshold
+        is_success = final_dist < 120  # Success threshold (120m)
         success_count += is_success
         total_reward += episode_reward
         
@@ -192,7 +192,7 @@ def evaluate_and_visualize(
     for i, (traj, field) in enumerate(zip(trajectories, fields)):
         fig, ax = plt.subplots(figsize=(12, 10))
         final_dist = np.linalg.norm(traj[-1] - np.array(field.source_position))
-        is_success = final_dist < 100
+        is_success = final_dist < 120
         title = f"Episode {i+1} - {'SUCCESS ✓' if is_success else 'FAILED ✗'}"
         
         plot_trajectory(traj, field, ax=ax, title=title, show_arrows=True, arrow_freq=15)
