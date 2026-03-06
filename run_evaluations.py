@@ -351,105 +351,88 @@ def run_hard_evaluations(
 
 
 def main():
-    import argparse
+    """
+    Run evaluations directly with default settings.
+    No command-line arguments needed - just click "Run"!
     
-    parser = argparse.ArgumentParser(
-        description="Run evaluations on trained PPO model"
-    )
+    ============ CONFIGURAZIONE ============
+    Modifica queste variabili per cambiare il comportamento:
+    """
     
-    # Mode selection
-    parser.add_argument(
-        "--mode",
-        choices=["comprehensive", "hard"],
-        default="comprehensive",
-        help="Evaluation mode: comprehensive (all scenarios) or hard (random with far_from_source)"
-    )
+    # ========== IMPOSTAZIONI PRINCIPALI ==========
+    # Scegli la modalità: "comprehensive" o "hard"
+    MODE = "comprehensive"
     
-    # Model arguments
-    parser.add_argument(
-        "--model",
-        help="Path to trained model"
-    )
-    parser.add_argument(
-        "--config",
-        default="configs/config.yaml",
-        help="Path to config file"
-    )
-    parser.add_argument(
-        "--output",
-        help="Output directory"
-    )
-    parser.add_argument(
-        "--data-dir",
-        default="data/",
-        help="Data directory containing NC files"
-    )
+    # Percorso del modello (verrà cercato automaticamente se non specificato)
+    MODEL_PATH = None  # Auto-detect
     
-    # Comprehensive-specific arguments
-    parser.add_argument(
-        "--model-name",
-        help="Model name for folder naming (comprehensive mode)"
-    )
+    # Directory dei dati
+    DATA_DIR = "data/"
     
-    # Hard-specific arguments
-    parser.add_argument(
-        "--evaluations",
-        type=int,
-        default=20,
-        help="Number of evaluations (hard mode)"
-    )
-    parser.add_argument(
-        "--spawn-mode",
-        default="far_from_source",
-        choices=["far_from_source", "on_plume", "near_plume", "random", "near_source", "strong_gradient"],
-        help="Spawn mode for agent (hard mode)"
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed (hard mode)"
-    )
-    parser.add_argument(
-        "--episodes-per-file",
-        type=int,
-        default=1,
-        help="Number of episodes per NC file (hard mode with sequential)"
-    )
-    parser.add_argument(
-        "--sequential",
-        action="store_true",
-        help="Use sequential evaluation on all NC files instead of random selection (hard mode)"
-    )
+    # File di configurazione
+    CONFIG_PATH = "configs/config.yaml"
     
-    args = parser.parse_args()
+    # ========== IMPOSTAZIONI COMPREHENSIVE MODE ==========
+    OUTPUT_DIR_COMPREHENSIVE = "evaluations"
+    MODEL_NAME = None  # Auto-detect from model path
     
-    if args.mode == "comprehensive":
-        model_path = args.model or "trained_models/ppo_MULTI_ALL_20260214_161241/models/best/best_model.zip"
-        output_dir = args.output or "evaluations"
-        model_name = args.model_name or "ppo_MULTI_ALL_20260214_161241"
+    # ========== IMPOSTAZIONI HARD MODE ==========
+    OUTPUT_DIR_HARD = "evaluations_hard"
+    N_EVALUATIONS = 20
+    SPAWN_MODE = "on_plumess"  # Opzioni: "far_from_source", "on_plume", "near_plume", "random", "near_source", "strong_gradient"
+    SEED = 42
+    SEQUENTIAL = False  # True = evalua tutti i file NC; False = selezione random
+    EPISODES_PER_FILE = 1
+    
+    # ========== AUTO-DETECT MODEL ==========
+    if MODEL_PATH is None:
+        # Cerca modelli disponibili in ordine di priorità
+        model_candidates = [
+            "trained_models/S1_only_model/models/best/best_model.zip",
+            "trained_models/multi_source_model/models/final_model.zip",
+            "trained_models/S1_only_model/models/final_model.zip",
+        ]
+        for candidate in model_candidates:
+            if Path(candidate).exists():
+                MODEL_PATH = candidate
+                break
         
+        if MODEL_PATH is None:
+            print("ERRORE: Nessun modello trovato!")
+            print("Modelli cercati:")
+            for c in model_candidates:
+                print(f"  - {c}")
+            sys.exit(1)
+    
+    print(f"\n{'='*70}")
+    print(f"AVVIO EVALUATIONS - Modalità: {MODE}")
+    print(f"Modello: {MODEL_PATH}")
+    print(f"{'='*70}\n")
+    
+    # Auto-detect model name
+    if MODEL_NAME is None:
+        MODEL_NAME = Path(MODEL_PATH).parent.parent.parent.name
+    
+    # Run evaluation
+    if MODE == "comprehensive":
         success = run_comprehensive_evaluations(
-            model_path=model_path,
-            config_path=args.config,
-            base_output_dir=output_dir,
-            data_dir=args.data_dir,
-            model_name=model_name
+            model_path=MODEL_PATH,
+            config_path=CONFIG_PATH,
+            base_output_dir=OUTPUT_DIR_COMPREHENSIVE,
+            data_dir=DATA_DIR,
+            model_name=MODEL_NAME
         )
     else:  # hard
-        model_path = args.model or "trained_models/multi_source_model/models/final_model.zip"
-        output_dir = args.output or "evaluations_hard"
-        
         success = run_hard_evaluations(
-            model_path=model_path,
-            config_path=args.config,
-            n_evaluations=args.evaluations,
-            output_dir=output_dir,
-            data_dir=args.data_dir,
-            spawn_mode=args.spawn_mode,
-            seed=args.seed,
-            random_selection=not args.sequential,
-            episodes_per_file=args.episodes_per_file
+            model_path=MODEL_PATH,
+            config_path=CONFIG_PATH,
+            n_evaluations=N_EVALUATIONS,
+            output_dir=OUTPUT_DIR_HARD,
+            data_dir=DATA_DIR,
+            spawn_mode=SPAWN_MODE,
+            seed=SEED,
+            random_selection=not SEQUENTIAL,
+            episodes_per_file=EPISODES_PER_FILE
         )
     
     sys.exit(0 if success else 1)
