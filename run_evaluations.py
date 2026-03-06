@@ -379,7 +379,7 @@ def main():
     # ========== IMPOSTAZIONI HARD MODE ==========
     OUTPUT_DIR_HARD = "evaluations_hard"
     N_EVALUATIONS = 20
-    SPAWN_MODE = "on_plumess"  # Opzioni: "far_from_source", "on_plume", "near_plume", "random", "near_source", "strong_gradient"
+    SPAWN_MODE = "on_plume"  # Opzioni: "far_from_source", "on_plume", "near_plume", "random", "near_source", "strong_gradient"
     SEED = 42
     SEQUENTIAL = False  # True = evalua tutti i file NC; False = selezione random
     EPISODES_PER_FILE = 1
@@ -388,8 +388,8 @@ def main():
     if MODEL_PATH is None:
         # Cerca modelli disponibili in ordine di priorità
         model_candidates = [
-            "trained_models/S1_only_model/models/best/best_model.zip",
             "trained_models/multi_source_model/models/final_model.zip",
+            "trained_models/S1_only_model/models/best/best_model.zip",
             "trained_models/S1_only_model/models/final_model.zip",
         ]
         for candidate in model_candidates:
