@@ -657,7 +657,7 @@ class SourceSeekingEnv(gym.Env):
         vel_magnitude = np.linalg.norm(velocity)
 
         # ============================================================
-        # 1. BONUS SORGENTE RAGGIUNTA (+100 + time bonus)
+        # 1. BONUS SORGENTE RAGGIUNTA
         # ============================================================
         if self._check_source_reached():
             time_bonus = max(0, (self.config.max_steps - self.steps) / self.config.max_steps * 50)
@@ -684,8 +684,7 @@ class SourceSeekingEnv(gym.Env):
             info['boundary'] = self.config.boundary_penalty
 
         # ============================================================
-        # 4. REWARD GRADIENTE (gradient following) - PRINCIPALE
-        #    Il gradiente fornisce il segnale direzionale verso la sorgente
+        # 4. REWARD GRADIENTE (gradient following)
         # ============================================================
         if grad_magnitude > 1e-6 and vel_magnitude > 1e-6 and current_conc > 0.1:
             # Segui il gradiente se siamo sopra lo 0.1 di concentrazione
@@ -701,8 +700,7 @@ class SourceSeekingEnv(gym.Env):
             info['gradient_reward'] = 0.0
 
         # ============================================================
-        # 5. REWARD DISTANZA (distance accuracy) - PRINCIPALE
-        #    La distanza dalla sorgente è il segnale più affidabile
+        # 5. REWARD DISTANZA (distance accuracy)
         # ============================================================
         distance_improvement = self.prev_distance - current_distance
         distance_reward = distance_improvement * 2.0 * self.config.distance_reward_multiplier  # SCALABILE
@@ -711,7 +709,6 @@ class SourceSeekingEnv(gym.Env):
 
         # ============================================================
         # 6. BONUS CONCENTRAZIONE
-        #    Piccolo bonus per essere in zona con concentrazione
         # ============================================================
         if current_conc > 0.1:
             max_conc = max(self.field.max_concentration, 1.0)
