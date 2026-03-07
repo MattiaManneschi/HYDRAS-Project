@@ -6,7 +6,6 @@ Replaces the previous evaluate_ppo.py and run_evaluations.py.
 """
 
 import sys
-import random
 import numpy as np
 import matplotlib.pyplot as plt
 import yaml
@@ -144,11 +143,6 @@ def check_success(trajectory: np.ndarray, field) -> Tuple[bool, float]:
     final_dist = float(np.linalg.norm(trajectory[-1] - np.array(field.source_position)))
     return final_dist < SUCCESS_THRESHOLD_M, final_dist
 
-
-# ---------------------------------------------------------------------------
-# Modalità 1: evaluate_and_visualize (ex evaluate_ppo.py)
-# ---------------------------------------------------------------------------
-
 def evaluate_and_visualize(
     model_path: str,
     config_path: str = "utils/config.yaml",
@@ -235,12 +229,7 @@ def evaluate_and_visualize(
     print(f"Trajectory plots saved to: {output_path}")
     return output_path
 
-
-# ---------------------------------------------------------------------------
-# Modalità 2: comprehensive (12 scenari × 3 episodi)
-# ---------------------------------------------------------------------------
-
-def run_comprehensive_evaluations(
+def run_evaluations(
     model_path: str,
     config_path: str = "utils/config.yaml",
     base_output_dir: str = "evaluations",
@@ -298,195 +287,38 @@ def run_comprehensive_evaluations(
 
 
 # ---------------------------------------------------------------------------
-# Modalità 3: hard evaluations (spawn difficile, file random)
-# ---------------------------------------------------------------------------
-
-def run_hard_evaluations(
-    model_path: str,
-    config_path: str = "utils/config.yaml",
-    n_evaluations: int = 20,
-    output_dir: str = "evaluations_hard",
-    data_dir: str = "data/",
-    seed: int = 42,
-    random_selection: bool = True,
-    episodes_per_file: int = 1
-):
-    """Evaluations con selezione file random/sequenziale."""
-    random.seed(seed)
-    np.random.seed(seed)
-
-    if not Path(model_path).exists():
-        print(f"ERROR: Model not found at {model_path}")
-        return False
-
-    config = load_config(config_path)
-    model, vec_norm_path, has_vec_norm = load_model_and_normalizer(model_path)
-    env_cfg = make_env_config(config)
-
-    # Trova file NC
-    nc_files = sorted(Path(data_dir).glob("CMEMS_*.nc"))
-    if not nc_files:
-        print(f"ERROR: No NC files found in {data_dir}")
-        return False
-
-    print(f"\nFound {len(nc_files)} NC files")
-
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-
-    eval_count = n_evaluations if random_selection else len(nc_files)
-    files_to_eval = None if random_selection else nc_files
-
-    print(f"\n{'='*70}")
-    print(f"Running Hard Evaluations — spawn: on_plume")
-    print(f"Selection: {'Random' if random_selection else 'Sequential'}, Total: {eval_count}")
-    print(f"{'='*70}\n")
-
-    completed, success_count = 0, 0
-    total_reward = 0.0
-
-    for eval_idx in range(eval_count):
-        nc_file = random.choice(nc_files) if random_selection else files_to_eval[eval_idx]
-
-        source_id = nc_file.name.split('_')[1]
-        variant = nc_file.name.split('_')[2]
-        eval_name = f"{source_id}_{variant}"
-
-        print(f"[{eval_idx+1}/{eval_count}] {nc_file.name}")
-
-        eval_dir = output_path / eval_name
-        eval_dir.mkdir(parents=True, exist_ok=True)
-
-        try:
-            loader = NetCDFLoader(data_dir)
-            concentration_field = loader.load(str(nc_file), concentration_var="Concentration - component 1")
-
-            for episode_num in range(1, episodes_per_file + 1):
-                print(f"  Episode {episode_num}/{episodes_per_file}...", end=" ")
-
-                env = SourceSeekingEnv(
-                    config=env_cfg,
-                    concentration_field=concentration_field,
-                    source_id=source_id,
-                    seed=eval_idx * 100 + episode_num,
-                    data_dir=data_dir,
-                    randomize_field=False
-                )
-                env, is_vec = wrap_env(env, has_vec_norm, vec_norm_path)
-
-                traj, ep_reward, step_count, info = run_episode(model, env, is_vec)
-                field = get_field(env, is_vec)
-                is_success, final_dist = check_success(traj, field)
-
-                success_count += is_success
-                total_reward += ep_reward
-                completed += 1
-
-                status = "✓ SUCCESS" if is_success else "✗ FAILED"
-                print(f"{status} (steps={step_count}, reward={ep_reward:.1f}, dist={final_dist:.1f}m)")
-
-                # Salva solo trajectory plot
-                fig, ax = plt.subplots(figsize=(12, 10))
-                title = f"{eval_name} Ep{episode_num} - {'SUCCESS ✓' if is_success else 'FAILED ✗'} (steps={step_count})"
-                plot_trajectory(traj, field, ax=ax, title=title, show_arrows=True, arrow_freq=50)
-                plt.savefig(eval_dir / f"trajectory_{episode_num}.png", dpi=150, bbox_inches='tight')
-                plt.close()
-
-        except Exception as e:
-            print(f"✗ ERROR: {e}")
-            import traceback
-            traceback.print_exc()
-
-    print(f"\n{'='*70}")
-    print(f"Hard Evaluation Summary")
-    print(f"Completed: {completed}")
-    if completed > 0:
-        print(f"Success rate: {success_count}/{completed} ({100*success_count/completed:.1f}%)")
-        print(f"Mean reward: {total_reward/completed:.1f}")
-    print(f"Output: {output_path}")
-    print(f"{'='*70}\n")
-    return True
-
-
-# ---------------------------------------------------------------------------
 # Main (click "Run" per avviare)
 # ---------------------------------------------------------------------------
 
 def main():
-    """
-    ============ CONFIGURAZIONE ============
-    Modifica queste variabili per cambiare il comportamento:
-    """
-
-    # Scegli la modalità: "comprehensive", "hard", "single"
-    MODE = "comprehensive"
-
-    MODEL_PATH = None  # Auto-detect
     DATA_DIR = "data/"
     CONFIG_PATH = "utils/config.yaml"
+    OUTPUT_DIR = "evaluations"
 
-    # Comprehensive
-    OUTPUT_DIR_COMPREHENSIVE = "evaluations"
-    MODEL_NAME = None
-
-    # Hard
-    OUTPUT_DIR_HARD = "evaluations_hard"
-    N_EVALUATIONS = 20
-    SEED = 42
-    SEQUENTIAL = False
-    EPISODES_PER_FILE = 1
-
-    # Single
-    OUTPUT_DIR_SINGLE = "evaluation_plots"
-    SOURCE_ID = "S1"
-    N_EPISODES = 3
-
-    # Auto-detect model
-    if MODEL_PATH is None:
-        for candidate in [
-            "trained_models/multi_source_model/models/final_model.zip",
-            "trained_models/S1_only_model/models/best/best_model.zip",
-            "trained_models/S1_only_model/models/final_model.zip",
-        ]:
-            if Path(candidate).exists():
-                MODEL_PATH = candidate
-                break
-        if MODEL_PATH is None:
-            print("ERRORE: Nessun modello trovato!")
-            sys.exit(1)
-
-    if MODEL_NAME is None:
-        MODEL_NAME = Path(MODEL_PATH).parent.parent.parent.name
-
-    print(f"\n{'='*70}")
-    print(f"AVVIO EVALUATIONS - Modalità: {MODE}")
-    print(f"Modello: {MODEL_PATH}")
-    print(f"{'='*70}\n")
-
-    if MODE == "comprehensive":
-        success = run_comprehensive_evaluations(
-            model_path=MODEL_PATH, config_path=CONFIG_PATH,
-            base_output_dir=OUTPUT_DIR_COMPREHENSIVE,
-            data_dir=DATA_DIR, model_name=MODEL_NAME
-        )
-    elif MODE == "hard":
-        success = run_hard_evaluations(
-            model_path=MODEL_PATH, config_path=CONFIG_PATH,
-            n_evaluations=N_EVALUATIONS, output_dir=OUTPUT_DIR_HARD,
-            data_dir=DATA_DIR, seed=SEED,
-            random_selection=not SEQUENTIAL, episodes_per_file=EPISODES_PER_FILE
-        )
-    elif MODE == "single":
-        success = evaluate_and_visualize(
-            model_path=MODEL_PATH, config_path=CONFIG_PATH,
-            n_episodes=N_EPISODES, output_dir=OUTPUT_DIR_SINGLE,
-            source_id=SOURCE_ID, data_dir=DATA_DIR
-        )
-    else:
-        print(f"Modalità sconosciuta: {MODE}")
+    trained_dir = Path("trained_models")
+    if not trained_dir.exists():
+        print("ERRORE: Directory trained_models/ non trovata!")
         sys.exit(1)
 
-    sys.exit(0 if success else 1)
+    candidates = sorted(trained_dir.glob("*/models/final_model.zip"))
+    candidates += sorted(trained_dir.glob("*/models/best/best_model.zip"))
+
+    if not candidates:
+        print("ERRORE: Nessun modello trovato in trained_models/!")
+        sys.exit(1)
+
+    MODEL_PATH = str(max(candidates, key=lambda p: p.stat().st_mtime))
+    MODEL_NAME = Path(MODEL_PATH).parent.parent.parent.name
+
+    print(f"Modello selezionato: {MODEL_PATH}")
+
+    run_evaluations(
+        model_path=MODEL_PATH,
+        config_path=CONFIG_PATH,
+        base_output_dir=OUTPUT_DIR,
+        data_dir=DATA_DIR,
+        model_name=MODEL_NAME,
+    )
 
 
 if __name__ == "__main__":

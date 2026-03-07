@@ -5,7 +5,6 @@ utilizzando Proximal Policy Optimization (PPO).
 """
 
 import sys
-import argparse
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, Any, Callable
@@ -97,7 +96,6 @@ def load_config(config_path: str) -> Dict[str, Any]:
 def create_env(
     config: Dict[str, Any],
     concentration_field: Optional[ConcentrationField] = None,
-    source_id: str = "S1",
     seed: Optional[int] = None,
     data_dir: Optional[str] = None,
     randomize_field: bool = False
@@ -132,7 +130,6 @@ def create_env(
     env = SourceSeekingEnv(
         config=env_kwargs,
         concentration_field=concentration_field,
-        source_id=source_id,
         data_dir=data_dir,
         randomize_field=randomize_field
     )
@@ -146,22 +143,14 @@ def create_env(
 def make_env_fn(
     config: Dict[str, Any],
     concentration_field: Optional[ConcentrationField],
-    source_id: str,
     rank: int,
     seed: int,
     data_dir: Optional[str] = None,
-    randomize_field: bool = False,
-    randomize_source_id: bool = False
+    randomize_field: bool = False
 ) -> Callable[[], gym.Env]:
     """Factory function per la creazione di ambienti paralleli."""
     def _init() -> gym.Env:
-        # Determina il source_id da usare
-        if randomize_source_id:
-            actual_source_id = np.random.choice(['S1', 'S2', 'S3'])
-        else:
-            actual_source_id = source_id
-        
-        env = create_env(config, concentration_field, actual_source_id, seed + rank, data_dir, randomize_field)
+        env = create_env(config, concentration_field, seed + rank, data_dir, randomize_field)
         env.reset(seed=seed + rank)
         return env
     return _init
@@ -170,15 +159,11 @@ def make_env_fn(
 def train(
     config_path: str = "utils/config.yaml",
     output_dir: str = "trained_models",
-    source_id: str = "S1",
     n_envs: int = 4,
     total_timesteps: Optional[int] = None,
     seed: int = 42,
     resume_from: Optional[str] = None,
-    use_nc_data: bool = False,
-    nc_file: Optional[str] = None,
     data_dir: Optional[str] = None,
-    randomize_source_id: bool = False
 ):
     """
     Funzione principale di training.
@@ -186,14 +171,11 @@ def train(
     Args:
         config_path: Path al file di configurazione
         output_dir: Directory per salvare i risultati
-        source_id: ID della sorgente da usare
         n_envs: Numero di ambienti paralleli
         total_timesteps: Timesteps totali (override config)
         seed: Seed per riproducibilità
         resume_from: Path a checkpoint per riprendere training
-        use_nc_data: Usa dati NetCDF invece di sintetici
-        nc_file: Path al file NC specifico
-        data_dir: Directory con tutti i file NC (abilita randomizzazione)
+        data_dir: Directory con file NC (sceglie random ad ogni episodio)
     """
     if not STABLE_BASELINES_AVAILABLE:
         raise ImportError(
@@ -207,10 +189,7 @@ def train(
 
     # Setup directories
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    if randomize_source_id:
-        run_name = f"ppo_MULTI_ALL_{timestamp}" if data_dir else f"ppo_MULTI_{timestamp}"
-    else:
-        run_name = f"ppo_{source_id}_ALL_{timestamp}" if data_dir else f"ppo_{source_id}_{timestamp}"
+    run_name = f"ppo_{timestamp}"
     run_dir = Path(output_dir) / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -228,8 +207,6 @@ def train(
     print(f"=" * 60)
     print(f"Run name: {run_name}")
     print(f"Output directory: {run_dir}")
-    source_mode = "S1+S2+S3 (multi-source)" if randomize_source_id else ("ALL (randomized)" if data_dir else source_id)
-    print(f"Source ID: {source_mode}")
     print(f"Number of parallel environments: {n_envs}")
 
     # Carica dati
@@ -237,24 +214,9 @@ def train(
     randomize_field = False
 
     if data_dir:
-        # Usa tutti i file NC con randomizzazione
         print(f"\nUsing ALL NC files from: {data_dir}")
         print("  Mode: Random field each episode")
         randomize_field = True
-        # Il DataManager verrà creato in ogni ambiente
-    elif use_nc_data and nc_file:
-        print(f"\nLoading NetCDF data from: {nc_file}")
-        dm = DataManager(data_dir=Path(nc_file).parent)
-        concentration_field = dm.get_concentration_field(
-            source_id=source_id,
-            run_id=Path(nc_file).stem
-        )
-        # Imposta timestep dove il plume è sviluppato
-        if concentration_field.n_timesteps > 1:
-            mid_time = concentration_field.n_timesteps // 2
-            concentration_field.set_time(mid_time)
-        print(f"  Field shape: {concentration_field.data.shape}")
-        print(f"  Max concentration: {concentration_field.max_concentration:.2f}")
     else:
         print("\nUsing synthetic concentration field")
 
@@ -264,7 +226,7 @@ def train(
     timesteps = total_timesteps or training_config.get('total_timesteps', 1000000)
 
     env_fns = [
-        make_env_fn(config, concentration_field, source_id, i, seed, data_dir, randomize_field, randomize_source_id)
+        make_env_fn(config, concentration_field, i, seed, data_dir, randomize_field)
         for i in range(n_envs)
     ]
 
@@ -286,7 +248,7 @@ def train(
 
     # Crea ambiente di valutazione (usa primo file NC o sintetico, non random)
     eval_env = DummyVecEnv([
-        make_env_fn(config, concentration_field, source_id, 0, seed + 1000, data_dir, False)
+        make_env_fn(config, concentration_field, 0, seed + 1000, data_dir, False)
     ])
     if config.get('environment', {}).get('normalize_obs', True):
         eval_env = VecNormalize(
@@ -455,211 +417,15 @@ def train(
     return model, run_dir
 
 
-def _evaluate_cli(
-    model_path: str,
-    config_path: str = "utils/config.yaml",
-    source_id: str = "S1",
-    n_episodes: int = 10,
-    render: bool = False,
-    save_trajectories: bool = True,
-    data_dir: Optional[str] = None,
-    randomize: bool = False
-):
-    """Valuta un modello — delega a evaluate.py."""
-    from evaluate import evaluate_and_visualize
-    return evaluate_and_visualize(
-        model_path=model_path,
-        config_path=config_path,
-        n_episodes=n_episodes,
-        output_dir="evaluation_plots",
-        source_id=source_id,
-        data_dir=data_dir or "data/",
-        randomize=randomize,
-    )
-
-
-def _validate_cli(
-    model_path: str,
-    data_dir: str,
-    n_episodes_per_file: int = 5,
-    config_path: str = "utils/config.yaml"
-):
-    """Validazione completa — delega a evaluate.py run_hard_evaluations."""
-    from evaluate import run_hard_evaluations
-    return run_hard_evaluations(
-        model_path=model_path,
-        config_path=config_path,
-        output_dir="evaluations_validate",
-        data_dir=data_dir,
-        random_selection=False,
-        episodes_per_file=n_episodes_per_file
-    )
-
-
 def main():
-    parser = argparse.ArgumentParser(
-        description="HYDRAS Source Seeking - PPO Training"
+    """Avvia il training con configurazione fissa."""
+    train(
+        config_path="utils/config.yaml",
+        output_dir="trained_models",
+        n_envs=4,
+        seed=42,
+        data_dir="data/",
     )
-
-    subparsers = parser.add_subparsers(dest='command', help='Commands')
-
-    # Train command
-    train_parser = subparsers.add_parser('train', help='Train a new model')
-    train_parser.add_argument(
-        '--config', '-c',
-        default='utils/config.yaml',
-        help='Path to config file'
-    )
-    train_parser.add_argument(
-        '--output', '-o',
-        default='trained_models',
-        help='Output directory'
-    )
-    train_parser.add_argument(
-        '--source', '-s',
-        default='S1',
-        choices=['S1', 'S2', 'S3'],
-        help='Source ID (ignored if --data-dir is used with randomization)'
-    )
-    train_parser.add_argument(
-        '--n-envs', '-n',
-        type=int,
-        default=4,
-        help='Number of parallel environments'
-    )
-    train_parser.add_argument(
-        '--timesteps', '-t',
-        type=int,
-        default=None,
-        help='Total timesteps (overrides config)'
-    )
-    train_parser.add_argument(
-        '--seed',
-        type=int,
-        default=42,
-        help='Random seed'
-    )
-    train_parser.add_argument(
-        '--resume',
-        default=None,
-        help='Path to checkpoint to resume from'
-    )
-    train_parser.add_argument(
-        '--nc-file',
-        default=None,
-        help='Path to single NetCDF file'
-    )
-    train_parser.add_argument(
-        '--data-dir',
-        default=None,
-        help='Directory with multiple NC files (enables randomization)'
-    )
-    train_parser.add_argument(
-        '--randomize-source',
-        action='store_true',
-        help='Randomize source ID (S1, S2, S3) for each episode'
-    )
-
-    # Evaluate command
-    eval_parser = subparsers.add_parser('eval', help='Evaluate a trained model')
-    eval_parser.add_argument(
-        'model',
-        help='Path to trained model'
-    )
-    eval_parser.add_argument(
-        '--config', '-c',
-        default='utils/config.yaml',
-        help='Path to config file'
-    )
-    eval_parser.add_argument(
-        '--source', '-s',
-        default='S1',
-        choices=['S1', 'S2', 'S3'],
-        help='Source ID (ignored if --data-dir with --randomize)'
-    )
-    eval_parser.add_argument(
-        '--episodes', '-n',
-        type=int,
-        default=10,
-        help='Number of evaluation episodes'
-    )
-    eval_parser.add_argument(
-        '--render', '-r',
-        action='store_true',
-        help='Render episodes'
-    )
-    eval_parser.add_argument(
-        '--data-dir',
-        default=None,
-        help='Directory with NC files'
-    )
-    eval_parser.add_argument(
-        '--randomize',
-        action='store_true',
-        help='Use random NC file for each episode'
-    )
-
-    # Validate command (test su tutti i file NC)
-    val_parser = subparsers.add_parser('validate', help='Full validation on all NC files')
-    val_parser.add_argument(
-        'model',
-        help='Path to trained model'
-    )
-    val_parser.add_argument(
-        '--data-dir', '-d',
-        required=True,
-        help='Directory with NC files'
-    )
-    val_parser.add_argument(
-        '--episodes-per-file', '-n',
-        type=int,
-        default=5,
-        help='Episodes per NC file'
-    )
-    val_parser.add_argument(
-        '--config', '-c',
-        default='utils/config.yaml',
-        help='Path to config file'
-    )
-
-    args = parser.parse_args()
-
-    if args.command == 'train':
-        train(
-            config_path=args.config,
-            output_dir=args.output,
-            source_id=args.source,
-            n_envs=args.n_envs,
-            total_timesteps=args.timesteps,
-            seed=args.seed,
-            resume_from=args.resume,
-            use_nc_data=args.nc_file is not None or args.data_dir is not None,
-            nc_file=args.nc_file,
-            data_dir=args.data_dir,
-            randomize_source_id=args.randomize_source
-        )
-
-    elif args.command == 'eval':
-        _evaluate_cli(
-            model_path=args.model,
-            config_path=args.config,
-            source_id=args.source,
-            n_episodes=args.episodes,
-            render=args.render,
-            data_dir=args.data_dir,
-            randomize=args.randomize
-        )
-
-    elif args.command == 'validate':
-        _validate_cli(
-            model_path=args.model,
-            data_dir=args.data_dir,
-            n_episodes_per_file=args.episodes_per_file,
-            config_path=args.config
-        )
-
-    else:
-        parser.print_help()
 
 
 if __name__ == "__main__":

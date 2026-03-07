@@ -155,7 +155,6 @@ class SourceSeekingEnv(gym.Env):
                 use_synthetic=True,
                 domain_config=self.domain,
                 preload_all=False,  # NON precaricare - carica on-demand per risparmiare RAM
-                source_id_filter=source_id  # Filtra solo file della sorgente specificata
             )
 
         # Campo di concentrazione
