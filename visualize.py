@@ -6,11 +6,11 @@ e le performance dell'agente.
 
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.patches import Circle, FancyArrowPatch
+from matplotlib.patches import Circle
 from matplotlib.colors import LinearSegmentedColormap
 import matplotlib.animation as animation
 from pathlib import Path
-from typing import Optional, List, Tuple, Dict, Any
+from typing import Optional, List, Tuple
 import sys
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -239,7 +239,7 @@ def plot_distance_to_source(
     
     ax.plot(steps, distances, 'b-', linewidth=2)
     ax.fill_between(steps, distances, alpha=0.2)
-    ax.axhline(y=30, color='green', linestyle='--', label='Success threshold (30m)')
+    ax.axhline(y=100, color='green', linestyle='--', label='Success threshold (100m)')
     
     ax.set_xlabel('Step', fontsize=12)
     ax.set_ylabel('Distance to Source (m)', fontsize=12)
@@ -278,7 +278,7 @@ def plot_training_summary(
     concentrations = [field.get_concentration(p[0], p[1]) for p in trajectory]
     max_conc = max(concentrations)
     final_conc = concentrations[-1]
-    success = final_distance < 30
+    success = final_distance < 100
     initial_dist = np.linalg.norm(trajectory[0] - np.array(field.source_position))
     
     stats_text = f"""

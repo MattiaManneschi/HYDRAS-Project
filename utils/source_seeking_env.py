@@ -8,14 +8,11 @@ import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 from typing import Optional, Tuple, Dict, Any, List
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import sys
 from pathlib import Path
 
-# Aggiungi il path per gli import locali
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from utils.data_loader import (
+from .data_loader import (
     ConcentrationField, DataManager, DomainConfig, SyntheticPlumeGenerator
 )
 
@@ -49,21 +46,22 @@ class SourceSeekingConfig:
     resolution: float = 10
 
     # Agent
-    max_velocity: float = 1.5  # m/s
+    max_velocity: float = 1.0  # m/s (velocità AUV)
     sensor_radius: float = 50  # m
     n_sensors: int = 8  # punti di campionamento attorno all'agente
 
+    # Memory - istanti precedenti di concentrazione
+    memory_length: int = 10  # numero di istanti passati da includere nell'osservazione
+
     # Episode
-    dt: float = 10.0  # s
+    dt: float = 10.0  # s  (con max_velocity=1 m/s -> spostamento max 10 m/step)
     max_steps: int = 500
 
     # Spawn
     spawn_margin: float = 100  # m dal bordo
-    spawn_mode: str = "random"  # "random", "fixed", "far_from_source"
-    fixed_spawn: Optional[Tuple[float, float]] = None
 
     # Reward
-    source_distance_threshold: float = 30  # m
+    source_distance_threshold: float = 100  # m (intorno di successo)
     source_found_reward: float = 100.0
     step_penalty: float = -0.1
     boundary_penalty: float = -10.0
@@ -186,6 +184,9 @@ class SourceSeekingEnv(gym.Env):
         self.prev_concentration = 0.0
         self.prev_distance = 0.0
 
+        # Memory buffer per concentrazioni passate (usata nell'osservazione)
+        self._concentration_memory: List[float] = [0.0] * self.config.memory_length
+
         # History per analisi
         self.trajectory: List[np.ndarray] = []
         self.concentration_history: List[float] = []
@@ -215,6 +216,9 @@ class SourceSeekingEnv(gym.Env):
 
         # Concentrazioni campionate
         obs_dim += self.config.n_sensors + 1  # sensors + centro
+
+        # Memoria concentrazioni istanti precedenti
+        obs_dim += self.config.memory_length
 
         # Gradiente
         if self.config.include_gradient:
@@ -250,210 +254,8 @@ class SourceSeekingEnv(gym.Env):
             self.action_space = spaces.Discrete(self.config.n_discrete_actions + 1)
 
     def _get_spawn_position(self) -> Tuple[float, float]:
-        """Determina la posizione iniziale dell'agente."""
-        margin = self.config.spawn_margin
-
-        if self.config.spawn_mode == "fixed" and self.config.fixed_spawn:
-            return self.config.fixed_spawn
-
-        elif self.config.spawn_mode == "on_plume":
-            # Spawn direttamente sulla scia (per imparare a seguirla)
-            return self._spawn_on_plume()
-
-        elif self.config.spawn_mode == "near_plume":
-            # Spawn vicino alla scia (entro 100-300m)
-            return self._spawn_near_plume(min_dist=100, max_dist=300)
-
-        elif self.config.spawn_mode == "near_shore":
-            # Spawn vicino alla costa (come da specifiche relatore)
-            return self._spawn_near_shore()
-
-        elif self.config.spawn_mode == "strong_gradient":
-            # Spawn dove il gradiente è forte (vicino alla sorgente)
-            return self._spawn_strong_gradient(min_grad=0.3)
-
-        elif self.config.spawn_mode == "near_source":
-            # Spawn entro una certa distanza dalla sorgente
-            return self._spawn_near_source(max_dist=300)
-
-        elif self.config.spawn_mode == "curriculum":
-            # Curriculum learning: distanza aumenta con il training
-            max_dist = getattr(self, '_curriculum_distance', 200)
-            return self._spawn_near_plume(min_dist=50, max_dist=max_dist)
-
-        elif self.config.spawn_mode == "far_from_source":
-            # Spawn lontano dalla sorgente
-            while True:
-                x = self.np_random.uniform(
-                    self.config.xmin + margin,
-                    self.config.xmax - margin
-                )
-                y = self.np_random.uniform(
-                    self.config.ymin + margin,
-                    self.config.ymax - margin
-                )
-                dist = np.sqrt(
-                    (x - self.source_position[0])**2 +
-                    (y - self.source_position[1])**2
-                )
-                # Almeno 500m dalla sorgente
-                if dist > 500:
-                    return (x, y)
-
-        else:  # random
-            x = self.np_random.uniform(
-                self.config.xmin + margin,
-                self.config.xmax - margin
-            )
-            y = self.np_random.uniform(
-                self.config.ymin + margin,
-                self.config.ymax - margin
-            )
-            return (x, y)
-
-    def _spawn_strong_gradient(self, min_grad: float = 0.3) -> Tuple[float, float]:
-        """
-        Spawn in un punto con gradiente forte.
-        Questi punti sono tipicamente vicini alla sorgente.
-        """
-        # Imposta timestep dove il plume è sviluppato
-        if self.field.n_timesteps > 1:
-            mid_time = self.field.n_timesteps // 2
-            self.field.set_time(mid_time)
-
-        # Ottieni il campo corrente
-        field_data = self.field.get_current_field()
-        field_clean = np.nan_to_num(field_data, nan=0.0)
-
-        # Calcola il gradiente su tutto il campo
-        grad_y, grad_x = np.gradient(field_clean)
-        grad_magnitude = np.sqrt(grad_x**2 + grad_y**2)
-
-        # Trova punti con gradiente forte E concentrazione > 0
-        valid_mask = (grad_magnitude > min_grad) & (field_clean > 0.5)
-        valid_indices = np.where(valid_mask)
-
-        if len(valid_indices[0]) == 0:
-            # Fallback: riduci soglia gradiente
-            valid_mask = (grad_magnitude > min_grad / 2) & (field_clean > 0.1)
-            valid_indices = np.where(valid_mask)
-
-        if len(valid_indices[0]) == 0:
-            # Fallback estremo: spawn on_plume
-            print("WARNING: No strong gradient points, falling back to on_plume")
-            return self._spawn_on_plume()
-
-        # Scegli un punto random tra quelli con gradiente forte
-        idx = self.np_random.integers(len(valid_indices[0]))
-        y_idx = valid_indices[0][idx]
-        x_idx = valid_indices[1][idx]
-
-        x = float(self.field.x_coords[x_idx])
-        y = float(self.field.y_coords[y_idx])
-
-        # Aggiungi piccolo rumore
-        x += self.np_random.uniform(-5, 5)
-        y += self.np_random.uniform(-5, 5)
-
-        return (x, y)
-
-    def _spawn_near_source(self, max_dist: float = 300) -> Tuple[float, float]:
-        """
-        Spawn entro una certa distanza dalla sorgente, MA solo su celle con concentrazione > 0.
-        """
-        max_attempts = 1000
-
-        for _ in range(max_attempts):
-            # Genera punto random attorno alla sorgente
-            angle = self.np_random.uniform(0, 2 * np.pi)
-            dist = self.np_random.uniform(50, max_dist)  # minimo 50m dalla sorgente
-
-            x = self.source_position[0] + dist * np.cos(angle)
-            y = self.source_position[1] + dist * np.sin(angle)
-
-            # Verifica bounds
-            if (self.config.xmin < x < self.config.xmax and
-                self.config.ymin < y < self.config.ymax):
-
-                # Verifica che sia sulla scia (conc > 0.5) e non sulla terra
-                conc = self.field.get_concentration(x, y)
-                if not np.isnan(conc) and conc > 0.5:
-                    return (x, y)
-
-        # Fallback: spawn on_plume se non troviamo punti validi
-        print("WARNING: near_source fallback to on_plume")
+        """Determina la posizione iniziale dell'agente (sempre on_plume)."""
         return self._spawn_on_plume()
-
-    def _spawn_near_shore(self, max_dist_from_shore: float = 200) -> Tuple[float, float]:
-        """
-        Spawn vicino alla costa (NaN = terra).
-        Trova punti di mare vicini ai punti di terra.
-        """
-        max_attempts = 1000
-
-        # Imposta timestep dove il plume è sviluppato
-        if self.field.n_timesteps > 1:
-            mid_time = self.field.n_timesteps // 2
-            self.field.set_time(mid_time)
-
-        # Ottieni il campo corrente
-        field_data = self.field.get_current_field()
-
-        # Trova la maschera della terra (NaN)
-        land_mask = np.isnan(field_data)
-
-        # Trova la maschera del mare (non NaN)
-        sea_mask = ~land_mask
-
-        # Trova i punti di mare vicini alla costa
-        # Dilata la maschera terra e fai intersezione con mare
-        from scipy.ndimage import binary_dilation
-
-        # Dilata la terra di ~20 celle (200m con risoluzione 10m)
-        n_dilate = int(max_dist_from_shore / 10)  # assumendo risoluzione ~10m
-        dilated_land = binary_dilation(land_mask, iterations=n_dilate)
-
-        # Punti di mare vicini alla costa = mare AND terra dilatata
-        near_shore_mask = sea_mask & dilated_land
-
-        # Trova indici validi
-        valid_indices = np.where(near_shore_mask)
-
-        if len(valid_indices[0]) == 0:
-            # Fallback: spawn random nel mare
-            print("WARNING: No near-shore points found, using random sea spawn")
-            return self._spawn_random_sea()
-
-        # Scegli un punto random tra quelli vicini alla costa
-        idx = self.np_random.integers(len(valid_indices[0]))
-        y_idx = valid_indices[0][idx]
-        x_idx = valid_indices[1][idx]
-
-        x = float(self.field.x_coords[x_idx])
-        y = float(self.field.y_coords[y_idx])
-
-        # Aggiungi piccolo rumore
-        x += self.np_random.uniform(-5, 5)
-        y += self.np_random.uniform(-5, 5)
-
-        return (x, y)
-
-    def _spawn_random_sea(self) -> Tuple[float, float]:
-        """Spawn in un punto random del mare (non NaN)."""
-        max_attempts = 1000
-
-        for _ in range(max_attempts):
-            x = self.np_random.uniform(self.config.xmin, self.config.xmax)
-            y = self.np_random.uniform(self.config.ymin, self.config.ymax)
-
-            conc = self.field.get_concentration(x, y)
-
-            # Verifica che non sia terra (NaN)
-            if not np.isnan(conc):
-                return (x, y)
-
-        # Fallback estremo
-        return (self.config.xmin + 100, self.config.ymin + 100)
 
     def _spawn_on_plume(self) -> Tuple[float, float]:
         """Spawn su una cella con concentrazione > 0."""
@@ -496,33 +298,6 @@ class SourceSeekingEnv(gym.Env):
 
         return (float(x), float(y))
 
-    def _spawn_near_plume(self, min_dist: float = 50, max_dist: float = 300) -> Tuple[float, float]:
-        """Spawn a una certa distanza dalla scia."""
-        max_attempts = 1000
-
-        # Prima trova un punto sulla scia
-        plume_x, plume_y = self._spawn_on_plume()
-
-        for _ in range(max_attempts):
-            # Genera punto a distanza random dalla scia
-            angle = self.np_random.uniform(0, 2 * np.pi)
-            dist = self.np_random.uniform(min_dist, max_dist)
-
-            x = plume_x + dist * np.cos(angle)
-            y = plume_y + dist * np.sin(angle)
-
-            # Verifica bounds
-            if (self.config.xmin < x < self.config.xmax and
-                self.config.ymin < y < self.config.ymax):
-
-                # Verifica che non sia sulla terra
-                conc = self.field.get_concentration(x, y)
-                if not np.isnan(conc):
-                    return (x, y)
-
-        # Fallback
-        return (plume_x, plume_y)
-
     def _get_observation(self) -> np.ndarray:
         """Costruisce il vettore di osservazione."""
         obs = []
@@ -539,6 +314,10 @@ class SourceSeekingEnv(gym.Env):
         max_conc = max(self.field.max_concentration, 1.0)
         obs.extend(sensor_concs / max_conc)
         obs.append(center_conc / max_conc)
+
+        # Memoria concentrazioni istanti precedenti (normalizzate)
+        for past_conc in self._concentration_memory:
+            obs.append(past_conc / max_conc)
 
         # Gradiente
         if self.config.include_gradient:
@@ -758,13 +537,12 @@ class SourceSeekingEnv(gym.Env):
             self.field, self.source_id = self._data_manager.get_random_field()
             self.source_position = np.array(self.field.source_position)
 
-        # PRIMA: Imposta timestep dove la concentrazione è massima (vicino alla sorgente)
+        # PRIMA: Imposta timestep a metà simulazione (plume già sviluppato)
         if self.field.n_timesteps > 1:
-            # Trova il timestep con la concentrazione massima globale
-            data_clean = np.nan_to_num(self.field.data, nan=0.0)
-            max_idx = np.unravel_index(np.argmax(data_clean), data_clean.shape)
-            best_time = max_idx[0]  # timestep del max globale
-            self.field.set_time(best_time)
+            self._start_time_idx = self.field.n_timesteps // 2
+            self.field.set_time(self._start_time_idx)
+        else:
+            self._start_time_idx = 0
 
         # POI: Determina posizione iniziale (ora usa il timestep corretto)
         if options and 'spawn_position' in options:
@@ -788,6 +566,9 @@ class SourceSeekingEnv(gym.Env):
         # Reset history
         self.trajectory = [self.state.position.copy()]
         self.concentration_history = [self.prev_concentration]
+
+        # Reset memoria concentrazioni passate
+        self._concentration_memory = [0.0] * self.config.memory_length
 
         # Reset esplorazione
         self._visited_cells = set()
@@ -825,11 +606,12 @@ class SourceSeekingEnv(gym.Env):
         # Applica azione
         self._apply_action(action)
 
-        # Avanza il tempo del campo se time-varying
+        # Avanza il tempo del campo se time-varying (partendo da metà simulazione)
         if self.field.n_timesteps > 1:
-            time_idx = int(self.steps * self.config.dt / 60)  # assumendo dt NC = 1 min
+            time_offset = int(self.steps * self.config.dt / 60)  # assumendo dt NC = 1 min
+            time_idx = self._start_time_idx + time_offset
             # Clamp index to valid range
-            time_idx = max(0, min(time_idx, max(0, self.field.n_timesteps - 1)))
+            time_idx = max(0, min(time_idx, self.field.n_timesteps - 1))
             self.field.set_time(time_idx)
 
         # Calcola reward
@@ -841,6 +623,10 @@ class SourceSeekingEnv(gym.Env):
         if np.isnan(conc_now):
             conc_now = 0.0
         self.concentration_history.append(conc_now)
+
+        # Aggiorna memoria concentrazioni (FIFO: rimuovi più vecchio, aggiungi attuale)
+        self._concentration_memory.pop(0)
+        self._concentration_memory.append(conc_now)
 
         # Controlla terminazione
         terminated = False
@@ -1005,7 +791,7 @@ class SourceSeekingEnv(gym.Env):
 # Registra l'ambiente con Gymnasium
 gym.register(
     id='SourceSeeking-v0',
-    entry_point='envs.source_seeking_env:SourceSeekingEnv',
+    entry_point='utils.source_seeking_env:SourceSeekingEnv',
 )
 
 
@@ -1016,7 +802,6 @@ if __name__ == "__main__":
     env = SourceSeekingEnv(
         source_id='S1',
         render_mode=None,
-        spawn_mode='far_from_source'
     )
 
     print(f"Observation space: {env.observation_space}")

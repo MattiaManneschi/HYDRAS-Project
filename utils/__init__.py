@@ -8,10 +8,15 @@ from .data_loader import (
     DomainConfig
 )
 
+from .source_seeking_env import SourceSeekingEnv, SourceSeekingConfig, AgentState
+
 __all__ = [
     'ConcentrationField',
-    'NetCDFLoader', 
+    'NetCDFLoader',
     'SyntheticPlumeGenerator',
     'DataManager',
-    'DomainConfig'
+    'DomainConfig',
+    'SourceSeekingEnv',
+    'SourceSeekingConfig',
+    'AgentState',
 ]

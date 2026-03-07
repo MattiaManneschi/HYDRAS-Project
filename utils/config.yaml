@@ -39,23 +39,18 @@ agent:
   n_concentration_samples: 8  # punti campionati attorno all'agente
   
   # Action space
-  max_velocity: 1.5  # m/s - velocità massima dell'AUV
+  max_velocity: 1.0  # m/s - velocità dell'AUV
   action_type: "continuous"  # "continuous" o "discrete"
   n_discrete_actions: 8  # solo se action_type = "discrete"
-  
-  # Physical constraints
-  min_depth: 2.0  # m - profondità minima operativa
-  max_depth: 50.0  # m - profondità massima
-  
-  # Initial position
-  spawn_mode: "on_plume"  # Start con on_plume, curriculum switch a 50k
-  spawn_margin: 100  # m dal bordo se random
+
+  # Memory - concentrazioni istanti precedenti
+  memory_length: 10  # numero di step passati inclusi nell'osservazione
 
 # Environment configuration
 environment:
   # Time settings
   dt: 10  # s - timestep della simulazione
-  max_episode_steps: 8640  # passi massimi per episodio (24 ore: 86400s / 10s = 8640 steps)
+  max_episode_steps: 1800  # passi massimi per episodio (5 ore: 18000s / 10s = 1800 steps)
 
   # Reward shaping
   reward:
@@ -64,7 +59,7 @@ environment:
     step_penalty: -0.1
     boundary_penalty: -10.0
     source_threshold: 0.8  # frazione della concentrazione max per "trovato"
-    distance_threshold: 120  # m - distanza dalla sorgente per "trovato"
+    distance_threshold: 100  # m - distanza dalla sorgente per "trovato"
     auto_detect_source: true  # Usa il max concentrazione globale come fonte
 
   # Normalization

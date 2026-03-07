@@ -4,7 +4,6 @@ Addestramento di un agente singolo per il source seeking
 utilizzando Proximal Policy Optimization (PPO).
 """
 
-import os
 import sys
 import argparse
 from pathlib import Path
@@ -12,13 +11,15 @@ from datetime import datetime
 from typing import Optional, Dict, Any, Callable
 import yaml
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # backend non-interattivo
+import matplotlib.pyplot as plt
 
 # Setup paths
 PROJECT_ROOT = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 import gymnasium as gym
-from gymnasium.wrappers import NormalizeObservation, NormalizeReward, TimeLimit
 
 try:
     import torch
@@ -38,175 +39,51 @@ except ImportError:
     STABLE_BASELINES_AVAILABLE = False
     print("WARNING: stable-baselines3 non installato. Alcune funzionalità non saranno disponibili.")
 
-from envs.source_seeking_env import SourceSeekingEnv, SourceSeekingConfig
+from utils.source_seeking_env import SourceSeekingEnv, SourceSeekingConfig
 from utils.data_loader import DataManager, ConcentrationField
-
-
-class SourceWeights:
-    """Gestisce i pesi per randomizzare source_id durante curriculum learning."""
-    
-    def __init__(self, total_timesteps: int = 800000):
-        self.total_timesteps = total_timesteps
-        self.current_timestep = 0
-        self.weights = np.array([1/3, 1/3, 1/3])  # S1, S2, S3 inizialmente uguali
-        self.source_ids = ['S1', 'S2', 'S3']
-    
-    def update(self, timestep: int):
-        """Aggiorna i pesi basato sulla fase di curriculum."""
-        self.current_timestep = timestep
-        
-        if timestep < 200000:
-            # Fase 1 (0-200k): Focus su S1 (70%), poi S2 (20%) e S3 (10%)
-            # Impara prima i pattern difficili di S1
-            self.weights = np.array([0.70, 0.20, 0.10])
-        elif timestep < 500000:
-            # Fase 2 (200k-500k): Bilancia (40% S1, 30% S2, 30% S3)
-            # Consolida i pattern di ognuna
-            self.weights = np.array([0.40, 0.30, 0.30])
-        else:
-            # Fase 3 (500k-800k): Distribuzione uniforme (33% ciascuno)
-            # Generalizzazione finale
-            self.weights = np.array([1/3, 1/3, 1/3])
-    
-    def sample_source_id(self) -> str:
-        """Restituisce un source_id casuale secondo i weights attuali."""
-        return np.random.choice(self.source_ids, p=self.weights)
-    
-    def get_phase(self) -> str:
-        """Restituisce la fase attuale."""
-        if self.current_timestep < 200000:
-            return "Phase 1: Focus S1"
-        elif self.current_timestep < 500000:
-            return "Phase 2: Balance"
-        else:
-            return "Phase 3: Equal"
-
-
-class SourceCurriculumCallback(BaseCallback):
-    """
-    Curriculum learning per source_id: cambia i pesi per S1, S2, S3 nel tempo.
-    Fase 1 (0-200k): 70% S1, 20% S2, 10% S3
-    Fase 2 (200k-500k): 40% S1, 30% S2, 30% S3
-    Fase 3 (500k-800k): 33% S1, 33% S2, 33% S3
-    """
-    
-    def __init__(self, source_weights: SourceWeights, verbose: int = 0):
-        super().__init__(verbose)
-        self.source_weights = source_weights
-        self.last_phase = None
-    
-    def _on_step(self) -> bool:
-        # Aggiorna i weights basato sul timestep
-        self.source_weights.update(self.num_timesteps)
-        
-        # Log la fase quando cambia
-        current_phase = self.source_weights.get_phase()
-        if current_phase != self.last_phase:
-            self.last_phase = current_phase
-            if self.verbose > 0:
-                print(f"\n{'='*60}")
-                print(f"SOURCE CURRICULUM: {current_phase}")
-                print(f"Weights (S1, S2, S3): {self.source_weights.weights}")
-                print(f"{'='*60}\n")
-            self.logger.record('curriculum/source_phase', 
-                             {'Phase 1': 0, 'Phase 2': 1, 'Phase 3': 2}.get(current_phase.split(':')[0], 0))
-        
-        # Log periodicamente i weights
-        if self.num_timesteps % 50000 == 0:
-            self.logger.record('curriculum/s1_weight', self.source_weights.weights[0])
-            self.logger.record('curriculum/s2_weight', self.source_weights.weights[1])
-            self.logger.record('curriculum/s3_weight', self.source_weights.weights[2])
-        
-        return True
-
-
-class CurriculumCallback(BaseCallback):
-    """
-    Curriculum learning: Cambia spawn_mode e reward scaling in base ai timesteps completati.
-    0-50k: on_plume (impara gradiente)
-    50k+: far_from_source (impara ricerca) + distance_reward x2
-    """
-
-    def __init__(self, verbose: int = 0):
-        super().__init__(verbose)
-        self.current_phase = "on_plume"
-        self.phase_switch_timestep = 50000
-        self.switched = False
-
-    def _on_step(self) -> bool:
-        # Controlla se dovremmo switchare fase
-        if self.num_timesteps >= self.phase_switch_timestep and not self.switched:
-            self.switched = True
-            new_phase = "far_from_source"
-            reward_multiplier = 2.0  # RADDOPPIA il distance reward nella fase 2
-            
-            if self.verbose > 0:
-                print(f"\n{'='*60}")
-                print(f"CURRICULUM SWITCH at {self.num_timesteps} timesteps")
-                print(f"  {self.current_phase} → {new_phase}")
-                print(f"  distance_reward x{reward_multiplier}")
-                print(f"{'='*60}\n")
-            
-            # Cambia spawn_mode e reward scaling su tutti gli env
-            if hasattr(self.model.env, 'envs'):
-                # VecEnv: accedi a lista di env
-                for env in self.model.env.envs:
-                    if hasattr(env, 'config'):
-                        env.config.spawn_mode = new_phase
-                        env.config.distance_reward_multiplier = reward_multiplier
-                    elif hasattr(env, 'env') and hasattr(env.env, 'config'):
-                        # Se wrapped (Monitor, etc)
-                        env.env.config.spawn_mode = new_phase
-                        env.env.config.distance_reward_multiplier = reward_multiplier
-            
-            self.current_phase = new_phase
-            self.logger.record('curriculum/phase', 1.0)
-            self.logger.record('curriculum/reward_multiplier', reward_multiplier)
-
-        return True
 
 
 class SourceSeekingCallback(BaseCallback):
     """
-    Callback personalizzato per logging aggiuntivo durante il training.
+    Callback per logging di success rate durante il training.
+    Raccoglie loss e success_rate per i plot finali.
     """
 
     def __init__(self, verbose: int = 0):
         super().__init__(verbose)
-        self.episode_rewards = []
-        self.episode_lengths = []
         self.success_rate = []
-        self.avg_final_distance = []
+        self._loss_steps = []
+        self._loss_values = []
+        self._sr_steps = []
+        self._sr_values = []
 
     def _on_step(self) -> bool:
         # Raccogli info dagli ambienti
         infos = self.locals.get('infos', [])
 
         for info in infos:
-            if 'episode' in info:
-                self.episode_rewards.append(info['episode']['r'])
-                self.episode_lengths.append(info['episode']['l'])
-
             if 'source_reached' in info:
                 self.success_rate.append(float(info['source_reached']))
-
-            if 'distance_to_source' in info:
-                self.avg_final_distance.append(info['distance_to_source'])
 
         # Log ogni 1000 steps
         if self.num_timesteps % 1000 == 0 and len(self.success_rate) > 0:
             recent_success = np.mean(self.success_rate[-100:]) if len(self.success_rate) >= 100 else np.mean(self.success_rate)
-            recent_distance = np.mean(self.avg_final_distance[-100:]) if len(self.avg_final_distance) >= 100 else np.mean(self.avg_final_distance)
-
             self.logger.record('custom/success_rate', recent_success)
-            self.logger.record('custom/avg_final_distance', recent_distance)
+            self._sr_steps.append(self.num_timesteps)
+            self._sr_values.append(recent_success)
+
+        # Raccogli loss dal logger di SB3
+        if self.num_timesteps % 1000 == 0:
+            loss = self.logger.name_to_value.get('train/loss', None)
+            if loss is not None:
+                self._loss_steps.append(self.num_timesteps)
+                self._loss_values.append(loss)
 
         return True
 
     def _on_training_end(self) -> None:
         if self.verbose > 0:
             print(f"\nTraining completed!")
-            print(f"Total episodes: {len(self.episode_rewards)}")
             if len(self.success_rate) > 0:
                 print(f"Final success rate: {np.mean(self.success_rate[-100:]):.2%}")
 
@@ -234,22 +111,22 @@ def create_env(
 
     # Crea config ambiente
     env_kwargs = SourceSeekingConfig(
-        max_velocity=agent_config.get('max_velocity', 1.5),
+        max_velocity=agent_config.get('max_velocity', 1.0),
         sensor_radius=agent_config.get('sensor_radius', 50),
         n_sensors=agent_config.get('n_concentration_samples', 8),
+        memory_length=agent_config.get('memory_length', 10),
         dt=env_config.get('dt', 10),
         max_steps=env_config.get('max_episode_steps', 500),
-        spawn_mode=agent_config.get('spawn_mode', 'on_plume'),
         source_found_reward=env_config.get('reward', {}).get('source_reached_bonus', 100),
         step_penalty=env_config.get('reward', {}).get('step_penalty', -0.1),
         boundary_penalty=env_config.get('reward', {}).get('boundary_penalty', -10),
         gradient_reward_scale=env_config.get('reward', {}).get('concentration_gradient_scale', 10),
-        source_distance_threshold=env_config.get('reward', {}).get('distance_threshold', 30),
+        source_distance_threshold=env_config.get('reward', {}).get('distance_threshold', 100),
         action_type=agent_config.get('action_type', 'continuous'),
         auto_detect_source=env_config.get('reward', {}).get('auto_detect_source', False),
     )
 
-    print(f"  [DEBUG] spawn_mode={env_kwargs.spawn_mode}, threshold={env_kwargs.source_distance_threshold}m, auto_detect={env_kwargs.auto_detect_source}")
+    print(f"  [DEBUG] spawn=on_plume, threshold={env_kwargs.source_distance_threshold}m, auto_detect={env_kwargs.auto_detect_source}")
 
     # Crea ambiente
     env = SourceSeekingEnv(
@@ -274,20 +151,14 @@ def make_env_fn(
     seed: int,
     data_dir: Optional[str] = None,
     randomize_field: bool = False,
-    randomize_source_id: bool = False,
-    source_weights: Optional[SourceWeights] = None
+    randomize_source_id: bool = False
 ) -> Callable[[], gym.Env]:
     """Factory function per la creazione di ambienti paralleli."""
     def _init() -> gym.Env:
         # Determina il source_id da usare
-        if source_weights:
-            # Curriculum learning pesato: usa i weights attuali
-            actual_source_id = source_weights.sample_source_id()
-        elif randomize_source_id:
-            # Randomizzazione uniforme: alle probabilità uguali
+        if randomize_source_id:
             actual_source_id = np.random.choice(['S1', 'S2', 'S3'])
         else:
-            # Source_id fisso
             actual_source_id = source_id
         
         env = create_env(config, concentration_field, actual_source_id, seed + rank, data_dir, randomize_field)
@@ -297,7 +168,7 @@ def make_env_fn(
 
 
 def train(
-    config_path: str = "configs/config.yaml",
+    config_path: str = "utils/config.yaml",
     output_dir: str = "trained_models",
     source_id: str = "S1",
     n_envs: int = 4,
@@ -307,8 +178,7 @@ def train(
     use_nc_data: bool = False,
     nc_file: Optional[str] = None,
     data_dir: Optional[str] = None,
-    randomize_source_id: bool = False,
-    curriculum_source: bool = False
+    randomize_source_id: bool = False
 ):
     """
     Funzione principale di training.
@@ -391,18 +261,10 @@ def train(
     # Crea ambienti vettorizzati
     print(f"\nCreating {n_envs} parallel environments...")
 
-    # Crea SourceWeights se curriculum_source è abilitato
-    source_weights = None
     timesteps = total_timesteps or training_config.get('total_timesteps', 1000000)
-    if randomize_source_id and curriculum_source:
-        source_weights = SourceWeights(total_timesteps=timesteps)
-        print(f"Source Curriculum Learning: ENABLED")
-        print(f"  Phase 1 (0-200k): 70% S1, 20% S2, 10% S3")
-        print(f"  Phase 2 (200k-500k): 40% S1, 30% S2, 30% S3")
-        print(f"  Phase 3 (500k+): 33% S1, 33% S2, 33% S3")
 
     env_fns = [
-        make_env_fn(config, concentration_field, source_id, i, seed, data_dir, randomize_field, randomize_source_id, source_weights)
+        make_env_fn(config, concentration_field, source_id, i, seed, data_dir, randomize_field, randomize_source_id)
         for i in range(n_envs)
     ]
 
@@ -490,16 +352,6 @@ def train(
     # Setup callbacks
     callbacks = []
 
-    # Curriculum callback (se training è long enough)
-    if total_timesteps and total_timesteps >= 100000:
-        curriculum_callback = CurriculumCallback(verbose=1)
-        callbacks.append(curriculum_callback)
-
-    # Source curriculum callback (curriculum learning per source_id)
-    if randomize_source_id and curriculum_source and source_weights is not None:
-        source_curriculum_callback = SourceCurriculumCallback(source_weights, verbose=1)
-        callbacks.append(source_curriculum_callback)
-
     # Evaluation callback
     eval_callback = EvalCallback(
         eval_env,
@@ -562,6 +414,37 @@ def train(
     )
     print(f"Mean reward: {mean_reward:.2f} +/- {std_reward:.2f}")
 
+    # --- Salva plot di Loss e Success Rate ---
+    plots_dir = Path("plots")
+    plots_dir.mkdir(exist_ok=True)
+
+    # Plot Loss
+    if custom_callback._loss_steps:
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.plot(custom_callback._loss_steps, custom_callback._loss_values, linewidth=0.8)
+        ax.set_xlabel('Timesteps')
+        ax.set_ylabel('Loss')
+        ax.set_title('Training Loss')
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(plots_dir / 'training_loss.png', dpi=150)
+        plt.close(fig)
+        print(f"Loss plot saved to: {plots_dir / 'training_loss.png'}")
+
+    # Plot Success Rate
+    if custom_callback._sr_steps:
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.plot(custom_callback._sr_steps, custom_callback._sr_values, linewidth=0.8)
+        ax.set_xlabel('Timesteps')
+        ax.set_ylabel('Success Rate')
+        ax.set_title('Training Success Rate')
+        ax.set_ylim(-0.05, 1.05)
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(plots_dir / 'training_success_rate.png', dpi=150)
+        plt.close(fig)
+        print(f"Success rate plot saved to: {plots_dir / 'training_success_rate.png'}")
+
     # Cleanup
     vec_env.close()
     eval_env.close()
@@ -572,9 +455,9 @@ def train(
     return model, run_dir
 
 
-def evaluate(
+def _evaluate_cli(
     model_path: str,
-    config_path: str = "configs/config.yaml",
+    config_path: str = "utils/config.yaml",
     source_id: str = "S1",
     n_episodes: int = 10,
     render: bool = False,
@@ -582,284 +465,35 @@ def evaluate(
     data_dir: Optional[str] = None,
     randomize: bool = False
 ):
-    """
-    Valuta un modello addestrato.
-
-    Args:
-        model_path: Path al modello salvato
-        config_path: Path al config
-        source_id: ID sorgente (ignorato se randomize=True)
-        n_episodes: Numero episodi di valutazione
-        render: Visualizza gli episodi
-        save_trajectories: Salva le traiettorie
-        data_dir: Directory con file NC
-        randomize: Se True, usa file NC random per ogni episodio
-    """
-    if not STABLE_BASELINES_AVAILABLE:
-        raise ImportError("stable-baselines3 non installato")
-
-    config = load_config(config_path)
-
-    print("=" * 60)
-    print("HYDRAS Source Seeking - Evaluation")
-    print("=" * 60)
-    print(f"Model: {model_path}")
-    print(f"Episodes: {n_episodes}")
-    print(f"Mode: {'Random NC files' if randomize and data_dir else f'Source {source_id}'}")
-
-    # Carica modello
-    model = PPO.load(model_path)
-
-    # Carica normalizzatore se presente
-    vec_normalize_path = Path(model_path).parent / "vec_normalize.pkl"
-    has_vec_normalize = vec_normalize_path.exists()
-
-    results = []
-    trajectories = []
-
-    # Per statistiche per sorgente
-    stats_by_source = {'S1': [], 'S2': [], 'S3': []}
-
-    for ep in range(n_episodes):
-        # Crea ambiente (random o fisso)
-        env = create_env(
-            config,
-            concentration_field=None,
-            source_id=source_id,
-            seed=ep,
-            data_dir=data_dir,
-            randomize_field=randomize
-        )
-
-        # Ottieni source_id effettivo dall'ambiente
-        actual_source = env.source_id if hasattr(env, 'source_id') else source_id
-        # Se wrapped in Monitor, accedi all'env interno
-        if hasattr(env, 'env'):
-            actual_source = env.env.source_id
-
-        # Wrap per normalizzazione se necessario
-        if has_vec_normalize:
-            env = DummyVecEnv([lambda: env])
-            env = VecNormalize.load(str(vec_normalize_path), env)
-            env.training = False
-            env.norm_reward = False
-            is_vec_env = True
-        else:
-            is_vec_env = False
-
-        # Reset
-        if is_vec_env:
-            obs = env.reset()
-        else:
-            obs, _ = env.reset()
-
-        done = False
-        ep_reward = 0
-        ep_trajectory = []
-        ep_steps = 0
-
-        while not done:
-            action, _ = model.predict(obs, deterministic=True)
-
-            if is_vec_env:
-                obs, reward, done, info = env.step(action)
-                done = done[0]
-                info = info[0]
-                reward = reward[0]
-            else:
-                obs, reward, terminated, truncated, info = env.step(action)
-                done = terminated or truncated
-
-            ep_reward += reward
-            ep_steps += 1
-
-            if 'position' in info:
-                ep_trajectory.append(info['position'])
-
-            if render and not is_vec_env:
-                env.render()
-
-        # Risultati episodio
-        source_reached = info.get('source_reached', False)
-        final_distance = info.get('distance_to_source', -1)
-
-        results.append({
-            'episode': ep,
-            'source_id': actual_source,
-            'reward': ep_reward,
-            'steps': ep_steps,
-            'source_reached': source_reached,
-            'final_distance': final_distance
-        })
-
-        stats_by_source[actual_source].append({
-            'success': source_reached,
-            'distance': final_distance,
-            'steps': ep_steps
-        })
-
-        if save_trajectories:
-            trajectories.append(ep_trajectory)
-
-        status = "✓ SUCCESS" if source_reached else f"✗ {final_distance:.0f}m"
-        print(f"  Episode {ep+1:3d} [{actual_source}]: reward={ep_reward:7.2f}, steps={ep_steps:3d}, {status}")
-
-        env.close()
-
-    # Statistiche globali
-    print("\n" + "=" * 60)
-    print("GLOBAL STATISTICS")
-    print("=" * 60)
-
-    rewards = [r['reward'] for r in results]
-    success_rate = sum(r['source_reached'] for r in results) / n_episodes
-    avg_distance = np.mean([r['final_distance'] for r in results if r['final_distance'] >= 0])
-    avg_steps = np.mean([r['steps'] for r in results])
-
-    print(f"  Total episodes:     {n_episodes}")
-    print(f"  Success rate:       {success_rate:.1%}")
-    print(f"  Mean reward:        {np.mean(rewards):.2f} ± {np.std(rewards):.2f}")
-    print(f"  Mean final dist:    {avg_distance:.1f} m")
-    print(f"  Mean steps:         {avg_steps:.1f}")
-
-    # Statistiche per sorgente
-    print("\n" + "-" * 60)
-    print("STATISTICS BY SOURCE")
-    print("-" * 60)
-
-    for src_id in ['S1', 'S2', 'S3']:
-        src_stats = stats_by_source[src_id]
-        if src_stats:
-            src_success = sum(s['success'] for s in src_stats) / len(src_stats)
-            src_dist = np.mean([s['distance'] for s in src_stats])
-            src_steps = np.mean([s['steps'] for s in src_stats])
-            print(f"  {src_id}: {len(src_stats):3d} episodes, success={src_success:.1%}, dist={src_dist:.1f}m, steps={src_steps:.1f}")
-        else:
-            print(f"  {src_id}: No episodes")
-
-    print("=" * 60)
-
-    return results, trajectories
+    """Valuta un modello — delega a evaluate.py."""
+    from evaluate import evaluate_and_visualize
+    return evaluate_and_visualize(
+        model_path=model_path,
+        config_path=config_path,
+        n_episodes=n_episodes,
+        output_dir="evaluation_plots",
+        source_id=source_id,
+        data_dir=data_dir or "data/",
+        randomize=randomize,
+    )
 
 
-def validate_model(
+def _validate_cli(
     model_path: str,
     data_dir: str,
     n_episodes_per_file: int = 5,
-    config_path: str = "configs/config.yaml"
+    config_path: str = "utils/config.yaml"
 ):
-    """
-    Validazione completa su tutti i file NC.
-    Testa il modello su ogni file NC separatamente.
-
-    Args:
-        model_path: Path al modello
-        data_dir: Directory con i file NC
-        n_episodes_per_file: Episodi per ogni file NC
-        config_path: Path al config
-    """
-    if not STABLE_BASELINES_AVAILABLE:
-        raise ImportError("stable-baselines3 non installato")
-
-    from utils.data_loader import NetCDFLoader
-
-    print("=" * 60)
-    print("HYDRAS Source Seeking - Full Validation")
-    print("=" * 60)
-
-    # Trova tutti i file NC
-    nc_files = sorted(Path(data_dir).glob("*.nc"))
-    print(f"Found {len(nc_files)} NC files\n")
-
-    config = load_config(config_path)
-    model = PPO.load(model_path)
-
-    # Carica normalizzatore
-    vec_normalize_path = Path(model_path).parent / "vec_normalize.pkl"
-    has_vec_normalize = vec_normalize_path.exists()
-
-    all_results = []
-
-    for nc_file in nc_files:
-        print(f"\n{'─'*60}")
-        print(f"Testing: {nc_file.name}")
-        print(f"{'─'*60}")
-
-        # Carica il campo
-        loader = NetCDFLoader(nc_file.parent)
-        field = loader.load(str(nc_file), concentration_var="Concentration - component 1")
-
-        source_id = 'S1' if 'S1' in nc_file.name else ('S2' if 'S2' in nc_file.name else 'S3')
-
-        file_results = []
-
-        for ep in range(n_episodes_per_file):
-            env = create_env(config, field, source_id, seed=ep)
-
-            if has_vec_normalize:
-                env = DummyVecEnv([lambda: env])
-                env = VecNormalize.load(str(vec_normalize_path), env)
-                env.training = False
-                env.norm_reward = False
-                obs = env.reset()
-                is_vec = True
-            else:
-                obs, _ = env.reset()
-                is_vec = False
-
-            done = False
-            ep_reward = 0
-
-            while not done:
-                action, _ = model.predict(obs, deterministic=True)
-                if is_vec:
-                    obs, reward, done, info = env.step(action)
-                    done, info, reward = done[0], info[0], reward[0]
-                else:
-                    obs, reward, term, trunc, info = env.step(action)
-                    done = term or trunc
-                ep_reward += reward
-
-            file_results.append({
-                'success': info.get('source_reached', False),
-                'distance': info.get('distance_to_source', -1),
-                'reward': ep_reward
-            })
-
-            env.close()
-
-        # Stats per questo file
-        success_rate = sum(r['success'] for r in file_results) / len(file_results)
-        avg_dist = np.mean([r['distance'] for r in file_results])
-
-        print(f"  Success: {success_rate:.0%} ({sum(r['success'] for r in file_results)}/{len(file_results)})")
-        print(f"  Avg distance: {avg_dist:.1f} m")
-
-        all_results.append({
-            'file': nc_file.name,
-            'source': source_id,
-            'success_rate': success_rate,
-            'avg_distance': avg_dist,
-            'episodes': file_results
-        })
-
-    # Summary finale
-    print("\n" + "=" * 60)
-    print("VALIDATION SUMMARY")
-    print("=" * 60)
-
-    total_success = sum(r['success_rate'] * len(r['episodes']) for r in all_results)
-    total_episodes = sum(len(r['episodes']) for r in all_results)
-
-    print(f"\n  Overall success rate: {total_success/total_episodes:.1%}")
-    print(f"  Total episodes: {total_episodes}")
-
-    print(f"\n  {'File':<35} {'Source':<6} {'Success':<10} {'Avg Dist':<10}")
-    print(f"  {'-'*35} {'-'*6} {'-'*10} {'-'*10}")
-    for r in all_results:
-        print(f"  {r['file']:<35} {r['source']:<6} {r['success_rate']:.0%}       {r['avg_distance']:.1f} m")
-
-    return all_results
+    """Validazione completa — delega a evaluate.py run_hard_evaluations."""
+    from evaluate import run_hard_evaluations
+    return run_hard_evaluations(
+        model_path=model_path,
+        config_path=config_path,
+        output_dir="evaluations_validate",
+        data_dir=data_dir,
+        random_selection=False,
+        episodes_per_file=n_episodes_per_file
+    )
 
 
 def main():
@@ -873,7 +507,7 @@ def main():
     train_parser = subparsers.add_parser('train', help='Train a new model')
     train_parser.add_argument(
         '--config', '-c',
-        default='configs/config.yaml',
+        default='utils/config.yaml',
         help='Path to config file'
     )
     train_parser.add_argument(
@@ -925,11 +559,6 @@ def main():
         action='store_true',
         help='Randomize source ID (S1, S2, S3) for each episode'
     )
-    train_parser.add_argument(
-        '--curriculum-source',
-        action='store_true',
-        help='Enable curriculum learning for source ID (requires --randomize-source)'
-    )
 
     # Evaluate command
     eval_parser = subparsers.add_parser('eval', help='Evaluate a trained model')
@@ -939,7 +568,7 @@ def main():
     )
     eval_parser.add_argument(
         '--config', '-c',
-        default='configs/config.yaml',
+        default='utils/config.yaml',
         help='Path to config file'
     )
     eval_parser.add_argument(
@@ -989,7 +618,7 @@ def main():
     )
     val_parser.add_argument(
         '--config', '-c',
-        default='configs/config.yaml',
+        default='utils/config.yaml',
         help='Path to config file'
     )
 
@@ -1007,12 +636,11 @@ def main():
             use_nc_data=args.nc_file is not None or args.data_dir is not None,
             nc_file=args.nc_file,
             data_dir=args.data_dir,
-            randomize_source_id=args.randomize_source,
-            curriculum_source=args.curriculum_source
+            randomize_source_id=args.randomize_source
         )
 
     elif args.command == 'eval':
-        evaluate(
+        _evaluate_cli(
             model_path=args.model,
             config_path=args.config,
             source_id=args.source,
@@ -1023,7 +651,7 @@ def main():
         )
 
     elif args.command == 'validate':
-        validate_model(
+        _validate_cli(
             model_path=args.model,
             data_dir=args.data_dir,
             n_episodes_per_file=args.episodes_per_file,
