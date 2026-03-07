@@ -13,6 +13,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Tuple
 
+sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 
 from stable_baselines3 import PPO
