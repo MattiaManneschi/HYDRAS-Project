@@ -476,7 +476,7 @@ def train(
     print(f"Mean reward: {mean_reward:.2f} +/- {std_reward:.2f}")
 
     # --- Salva plot di Loss e Success Rate ---
-    plots_dir = Path("plots")
+    plots_dir = run_dir / "plots"
     plots_dir.mkdir(exist_ok=True)
 
     # Plot Loss

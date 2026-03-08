@@ -309,11 +309,13 @@ def run_evaluations(
 # ---------------------------------------------------------------------------
 
 def main():
-    DATA_DIR = "data/"
-    CONFIG_PATH = "utils/config.yaml"
-    OUTPUT_DIR = "evaluations"
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-    trained_dir = Path("trained_models")
+    DATA_DIR = str(PROJECT_ROOT / "data")
+    CONFIG_PATH = str(PROJECT_ROOT / "utils" / "config.yaml")
+    OUTPUT_DIR = str(PROJECT_ROOT / "evaluations")
+
+    trained_dir = PROJECT_ROOT / "trained_models"
     if not trained_dir.exists():
         print("ERRORE: Directory trained_models/ non trovata!")
         sys.exit(1)
