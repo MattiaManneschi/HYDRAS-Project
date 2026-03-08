@@ -34,33 +34,38 @@ sources:
 
 # Agent configuration
 agent:
-  # Observation space
-  sensor_radius: 50  # m - raggio di percezione
-  n_concentration_samples: 8  # punti campionati attorno all'agente
-  
   # Action space
   max_velocity: 1.0  # m/s - velocità dell'AUV
-  action_type: "discrete"  # "continuous" o "discrete"
-  n_discrete_actions: 8  # solo se action_type = "discrete"
+  action_type: "discrete"  # 4 direzioni cardinali (N/S/E/W)
+  n_discrete_actions: 4  # N, S, E, W
 
-  # Memory - concentrazioni istanti precedenti
-  memory_length: 10  # numero di step passati inclusi nell'osservazione
+  # Memory - ultimi N step (concentrazioni + spostamenti)
+  memory_length: 9  # 9 step passati -> obs: 1 + 9 + 18 = 28 valori
 
 # Environment configuration
 environment:
   # Time settings
   dt: 10  # s - timestep della simulazione
-  max_episode_steps: 1800  # passi massimi per episodio (5 ore: 18000s / 10s = 1800 steps)
+  max_episode_steps: 1080  # passi massimi per episodio (3 ore: 10800s / 10s = 1080 steps)
 
   # Reward shaping
   reward:
     source_reached_bonus: 100.0
-    concentration_gradient_scale: 10.0
     step_penalty: -0.1
     boundary_penalty: -10.0
-    source_threshold: 0.8  # frazione della concentrazione max per "trovato"
+    land_penalty: -50.0  # penalità per collisione con terra
     distance_threshold: 100  # m - distanza dalla sorgente per "trovato"
-    auto_detect_source: false  # Usa le coordinate hardcoded delle sorgenti
+    distance_reward_multiplier: 1.0  # moltiplicatore per reward distanza
+    plume_reward_positive: 0.3  # reward binario dentro il plume
+    plume_reward_negative: -0.3  # penalità fuori dal plume
+    plume_threshold: 0.1  # soglia concentrazione per "dentro il plume"
+
+  # Spawn constraints
+  spawn:
+    min_distance: 200  # m - distanza minima dalla sorgente
+    max_distance: 3000  # m - distanza massima dalla sorgente (con 1080 step x 10m = 10.8km budget)
+    start_frame: 1440  # frame di partenza (metà simulazione)
+    conc_threshold: 0.5  # soglia minima concentrazione
 
   # Normalization
   normalize_obs: true
@@ -92,7 +97,7 @@ training:
     activation_fn: "tanh"
 
   # Training loop
-  total_timesteps: 1000000
+  total_timesteps: 900000  # 900K totale
   eval_freq: 10000
   n_eval_episodes: 10
   save_freq: 50000
@@ -100,6 +105,20 @@ training:
   # Logging
   tensorboard_log: "./logs/tensorboard"
   verbose: 1
+
+# Curriculum learning
+curriculum:
+  enabled: true
+  phases:
+    - start: 0
+      end: 100000
+      sources: ["S1"]
+    - start: 100000
+      end: 350000
+      sources: ["S1", "S2"]
+    - start: 350000
+      end: 900000
+      sources: ["S1", "S2", "S3"]
 
 # Data configuration
 data:

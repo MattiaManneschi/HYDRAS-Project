@@ -30,8 +30,7 @@ try:
         CallbackList,
         BaseCallback
     )
-    from stable_baselines3.common.env_util import make_vec_env
-    from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
+    from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize, sync_envs_normalization
     from stable_baselines3.common.monitor import Monitor
     from stable_baselines3.common.evaluation import evaluate_policy
     STABLE_BASELINES_AVAILABLE = True
@@ -40,30 +39,39 @@ except ImportError:
     print("WARNING: stable-baselines3 non installato. Alcune funzionalità non saranno disponibili.")
 
 from utils.source_seeking_env import SourceSeekingEnv, SourceSeekingConfig
-from utils.data_loader import DataManager, ConcentrationField
+from utils.data_loader import ConcentrationField
 
 
 class SourceSeekingCallback(BaseCallback):
     """
-    Callback per logging di success rate durante il training.
-    Raccoglie loss e success_rate per i plot finali.
+    Callback per logging di success rate e land collision rate durante il training.
+    Raccoglie loss, success_rate e land_collision_rate per i plot finali.
     """
 
     def __init__(self, verbose: int = 0):
         super().__init__(verbose)
         self.success_rate = []
+        self.land_collisions = []
         self._loss_steps = []
         self._loss_values = []
         self._sr_steps = []
         self._sr_values = []
+        self._lc_steps = []
+        self._lc_values = []
 
     def _on_step(self) -> bool:
-        # Raccogli info dagli ambienti
+        # Raccogli info solo a fine episodio (dones=True)
         infos = self.locals.get('infos', [])
+        dones = self.locals.get('dones', [])
 
-        for info in infos:
+        for info, done in zip(infos, dones):
+            if not done:
+                continue
+            # Episodio terminato: registra se successo o collisione terra
             if 'source_reached' in info:
                 self.success_rate.append(float(info['source_reached']))
+            if 'on_land' in info:
+                self.land_collisions.append(float(info['on_land']))
 
         # Log ogni 1000 steps
         if self.num_timesteps % 1000 == 0 and len(self.success_rate) > 0:
@@ -71,6 +79,17 @@ class SourceSeekingCallback(BaseCallback):
             self.logger.record('custom/success_rate', recent_success)
             self._sr_steps.append(self.num_timesteps)
             self._sr_values.append(recent_success)
+
+        if self.num_timesteps % 1000 == 0 and len(self.land_collisions) > 0:
+            recent_land = np.mean(self.land_collisions[-100:]) if len(self.land_collisions) >= 100 else np.mean(self.land_collisions)
+            self.logger.record('custom/land_collision_rate', recent_land)
+            self._lc_steps.append(self.num_timesteps)
+            self._lc_values.append(recent_land)
+
+            # Warning se supera il 10%
+            if recent_land > 0.10:
+                if self.verbose > 0 and self.num_timesteps % 10000 == 0:
+                    print(f"\n⚠️  [WARNING] Land collision rate = {recent_land:.1%} (>{10}%) — valuta di restringere lo spawn")
 
         # Raccogli loss dal logger di SB3
         if self.num_timesteps % 1000 == 0:
@@ -86,6 +105,64 @@ class SourceSeekingCallback(BaseCallback):
             print(f"\nTraining completed!")
             if len(self.success_rate) > 0:
                 print(f"Final success rate: {np.mean(self.success_rate[-100:]):.2%}")
+            if len(self.land_collisions) > 0:
+                print(f"Final land collision rate: {np.mean(self.land_collisions[-100:]):.2%}")
+
+
+class CurriculumCallback(BaseCallback):
+    """
+    Callback per il curriculum learning.
+    Gestisce le fasi di addestramento con sorgenti progressive:
+      Fase 1 (0-100K):   solo S1
+      Fase 2 (100K-350K): S1 + S2
+      Fase 3 (350K-900K): S1 + S2 + S3
+    """
+
+    def __init__(self, vec_env, config: Dict[str, Any], verbose: int = 0):
+        super().__init__(verbose)
+        self.vec_env = vec_env
+        self._current_phase = -1
+
+        # Carica fasi dal config
+        curriculum_config = config.get('curriculum', {})
+        if curriculum_config.get('enabled', False):
+            self.phases = [
+                (p['start'], p['end'], p['sources'])
+                for p in curriculum_config.get('phases', [])
+            ]
+        else:
+            # Default: tutte le sorgenti da subito
+            self.phases = [(0, 10_000_000, ['S1', 'S2', 'S3'])]
+
+    def _get_source_seeking_envs(self):
+        """Estrai le istanze SourceSeekingEnv dal vec env wrappato."""
+        base = self.vec_env
+        while hasattr(base, 'venv'):
+            base = base.venv
+        envs = []
+        for env in base.envs:
+            inner = env
+            while hasattr(inner, 'env'):
+                inner = inner.env
+            envs.append(inner)
+        return envs
+
+    def _on_step(self) -> bool:
+        steps = self.num_timesteps
+
+        for phase_idx, (start, end, sources) in enumerate(self.phases):
+            if start <= steps < end:
+                if phase_idx != self._current_phase:
+                    self._current_phase = phase_idx
+                    print(f"\n[Curriculum] Fase {phase_idx + 1}: sources={sources} (step {steps:,})")
+                    # Aggiorna sorgenti consentite in tutti gli ambienti
+                    for env in self._get_source_seeking_envs():
+                        env.allowed_sources = list(sources)
+                    self.logger.record('curriculum/phase', phase_idx + 1)
+                    self.logger.record('curriculum/n_sources', len(sources))
+                break
+
+        return True
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -97,7 +174,6 @@ def load_config(config_path: str) -> Dict[str, Any]:
 def create_env(
     config: Dict[str, Any],
     concentration_field: Optional[ConcentrationField] = None,
-    seed: Optional[int] = None,
     data_dir: Optional[str] = None,
     randomize_field: bool = False
 ) -> gym.Env:
@@ -107,24 +183,40 @@ def create_env(
     # Estrai configurazioni
     env_config = config.get('environment', {})
     agent_config = config.get('agent', {})
+    domain_config = config.get('domain', {})
 
     # Crea config ambiente
     env_kwargs = SourceSeekingConfig(
+        # Domain
+        xmin=domain_config.get('xmin', 619000),
+        xmax=domain_config.get('xmax', 622000),
+        ymin=domain_config.get('ymin', 4794500),
+        ymax=domain_config.get('ymax', 4797000),
+        resolution=domain_config.get('grid_resolution', 10),
+        # Agent
         max_velocity=agent_config.get('max_velocity', 1.0),
-        sensor_radius=agent_config.get('sensor_radius', 50),
-        n_sensors=agent_config.get('n_concentration_samples', 8),
-        memory_length=agent_config.get('memory_length', 10),
+        memory_length=agent_config.get('memory_length', 9),
         dt=env_config.get('dt', 10),
-        max_steps=env_config.get('max_episode_steps', 500),
+        max_steps=env_config.get('max_episode_steps', 1080),
         source_found_reward=env_config.get('reward', {}).get('source_reached_bonus', 100),
         step_penalty=env_config.get('reward', {}).get('step_penalty', -0.1),
         boundary_penalty=env_config.get('reward', {}).get('boundary_penalty', -10),
         source_distance_threshold=env_config.get('reward', {}).get('distance_threshold', 100),
-        action_type=agent_config.get('action_type', 'continuous'),
-        auto_detect_source=env_config.get('reward', {}).get('auto_detect_source', False),
+        land_penalty=env_config.get('reward', {}).get('land_penalty', -50.0),
+        distance_reward_multiplier=env_config.get('reward', {}).get('distance_reward_multiplier', 1.0),
+        n_discrete_actions=agent_config.get('n_discrete_actions', 4),
+        # Spawn constraints
+        spawn_min_distance=env_config.get('spawn', {}).get('min_distance', 200),
+        spawn_max_distance=env_config.get('spawn', {}).get('max_distance', 3000),
+        spawn_start_frame=env_config.get('spawn', {}).get('start_frame', 1440),
+        spawn_conc_threshold=env_config.get('spawn', {}).get('conc_threshold', 0.5),
+        # Plume reward
+        plume_reward_positive=env_config.get('reward', {}).get('plume_reward_positive', 0.3),
+        plume_reward_negative=env_config.get('reward', {}).get('plume_reward_negative', -0.3),
+        plume_threshold=env_config.get('reward', {}).get('plume_threshold', 0.1),
     )
 
-    print(f"  [DEBUG] spawn=on_plume, threshold={env_kwargs.source_distance_threshold}m, auto_detect={env_kwargs.auto_detect_source}")
+    print(f"  [DEBUG] spawn=on_plume, threshold={env_kwargs.source_distance_threshold}m")
 
     # Crea ambiente
     env = SourceSeekingEnv(
@@ -150,7 +242,7 @@ def make_env_fn(
 ) -> Callable[[], gym.Env]:
     """Factory function per la creazione di ambienti paralleli."""
     def _init() -> gym.Env:
-        env = create_env(config, concentration_field, seed + rank, data_dir, randomize_field)
+        env = create_env(config, concentration_field, data_dir, randomize_field)
         env.reset(seed=seed + rank)
         return env
     return _init
@@ -163,7 +255,8 @@ def train(
     total_timesteps: Optional[int] = None,
     seed: int = 42,
     resume_from: Optional[str] = None,
-    data_dir: Optional[str] = None,
+    *,
+    data_dir: str,
 ):
     """
     Funzione principale di training.
@@ -175,7 +268,7 @@ def train(
         total_timesteps: Timesteps totali (override config)
         seed: Seed per riproducibilità
         resume_from: Path a checkpoint per riprendere training
-        data_dir: Directory con file NC (sceglie random ad ogni episodio)
+        data_dir: Directory con file NC (obbligatoria)
     """
     if not STABLE_BASELINES_AVAILABLE:
         raise ImportError(
@@ -211,31 +304,23 @@ def train(
 
     # Carica dati
     concentration_field = None
-    randomize_field = False
+    randomize_field = True
 
-    if data_dir:
-        print(f"\nUsing ALL NC files from: {data_dir}")
-        print("  Mode: Random field each episode")
-        randomize_field = True
-    else:
-        print("\nUsing synthetic concentration field")
+    print(f"\nUsing ALL NC files from: {data_dir}")
+    print("  Mode: Random field each episode")
 
     # Crea ambienti vettorizzati
     print(f"\nCreating {n_envs} parallel environments...")
 
-    timesteps = total_timesteps or training_config.get('total_timesteps', 1000000)
+    timesteps = total_timesteps or training_config.get('total_timesteps', 900000)
 
     env_fns = [
         make_env_fn(config, concentration_field, i, seed, data_dir, randomize_field)
         for i in range(n_envs)
     ]
 
-    if n_envs > 1 and not randomize_field:
-        # SubprocVecEnv solo se NON randomize (evita copia dati tra processi)
-        vec_env = SubprocVecEnv(env_fns)
-    else:
-        # DummyVecEnv per randomize o single env (più sicuro con dati grossi)
-        vec_env = DummyVecEnv(env_fns)
+    # DummyVecEnv sempre (necessario per accesso diretto agli env nel curriculum)
+    vec_env = DummyVecEnv(env_fns)
 
     # Normalizzazione
     if config.get('environment', {}).get('normalize_obs', True):
@@ -257,6 +342,8 @@ def train(
             norm_reward=False,
             training=False
         )
+        # Sincronizza le running stats dall'env di training
+        sync_envs_normalization(vec_env, eval_env)
 
     # Configura policy network
     policy_kwargs = training_config.get('policy_kwargs', {})
@@ -295,8 +382,8 @@ def train(
             gamma=training_config.get('gamma', 0.99),
             gae_lambda=training_config.get('gae_lambda', 0.95),
             clip_range=training_config.get('clip_range', 0.2),
-            ent_coef=training_config.get('ent_coef', 0.01),
-            vf_coef=training_config.get('vf_coef', 0.5),
+            ent_coef=training_config.get('ent_coef', 0.05),
+            vf_coef=training_config.get('vf_coef', 0.3),
             max_grad_norm=training_config.get('max_grad_norm', 0.5),
             policy_kwargs=sb3_policy_kwargs,
             tensorboard_log=str(log_dir / "tensorboard"),
@@ -338,10 +425,22 @@ def train(
     custom_callback = SourceSeekingCallback(verbose=1)
     callbacks.append(custom_callback)
 
+    # Curriculum callback
+    curriculum_config = config.get('curriculum', {})
+    if curriculum_config.get('enabled', False):
+        curriculum_callback = CurriculumCallback(vec_env, config, verbose=1)
+        callbacks.append(curriculum_callback)
+        # Imposta fase iniziale (solo S1)
+        initial_sources = curriculum_config.get('phases', [{}])[0].get('sources', ['S1'])
+        print(f"\n[Curriculum] Enabled - Initial sources: {initial_sources}")
+        # Imposta in tutti gli ambienti
+        for env in curriculum_callback._get_source_seeking_envs():
+            env.allowed_sources = list(initial_sources)
+    else:
+        print("\n[Curriculum] Disabled - using all sources")
+
     callback = CallbackList(callbacks)
 
-    # Calcola timesteps totali
-    timesteps = total_timesteps or training_config.get('total_timesteps', 1000000)
     print(f"\nStarting training for {timesteps:,} timesteps...")
     print(f"=" * 60)
 
@@ -407,6 +506,23 @@ def train(
         plt.close(fig)
         print(f"Success rate plot saved to: {plots_dir / 'training_success_rate.png'}")
 
+    # Plot Land Collision Rate
+    if custom_callback._lc_steps:
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.plot(custom_callback._lc_steps, custom_callback._lc_values, linewidth=0.8, color='red')
+        ax.axhline(y=0.10, color='orange', linestyle='--', alpha=0.7, label='Soglia warning (10%)')
+        ax.axhline(y=0.15, color='red', linestyle='--', alpha=0.7, label='Soglia critica (15%)')
+        ax.set_xlabel('Timesteps')
+        ax.set_ylabel('Land Collision Rate')
+        ax.set_title('Land Collision Rate (terra = NaN)')
+        ax.set_ylim(-0.02, max(0.3, max(custom_callback._lc_values) * 1.2))
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(plots_dir / 'land_collision_rate.png', dpi=150)
+        plt.close(fig)
+        print(f"Land collision plot saved to: {plots_dir / 'land_collision_rate.png'}")
+
     # Cleanup
     vec_env.close()
     eval_env.close()
@@ -418,13 +534,26 @@ def train(
 
 
 def main():
-    """Avvia il training con configurazione fissa."""
+    """Avvia il training con configurazione di default."""
+    import os
+    os.chdir(PROJECT_ROOT)  # Assicura CWD = root del progetto
+
+    config_path = str(PROJECT_ROOT / "utils" / "config.yaml")
+    output_dir = str(PROJECT_ROOT / "trained_models")
+    data_dir = str(PROJECT_ROOT / "data")
+
+    if not Path(data_dir).exists():
+        raise FileNotFoundError(
+            f"Cartella dati NC non trovata: {data_dir}\n"
+            f"Scarica i file .nc di simulazione MIKE21 nella cartella 'data/'"
+        )
+
     train(
-        config_path="utils/config.yaml",
-        output_dir="trained_models",
+        config_path=config_path,
+        output_dir=output_dir,
         n_envs=4,
         seed=42,
-        data_dir="data/",
+        data_dir=data_dir,
     )
 
 

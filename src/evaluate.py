@@ -10,8 +10,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import yaml
 from pathlib import Path
-from datetime import datetime
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, Tuple
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
@@ -23,9 +22,9 @@ from visualize import plot_trajectory
 from utils.data_loader import NetCDFLoader
 
 # ---------------------------------------------------------------------------
-# Costante globale: soglia di successo (deve essere coerente ovunque)
+# Soglia di successo di default (sovrascritta da config se disponibile)
 # ---------------------------------------------------------------------------
-SUCCESS_THRESHOLD_M = 100  # metri
+_DEFAULT_SUCCESS_THRESHOLD_M = 100  # metri
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +52,13 @@ def load_model_and_normalizer(model_path: str):
     return model, vec_normalize_path, has_vec_normalize
 
 
+def _get_success_threshold(config: dict) -> float:
+    """Legge la soglia di successo dal config, con fallback al default."""
+    return config.get('environment', {}).get('reward', {}).get(
+        'distance_threshold', _DEFAULT_SUCCESS_THRESHOLD_M
+    )
+
+
 def make_env_config(config: dict, max_steps: int = None) -> SourceSeekingConfig:
     """
     Costruisce SourceSeekingConfig dal dizionario YAML, eliminando la duplicazione.
@@ -66,14 +72,24 @@ def make_env_config(config: dict, max_steps: int = None) -> SourceSeekingConfig:
         ymin=config['domain']['ymin'],
         ymax=config['domain']['ymax'],
         resolution=config['domain'].get('grid_resolution', 10),
-        max_steps=max_steps or env_config.get('max_episode_steps', 500),
-        source_distance_threshold=env_config.get('reward', {}).get('distance_threshold', SUCCESS_THRESHOLD_M),
-        distance_reward_multiplier=env_config.get('distance_reward_multiplier', 1.0),
-        auto_detect_source=env_config.get('reward', {}).get('auto_detect_source', False),
         max_velocity=agent_config.get('max_velocity', 1.0),
-        memory_length=agent_config.get('memory_length', 10),
-        sensor_radius=agent_config.get('sensor_radius', 50),
-        n_sensors=agent_config.get('n_concentration_samples', 8),
+        memory_length=agent_config.get('memory_length', 9),
+        dt=env_config.get('dt', 10),
+        max_steps=max_steps or env_config.get('max_episode_steps', 1080),
+        source_distance_threshold=env_config.get('reward', {}).get('distance_threshold', _DEFAULT_SUCCESS_THRESHOLD_M),
+        source_found_reward=env_config.get('reward', {}).get('source_reached_bonus', 100),
+        step_penalty=env_config.get('reward', {}).get('step_penalty', -0.1),
+        boundary_penalty=env_config.get('reward', {}).get('boundary_penalty', -10),
+        distance_reward_multiplier=env_config.get('reward', {}).get('distance_reward_multiplier', 1.0),
+        land_penalty=env_config.get('reward', {}).get('land_penalty', -50.0),
+        n_discrete_actions=agent_config.get('n_discrete_actions', 4),
+        spawn_min_distance=env_config.get('spawn', {}).get('min_distance', 200),
+        spawn_max_distance=env_config.get('spawn', {}).get('max_distance', 3000),
+        spawn_start_frame=env_config.get('spawn', {}).get('start_frame', 1440),
+        spawn_conc_threshold=env_config.get('spawn', {}).get('conc_threshold', 0.5),
+        plume_reward_positive=env_config.get('reward', {}).get('plume_reward_positive', 0.3),
+        plume_reward_negative=env_config.get('reward', {}).get('plume_reward_negative', -0.3),
+        plume_threshold=env_config.get('reward', {}).get('plume_threshold', 0.1),
     )
 
 
@@ -139,10 +155,10 @@ def get_field(env, is_vec_env: bool):
     return env.envs[0].field if is_vec_env else env.field
 
 
-def check_success(trajectory: np.ndarray, field) -> Tuple[bool, float]:
+def check_success(trajectory: np.ndarray, field, threshold: float = _DEFAULT_SUCCESS_THRESHOLD_M) -> Tuple[bool, float]:
     """Ritorna (is_success, final_distance)."""
     final_dist = float(np.linalg.norm(trajectory[-1] - np.array(field.source_position)))
-    return final_dist < SUCCESS_THRESHOLD_M, final_dist
+    return final_dist < threshold, final_dist
 
 def evaluate_and_visualize(
     model_path: str,
@@ -163,6 +179,7 @@ def evaluate_and_visualize(
     config = load_config(config_path)
     model, vec_norm_path, has_vec_norm = load_model_and_normalizer(model_path)
     env_cfg = make_env_config(config)
+    success_threshold = _get_success_threshold(config)
 
     print(f"\nLoading model from: {model_path}")
     print(f"Found vec_normalize: {has_vec_norm}")
@@ -192,15 +209,15 @@ def evaluate_and_visualize(
             config=env_cfg,
             concentration_field=variant_field,
             source_id=source_id,
-            seed=ep,
             data_dir=data_dir if data_dir else None,
             randomize_field=randomize and not variant_field
         )
+        env.reset(seed=ep)  # seed via Gymnasium API
         env, is_vec = wrap_env(env, has_vec_norm, vec_norm_path)
 
         traj, ep_reward, steps, info = run_episode(model, env, is_vec)
         field = get_field(env, is_vec)
-        is_success, final_dist = check_success(traj, field)
+        is_success, final_dist = check_success(traj, field, success_threshold)
 
         trajectories.append(traj)
         fields.append(field)
@@ -219,7 +236,7 @@ def evaluate_and_visualize(
     print("Creating trajectory plots...")
 
     for i, (traj, field) in enumerate(zip(trajectories, fields)):
-        is_success, final_dist = check_success(traj, field)
+        is_success, final_dist = check_success(traj, field, success_threshold)
         title = f"Episode {i+1} - {'SUCCESS ✓' if is_success else 'FAILED ✗'}"
 
         fig, ax = plt.subplots(figsize=(12, 10))

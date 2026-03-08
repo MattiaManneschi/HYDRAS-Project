@@ -9,11 +9,9 @@ import gymnasium as gym
 from gymnasium import spaces
 from typing import Optional, Tuple, Dict, Any, List
 from dataclasses import dataclass
-import sys
-from pathlib import Path
 
 from .data_loader import (
-    ConcentrationField, DataManager, DomainConfig, SyntheticPlumeGenerator
+    ConcentrationField, DataManager, DomainConfig
 )
 
 
@@ -24,7 +22,6 @@ class AgentState:
     y: float  # Posizione y (UTM)
     vx: float = 0.0  # Velocità x
     vy: float = 0.0  # Velocità y
-    heading: float = 0.0  # Orientamento (radianti)
     
     @property
     def position(self) -> np.ndarray:
@@ -47,39 +44,34 @@ class SourceSeekingConfig:
 
     # Agent
     max_velocity: float = 1.0  # m/s (velocità AUV)
-    sensor_radius: float = 50  # m
-    n_sensors: int = 8  # punti di campionamento attorno all'agente
 
-    # Memory - istanti precedenti di concentrazione
-    memory_length: int = 10  # numero di istanti passati da includere nell'osservazione
+    # Memory - ultimi N step (concentrazioni passate + spostamenti passati)
+    memory_length: int = 9  # 9 step passati
 
     # Episode
     dt: float = 10.0  # s  (con max_velocity=1 m/s -> spostamento max 10 m/step)
-    max_steps: int = 500
+    max_steps: int = 1080  # 3 ore: 10800s / 10s = 1080 steps
 
     # Spawn
-    spawn_margin: float = 100  # m dal bordo
+    spawn_min_distance: float = 200.0  # m distanza minima dalla sorgente
+    spawn_max_distance: float = 3000.0  # m distanza massima dalla sorgente (3h a 1m/s = 10.8km, margine ok)
+    spawn_start_frame: int = 1440  # frame di partenza (metà simulazione)
+    spawn_conc_threshold: float = 0.5  # soglia minima concentrazione per spawn
 
     # Reward
     source_distance_threshold: float = 100  # m (intorno di successo)
     source_found_reward: float = 100.0
     step_penalty: float = -0.1
     boundary_penalty: float = -10.0
-    concentration_reward_scale: float = 1.0
-    distance_reward_multiplier: float = 1.0  # Moltiplicatore dinamico per reward scaling
-
-    # Source detection
-    auto_detect_source: bool = False  # Se True, rileva sorgente dal max globale
-
-    # Observation
-    include_velocity: bool = True
-    include_position: bool = True
-    include_gradient: bool = True
-    normalize_observations: bool = True
+    land_penalty: float = -50.0  # penalità per collisione con terra
+    distance_reward_multiplier: float = 1.0  # Moltiplicatore per reward distanza
+    plume_reward_positive: float = 0.3  # reward binario dentro il plume
+    plume_reward_negative: float = -0.3  # penalità fuori dal plume
+    plume_threshold: float = 0.1  # soglia concentrazione per "dentro il plume"
 
     # Action
-    action_type: str = "continuous"  # "continuous" o "discrete"
-    n_discrete_actions: int = 8
+    action_type: str = "discrete"  # "discrete" (N/S/E/W)
+    n_discrete_actions: int = 4  # 4 direzioni cardinali
 
 
 class SourceSeekingEnv(gym.Env):
@@ -89,23 +81,21 @@ class SourceSeekingEnv(gym.Env):
     L'agente (AUV) deve navigare in un campo di concentrazione
     per trovare la sorgente dell'inquinante.
 
-    Observation Space:
-        - Concentrazioni campionate in n_sensors punti attorno all'agente
-        - Concentrazione nel punto corrente
-        - Gradiente della concentrazione (opzionale)
-        - Posizione normalizzata (opzionale)
-        - Velocità normalizzata (opzionale)
+    Observation Space (28 valori):
+        - 1 concentrazione corrente
+        - 9 concentrazioni passate
+        - 9 x (Δx, Δy) spostamenti passati in metri
+        (normalizzazione delegata a VecNormalize)
 
     Action Space:
-        - Continuous: [vx, vy] velocità normalizzate in [-1, 1]
-        - Discrete: 8 direzioni cardinali + stazionario
+        - Discrete(4): Nord(+y), Sud(-y), Est(+x), Ovest(-x)
 
     Reward:
-        - Bonus grande per trovare la sorgente
-        - Reward proporzionale all'aumento di concentrazione
-        - Reward per seguire il gradiente positivo
-        - Penalità per step (incentiva velocità)
-        - Penalità per uscire dai bordi
+        - Bonus sorgente raggiunta + time bonus (terminale dominante)
+        - Reward distanza (segnale dominante continuo)
+        - Reward binario plume (+0.3 dentro, -0.3 fuori)
+        - Penalità per step (-0.1)
+        - Penalità bordi (-10) e terra (-50)
     """
 
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 10}
@@ -148,10 +138,9 @@ class SourceSeekingEnv(gym.Env):
 
         # Data Manager per gestione NC files
         self._data_manager: Optional[DataManager] = None
-        if data_dir or randomize_field:
+        if data_dir:
             self._data_manager = DataManager(
                 data_dir=data_dir,
-                use_synthetic=True,
                 domain_config=self.domain,
                 preload_all=False,  # NON precaricare - carica on-demand per risparmiare RAM
             )
@@ -162,19 +151,15 @@ class SourceSeekingEnv(gym.Env):
         else:
             self._init_field()
 
-        # Posizione sorgente
-        # Opzione 1: usa coordinate hardcodate
-        # Opzione 2: rileva automaticamente dal massimo globale di concentrazione
-        if getattr(self.config, 'auto_detect_source', False):
-            detected_source = self.field.find_source_from_concentration()
-            self.source_position = np.array(detected_source)
-            print(f"  Source auto-detected at: ({detected_source[0]:.0f}, {detected_source[1]:.0f})")
-        elif self.field.source_position is not None:
+        # Posizione sorgente (sempre da coordinate hardcodate nel campo)
+        if self.field.source_position is not None:
             self.source_position = np.array(self.field.source_position)
         else:
-            # Fallback: rileva automaticamente
-            detected_source = self.field.find_source_from_concentration()
-            self.source_position = np.array(detected_source)
+            raise ValueError(
+                f"ConcentrationField non ha source_position impostata. "
+                f"Controlla che il file NC contenga S1/S2/S3 nel nome "
+                f"o passa un campo con source_position."
+            )
 
         # Stato agente
         self.state: Optional[AgentState] = None
@@ -184,6 +169,12 @@ class SourceSeekingEnv(gym.Env):
 
         # Memory buffer per concentrazioni passate (usata nell'osservazione)
         self._concentration_memory: List[float] = [0.0] * self.config.memory_length
+
+        # Memory buffer per spostamenti passati (Δx, Δy)
+        self._displacement_memory: List[Tuple[float, float]] = [(0.0, 0.0)] * self.config.memory_length
+
+        # Allowed sources per curriculum learning
+        self.allowed_sources: List[str] = ['S1', 'S2', 'S3']
 
         # History per analisi
         self.trajectory: List[np.ndarray] = []
@@ -199,36 +190,26 @@ class SourceSeekingEnv(gym.Env):
 
     def _init_field(self):
         """Inizializza il campo di concentrazione."""
-        if self._data_manager:
-            if self.randomize_field:
-                self.field, self.source_id = self._data_manager.get_random_field()
-            else:
-                self.field = self._data_manager.get_concentration_field(source_id=self.source_id)
+        if not self._data_manager:
+            raise ValueError(
+                "Nessun DataManager configurato. "
+                "Passa data_dir al costruttore o concentration_field direttamente."
+            )
+        if self.randomize_field:
+            self.field, self.source_id = self._data_manager.get_random_field()
         else:
-            dm = DataManager(use_synthetic=True, domain_config=self.domain)
-            self.field = dm.get_concentration_field(source_id=self.source_id)
+            self.field = self._data_manager.get_concentration_field(source_id=self.source_id)
 
     def _setup_observation_space(self):
-        """Configura lo spazio delle osservazioni."""
-        obs_dim = 0
-
-        # Concentrazioni campionate
-        obs_dim += self.config.n_sensors + 1  # sensors + centro
-
-        # Memoria concentrazioni istanti precedenti
-        obs_dim += self.config.memory_length
-
-        # Gradiente
-        if self.config.include_gradient:
-            obs_dim += 2
-
-        # Posizione
-        if self.config.include_position:
-            obs_dim += 2
-
-        # Velocità
-        if self.config.include_velocity:
-            obs_dim += 2
+        """Configura lo spazio delle osservazioni.
+        
+        Osservazione (28 valori):
+        - 1 concentrazione corrente
+        - 9 concentrazioni passate (memory_length)
+        - 9 * 2 spostamenti passati (Δx, Δy) normalizzati
+        """
+        obs_dim = 1 + self.config.memory_length + self.config.memory_length * 2
+        # = 1 + 9 + 18 = 28
 
         self.observation_space = spaces.Box(
             low=-np.inf,
@@ -238,30 +219,23 @@ class SourceSeekingEnv(gym.Env):
         )
 
     def _setup_action_space(self):
-        """Configura lo spazio delle azioni."""
-        if self.config.action_type == "continuous":
-            # Velocità normalizzate in [-1, 1]
-            self.action_space = spaces.Box(
-                low=-1.0,
-                high=1.0,
-                shape=(2,),
-                dtype=np.float32
-            )
-        else:
-            # Direzioni discrete
-            self.action_space = spaces.Discrete(self.config.n_discrete_actions + 1)
-
-    def _get_spawn_position(self) -> Tuple[float, float]:
-        """Determina la posizione iniziale dell'agente (sempre on_plume)."""
-        return self._spawn_on_plume()
+        """Configura lo spazio delle azioni.
+        
+        4 azioni discrete:
+          0 = Nord  (+y)
+          1 = Sud   (-y)
+          2 = Est   (+x)
+          3 = Ovest (-x)
+        """
+        self.action_space = spaces.Discrete(self.config.n_discrete_actions)
 
     def _spawn_on_plume(self) -> Tuple[float, float]:
-        """Spawn su una cella con concentrazione > 0."""
+        """Spawn su una cella con concentrazione > soglia, con vincoli di distanza dalla sorgente."""
 
-        # Usa un timestep dove il plume è sviluppato (non t=0)
+        # Imposta il timestep al frame configurato (1440 = metà simulazione)
         if self.field.n_timesteps > 1:
-            mid_time = self.field.n_timesteps // 2
-            self.field.set_time(mid_time)
+            start_frame = min(self.config.spawn_start_frame, self.field.n_timesteps - 1)
+            self.field.set_time(start_frame)
 
         # Ottieni il campo corrente
         field_data = self.field.get_current_field()
@@ -269,8 +243,8 @@ class SourceSeekingEnv(gym.Env):
         # Sostituisci NaN con 0
         field_clean = np.nan_to_num(field_data, nan=0.0)
 
-        # Trova TUTTE le celle con concentrazione > 0.5
-        valid_mask = field_clean > 0.5
+        # Trova TUTTE le celle con concentrazione > soglia
+        valid_mask = field_clean > self.config.spawn_conc_threshold
         valid_indices = np.where(valid_mask)
 
         if len(valid_indices[0]) == 0:
@@ -281,14 +255,35 @@ class SourceSeekingEnv(gym.Env):
                 self.source_position[1] + self.np_random.uniform(-50, 50)
             )
 
-        # Scegli una cella random tra quelle valide
-        idx = self.np_random.integers(len(valid_indices[0]))
-        y_idx = valid_indices[0][idx]
-        x_idx = valid_indices[1][idx]
-
         # Converti indici in coordinate
-        x = self.field.x_coords[x_idx]
-        y = self.field.y_coords[y_idx]
+        y_coords = self.field.y_coords[valid_indices[0]]
+        x_coords = self.field.x_coords[valid_indices[1]]
+
+        # Calcola distanze dalla sorgente
+        distances = np.sqrt(
+            (x_coords - self.source_position[0])**2 +
+            (y_coords - self.source_position[1])**2
+        )
+
+        # Applica vincoli di distanza minima e massima dalla sorgente
+        distance_mask = (
+            (distances >= self.config.spawn_min_distance) &
+            (distances <= self.config.spawn_max_distance)
+        )
+
+        valid_x = x_coords[distance_mask]
+        valid_y = y_coords[distance_mask]
+
+        if len(valid_x) == 0:
+            # Rilassa vincoli se nessun punto valido
+            print("WARNING: No points satisfy distance constraints, relaxing...")
+            valid_x = x_coords
+            valid_y = y_coords
+
+        # Scegli una cella random tra quelle valide
+        idx = self.np_random.integers(len(valid_x))
+        x = valid_x[idx]
+        y = valid_y[idx]
 
         # Aggiungi piccolo rumore per non essere esattamente sul centro cella
         x += self.np_random.uniform(-5, 5)
@@ -297,82 +292,52 @@ class SourceSeekingEnv(gym.Env):
         return (float(x), float(y))
 
     def _get_observation(self) -> np.ndarray:
-        """Costruisce il vettore di osservazione."""
+        """Costruisce il vettore di osservazione (28 valori) RAW.
+        
+        I valori NON vengono normalizzati manualmente: la normalizzazione
+        è delegata interamente a VecNormalize (running mean/std adattiva).
+        
+        Struttura:
+        - [0]      : concentrazione corrente
+        - [1:10]   : 9 concentrazioni passate
+        - [10:28]  : 9 spostamenti passati (Δx, Δy) in metri
+        """
         obs = []
 
-        # Concentrazione al centro
+        # Concentrazione al centro (1 valore)
         center_conc = self.field.get_concentration(self.state.x, self.state.y)
-        if np.isnan(center_conc):
-            center_conc = 0.0
+        obs.append(center_conc)
 
-        # Concentrazioni campionate attorno all'agente
-        sensor_concs = self._sample_concentrations()
-
-        # Normalizza le concentrazioni
-        max_conc = max(self.field.max_concentration, 1.0)
-        obs.extend(sensor_concs / max_conc)
-        obs.append(center_conc / max_conc)
-
-        # Memoria concentrazioni istanti precedenti (normalizzate)
+        # 9 concentrazioni passate
         for past_conc in self._concentration_memory:
-            obs.append(past_conc / max_conc)
+            obs.append(past_conc)
 
-        # Gradiente
-        if self.config.include_gradient:
-            gradient = self.field.get_gradient(self.state.x, self.state.y)
-            gradient = np.nan_to_num(gradient, nan=0.0)
-            # Normalizza il gradiente
-            grad_norm = np.linalg.norm(gradient)
-            if grad_norm > 1e-6:
-                gradient = gradient / grad_norm
-            obs.extend(gradient)
-
-        # Posizione normalizzata
-        if self.config.include_position:
-            x_norm = 2 * (self.state.x - self.config.xmin) / (self.config.xmax - self.config.xmin) - 1
-            y_norm = 2 * (self.state.y - self.config.ymin) / (self.config.ymax - self.config.ymin) - 1
-            obs.extend([x_norm, y_norm])
-
-        # Velocità normalizzata
-        if self.config.include_velocity:
-            vx_norm = self.state.vx / self.config.max_velocity
-            vy_norm = self.state.vy / self.config.max_velocity
-            obs.extend([vx_norm, vy_norm])
+        # 9 spostamenti passati (Δx, Δy) in metri
+        for dx, dy in self._displacement_memory:
+            obs.append(dx)
+            obs.append(dy)
 
         return np.array(obs, dtype=np.float32)
 
-    def _sample_concentrations(self) -> np.ndarray:
-        """Campiona la concentrazione in punti attorno all'agente."""
-        angles = np.linspace(0, 2*np.pi, self.config.n_sensors, endpoint=False)
-        r = self.config.sensor_radius
+    # Mappa azioni discrete: 0=Nord(+y), 1=Sud(-y), 2=Est(+x), 3=Ovest(-x)
+    _ACTION_MAP = {
+        0: (0.0, 1.0),   # Nord  (+y)
+        1: (0.0, -1.0),  # Sud   (-y)
+        2: (1.0, 0.0),   # Est   (+x)
+        3: (-1.0, 0.0),  # Ovest (-x)
+    }
 
-        concentrations = []
-        for angle in angles:
-            x = self.state.x + r * np.cos(angle)
-            y = self.state.y + r * np.sin(angle)
-            c = self.field.get_concentration(x, y)
-            if np.isnan(c):
-                c = 0.0
-            concentrations.append(c)
+    def _apply_action(self, action):
+        """Applica l'azione discreta all'agente.
+        
+        Azioni: 0=Nord, 1=Sud, 2=Est, 3=Ovest.
+        Spostamento fisso = max_velocity * dt (10m per default).
+        """
+        action_int = int(action)
+        dx_dir, dy_dir = self._ACTION_MAP[action_int]
 
-        return np.array(concentrations)
-
-    def _apply_action(self, action: np.ndarray):
-        """Applica l'azione all'agente."""
-        if self.config.action_type == "continuous":
-            # action è [vx, vy] normalizzato in [-1, 1]
-            vx = action[0] * self.config.max_velocity
-            vy = action[1] * self.config.max_velocity
-        else:
-            # Azione discreta
-            if action == self.config.n_discrete_actions:
-                # Stazionario
-                vx, vy = 0.0, 0.0
-            else:
-                # Direzione
-                angle = action * 2 * np.pi / self.config.n_discrete_actions
-                vx = self.config.max_velocity * np.cos(angle)
-                vy = self.config.max_velocity * np.sin(angle)
+        vx = dx_dir * self.config.max_velocity
+        vy = dy_dir * self.config.max_velocity
 
         # Aggiorna stato
         self.state.vx = vx
@@ -380,8 +345,7 @@ class SourceSeekingEnv(gym.Env):
         self.state.x += vx * self.config.dt
         self.state.y += vy * self.config.dt
 
-        if vx != 0 or vy != 0:
-            self.state.heading = np.arctan2(vy, vx)
+
 
     def _check_boundary(self) -> bool:
         """Verifica se l'agente è fuori dal dominio."""
@@ -393,7 +357,7 @@ class SourceSeekingEnv(gym.Env):
         )
 
     def _check_on_land(self) -> bool:
-        """Verifica se l'agente è sulla terra (NaN nel campo)."""
+        """Verifica se l'agente è sulla terra (usa land_mask del campo)."""
         return getattr(self, '_on_land', False)
 
     def _check_source_reached(self) -> bool:
@@ -407,9 +371,11 @@ class SourceSeekingEnv(gym.Env):
     def _compute_reward(self, action: np.ndarray) -> Tuple[float, Dict[str, float]]:
         """
         Calcola il reward basato su:
-        1. Delta concentrazione temporale (concentrazione attuale vs precedente)
-        2. Distanza dalla sorgente
-        3. Tempo trascorso (time efficiency)
+        1. Bonus sorgente raggiunta (terminale dominante)
+        2. Penalità terra e bordi (terminale)
+        3. Reward distanza (segnale dominante continuo)
+        4. Reward binario plume (+0.3 dentro, -0.3 fuori)
+        5. Penalità tempo
         """
         reward = 0.0
         info = {}
@@ -420,13 +386,12 @@ class SourceSeekingEnv(gym.Env):
             (self.state.y - self.source_position[1])**2
         )
 
-        # Ottieni concentrazione (potrebbe essere NaN se terra)
-        raw_conc = self.field.get_concentration(self.state.x, self.state.y)
-        on_land = np.isnan(raw_conc)
-        current_conc = 0.0 if on_land else raw_conc
+        # Verifica terra tramite maschera (non più NaN)
+        on_land = self.field.is_land(self.state.x, self.state.y)
+        current_conc = self.field.get_concentration(self.state.x, self.state.y)
 
         # ============================================================
-        # 1. BONUS SORGENTE RAGGIUNTA
+        # 1. BONUS SORGENTE RAGGIUNTA (TERMINALE DOMINANTE)
         # ============================================================
         if self._check_source_reached():
             time_bonus = max(0, (self.config.max_steps - self.steps) / self.config.max_steps * 50)
@@ -436,11 +401,11 @@ class SourceSeekingEnv(gym.Env):
             info['time_bonus'] = time_bonus
 
         # ============================================================
-        # 2. PENALITÀ TERRA (-50) e termina
+        # 2. PENALITÀ TERRA (configurabile, default -50)
         # ============================================================
         if on_land:
-            reward += -50.0
-            info['on_land_penalty'] = -50.0
+            reward += self.config.land_penalty
+            info['on_land_penalty'] = self.config.land_penalty
             self._on_land = True
         else:
             self._on_land = False
@@ -453,27 +418,22 @@ class SourceSeekingEnv(gym.Env):
             info['boundary'] = self.config.boundary_penalty
 
         # ============================================================
-        # 4. REWARD DISTANZA (SEGNALE PRINCIPALE - FORTE)
+        # 4. REWARD DISTANZA (SEGNALE DOMINANTE CONTINUO)
         # ============================================================
-        # Il distance_reward è il segnale forte che spinge verso la sorgente
-        # L'agente non sa DOVE sia la sorgente, solo se si avvicina o allontana
         distance_improvement = self.prev_distance - current_distance
         distance_reward = distance_improvement * 5.0 * self.config.distance_reward_multiplier
         reward += distance_reward
         info['distance_reward'] = distance_reward
 
         # ============================================================
-        # 5. BONUS CONCENTRAZIONE (SEGNALE DI POSIZIONE)
+        # 5. REWARD BINARIO PLUME (+0.3 dentro, -0.3 fuori)
         # ============================================================
-        # Bonus per essere sul pennacchio - indica che si è nella zona giusta
-        # L'agente deve esplorare per trovare quale direzione lo avvicina
-        max_conc = max(self.field.max_concentration, 1.0)
-        if current_conc > 0.1:
-            conc_bonus = (current_conc / max_conc) * 0.5
-            reward += conc_bonus
-            info['concentration_bonus'] = conc_bonus
+        if current_conc > self.config.plume_threshold:
+            reward += self.config.plume_reward_positive
+            info['plume_reward'] = self.config.plume_reward_positive
         else:
-            info['concentration_bonus'] = 0.0
+            reward += self.config.plume_reward_negative
+            info['plume_reward'] = self.config.plume_reward_negative
 
         # ============================================================
         # 6. PENALITÀ TEMPO (time efficiency)
@@ -512,23 +472,31 @@ class SourceSeekingEnv(gym.Env):
         """
         super().reset(seed=seed)
 
-        # Randomizza campo NC se abilitato
+        # Curriculum: scegli sorgente random tra quelle consentite, poi scenario random
         if self.randomize_field and self._data_manager:
-            self.field, self.source_id = self._data_manager.get_random_field()
-            self.source_position = np.array(self.field.source_position)
+            source = self.np_random.choice(self.allowed_sources)
+            self.field, self.source_id = self._data_manager.get_random_field_for_source(source)
+            # Aggiorna posizione sorgente (sempre da coordinate hardcodate)
+            if self.field.source_position is not None:
+                self.source_position = np.array(self.field.source_position)
+            else:
+                raise ValueError(
+                    f"Campo per {source} non ha source_position. "
+                    f"Controlla DataManager.SOURCE_CONFIGS e nome file NC."
+                )
 
-        # PRIMA: Imposta timestep a metà simulazione (plume già sviluppato)
+        # Imposta timestep al frame 1440 (metà simulazione)
         if self.field.n_timesteps > 1:
-            self._start_time_idx = self.field.n_timesteps // 2
+            self._start_time_idx = min(self.config.spawn_start_frame, self.field.n_timesteps - 1)
             self.field.set_time(self._start_time_idx)
         else:
             self._start_time_idx = 0
 
-        # POI: Determina posizione iniziale (ora usa il timestep corretto)
+        # Determina posizione iniziale
         if options and 'spawn_position' in options:
             spawn_pos = options['spawn_position']
         else:
-            spawn_pos = self._get_spawn_position()
+            spawn_pos = self._spawn_on_plume()
 
         # Inizializza stato agente
         self.state = AgentState(x=spawn_pos[0], y=spawn_pos[1])
@@ -547,16 +515,17 @@ class SourceSeekingEnv(gym.Env):
         self.trajectory = [self.state.position.copy()]
         self.concentration_history = [self.prev_concentration]
 
-        # Reset memoria concentrazioni passate
+        # Reset memoria concentrazioni passate (9 valori)
         self._concentration_memory = [0.0] * self.config.memory_length
 
-        # Reset esplorazione
-        self._visited_cells = set()
+        # Reset memoria spostamenti passati (9 coppie Δx, Δy)
+        self._displacement_memory = [(0.0, 0.0)] * self.config.memory_length
 
         observation = self._get_observation()
         info = {
             'spawn_position': spawn_pos,
             'source_position': self.source_position.tolist(),
+            'source_id': self.source_id,
             'initial_distance': self.prev_distance,
             'initial_concentration': self.prev_concentration
         }
@@ -583,10 +552,19 @@ class SourceSeekingEnv(gym.Env):
         if isinstance(action, np.ndarray):
             action = action.astype(np.float32)
 
+        # Registra posizione prima dell'azione
+        old_x, old_y = self.state.x, self.state.y
+
         # Applica azione
         self._apply_action(action)
 
-        # Avanza il tempo del campo se time-varying (partendo da metà simulazione)
+        # Calcola spostamento e aggiorna memoria (Δx, Δy)
+        dx = self.state.x - old_x
+        dy = self.state.y - old_y
+        self._displacement_memory.pop(0)
+        self._displacement_memory.append((dx, dy))
+
+        # Avanza il tempo del campo se time-varying (partendo dal frame di start)
         if self.field.n_timesteps > 1:
             time_offset = int(self.steps * self.config.dt / 60)  # assumendo dt NC = 1 min
             time_idx = self._start_time_idx + time_offset
@@ -600,8 +578,6 @@ class SourceSeekingEnv(gym.Env):
         # Registra traiettoria
         self.trajectory.append(self.state.position.copy())
         conc_now = self.field.get_concentration(self.state.x, self.state.y)
-        if np.isnan(conc_now):
-            conc_now = 0.0
         self.concentration_history.append(conc_now)
 
         # Aggiorna memoria concentrazioni (FIFO: rimuovi più vecchio, aggiungi attuale)
@@ -739,34 +715,6 @@ class SourceSeekingEnv(gym.Env):
             self._fig = None
             self._ax = None
 
-    def get_trajectory(self) -> np.ndarray:
-        """Ritorna la traiettoria completa."""
-        return np.array(self.trajectory)
-
-    def get_statistics(self) -> Dict[str, Any]:
-        """Ritorna statistiche dell'episodio."""
-        trajectory = self.get_trajectory()
-
-        # Distanza totale percorsa
-        if len(trajectory) > 1:
-            diffs = np.diff(trajectory, axis=0)
-            total_distance = np.sum(np.linalg.norm(diffs, axis=1))
-        else:
-            total_distance = 0.0
-
-        # Distanza finale dalla sorgente
-        final_distance = np.linalg.norm(trajectory[-1] - self.source_position)
-
-        return {
-            'total_distance': total_distance,
-            'final_distance': final_distance,
-            'n_steps': self.steps,
-            'max_concentration': max(self.concentration_history),
-            'final_concentration': self.concentration_history[-1],
-            'source_reached': self._check_source_reached(),
-            'efficiency': 1.0 - (final_distance / self.prev_distance) if self.prev_distance > 0 else 0.0
-        }
-
 
 # Registra l'ambiente con Gymnasium
 gym.register(
@@ -805,7 +753,6 @@ if __name__ == "__main__":
             break
 
     print(f"\nTotal reward: {total_reward:.2f}")
-    print(f"Statistics: {env.get_statistics()}")
 
     env.close()
     print("\nEnvironment test completed!")
