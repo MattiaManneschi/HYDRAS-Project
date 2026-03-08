@@ -54,7 +54,7 @@ class SourceSeekingConfig:
 
     # Spawn
     spawn_min_distance: float = 200.0  # m distanza minima dalla sorgente
-    spawn_max_distance: float = 3000.0  # m distanza massima dalla sorgente (3h a 1m/s = 10.8km, margine ok)
+    spawn_max_distance: float = 1500.0  # m distanza massima dalla sorgente (ridotto per training più facile)
     spawn_start_frame: int = 1440  # frame di partenza (metà simulazione)
     spawn_conc_threshold: float = 0.5  # soglia minima concentrazione per spawn
 
@@ -71,12 +71,12 @@ class SourceSeekingConfig:
 
     # Land avoidance
     land_proximity_threshold: float = 10.0  # m - distanza dalla terra per penalità progressiva
-    land_proximity_penalty_max: float = -1.0  # penalità massima per vicinanza terra
+    land_proximity_penalty_max: float = -5.0  # penalità massima per vicinanza terra (aumentata)
     spawn_min_land_distance: float = 50.0  # m - distanza minima dalla terra per spawn
 
     # Action
-    action_type: str = "discrete"  # "discrete" (N/S/E/W)
-    n_discrete_actions: int = 4  # 4 direzioni cardinali
+    action_type: str = "discrete"  # "discrete" (N/S/E/W + diagonali)
+    n_discrete_actions: int = 8  # 8 direzioni: 4 cardinali + 4 diagonali
 
 
 class SourceSeekingEnv(gym.Env):
@@ -94,7 +94,7 @@ class SourceSeekingEnv(gym.Env):
         (normalizzazione delegata a VecNormalize)
 
     Action Space:
-        - Discrete(4): Nord(+y), Sud(-y), Est(+x), Ovest(-x)
+        - Discrete(8): N, S, E, W, NE, SE, NW, SW
 
     Reward:
         - Bonus sorgente raggiunta + time bonus (terminale dominante)
@@ -229,11 +229,15 @@ class SourceSeekingEnv(gym.Env):
     def _setup_action_space(self):
         """Configura lo spazio delle azioni.
         
-        4 azioni discrete:
+        8 azioni discrete:
           0 = Nord  (+y)
           1 = Sud   (-y)
           2 = Est   (+x)
           3 = Ovest (-x)
+          4 = NordEst (+x,+y)
+          5 = SudEst  (+x,-y)
+          6 = NordOvest (-x,+y)
+          7 = SudOvest  (-x,-y)
         """
         self.action_space = spaces.Discrete(self.config.n_discrete_actions)
 
@@ -338,8 +342,8 @@ class SourceSeekingEnv(gym.Env):
             obs.append(dx)
             obs.append(dy)
 
-        # 4 sensori terra direzionali (distanza di sensing = max_velocity * dt)
-        sensing_dist = self.config.max_velocity * self.config.dt
+        # 4 sensori terra direzionali (distanza di sensing = 3 step = 30m)
+        sensing_dist = self.config.max_velocity * self.config.dt * 3  # 30m invece di 10m
         x, y = self.state.x, self.state.y
         land_sensors = [
             float(self.field.is_land(x, y + sensing_dist)),  # Nord
@@ -351,12 +355,16 @@ class SourceSeekingEnv(gym.Env):
 
         return np.array(obs, dtype=np.float32)
 
-    # Mappa azioni discrete: 0=Nord(+y), 1=Sud(-y), 2=Est(+x), 3=Ovest(-x)
+    # Mappa azioni discrete: 8 direzioni (4 cardinali + 4 diagonali)
     _ACTION_MAP = {
-        0: (0.0, 1.0),   # Nord  (+y)
-        1: (0.0, -1.0),  # Sud   (-y)
-        2: (1.0, 0.0),   # Est   (+x)
-        3: (-1.0, 0.0),  # Ovest (-x)
+        0: (0.0,   1.0),    # Nord  (+y)
+        1: (0.0,  -1.0),    # Sud   (-y)
+        2: (1.0,   0.0),    # Est   (+x)
+        3: (-1.0,  0.0),    # Ovest (-x)
+        4: (0.707,  0.707), # NordEst
+        5: (0.707, -0.707), # SudEst
+        6: (-0.707, 0.707), # NordOvest
+        7: (-0.707,-0.707), # SudOvest
     }
 
     def _apply_action(self, action):
@@ -399,6 +407,46 @@ class SourceSeekingEnv(gym.Env):
             (self.state.y - self.source_position[1])**2
         )
         return distance < self.config.source_distance_threshold
+
+    def action_masks(self) -> np.ndarray:
+        """Ritorna una maschera booleana delle azioni valide.
+        
+        Un'azione è invalida se:
+        1. Porta l'agente su terra (land collision)
+        2. Porta l'agente fuori dal dominio (boundary)
+        
+        Usata da MaskablePPO per evitare azioni che causano terminazione.
+        
+        Returns:
+            np.ndarray di shape (n_actions,) con True per azioni valide
+        """
+        if self.state is None:
+            # Prima del reset, tutte le azioni sono valide
+            return np.ones(self.config.n_discrete_actions, dtype=bool)
+        
+        masks = np.ones(self.config.n_discrete_actions, dtype=bool)
+        step_size = self.config.max_velocity * self.config.dt  # 10m per default
+        
+        for action_idx, (dx_dir, dy_dir) in self._ACTION_MAP.items():
+            # Calcola posizione dopo l'azione
+            new_x = self.state.x + dx_dir * step_size
+            new_y = self.state.y + dy_dir * step_size
+            
+            # Check boundary
+            if (new_x < self.config.xmin or new_x > self.config.xmax or
+                new_y < self.config.ymin or new_y > self.config.ymax):
+                masks[action_idx] = False
+                continue
+            
+            # Check land collision
+            if self.field.is_land(new_x, new_y):
+                masks[action_idx] = False
+        
+        # Se tutte le azioni sono mascherate, permetti tutte (fallback)
+        if not masks.any():
+            return np.ones(self.config.n_discrete_actions, dtype=bool)
+        
+        return masks
 
     def _min_distance_to_land(self, x: float, y: float) -> float:
         """Ritorna la distanza minima dalla terra usando la distance map precomputata.

@@ -34,8 +34,19 @@ try:
     from stable_baselines3.common.monitor import Monitor
     from stable_baselines3.common.evaluation import evaluate_policy
     STABLE_BASELINES_AVAILABLE = True
+    
+    # MaskablePPO per action masking (evita land collision)
+    try:
+        from sb3_contrib import MaskablePPO
+        from sb3_contrib.common.wrappers import ActionMasker
+        MASKABLE_PPO_AVAILABLE = True
+    except ImportError:
+        MASKABLE_PPO_AVAILABLE = False
+        print("WARNING: sb3-contrib non installato. Action masking non disponibile.")
+        
 except ImportError:
     STABLE_BASELINES_AVAILABLE = False
+    MASKABLE_PPO_AVAILABLE = False
     print("WARNING: stable-baselines3 non installato. Alcune funzionalità non saranno disponibili.")
 
 from utils.source_seeking_env import SourceSeekingEnv, SourceSeekingConfig
@@ -231,11 +242,11 @@ def create_env(
         distance_reward_multiplier=env_config.get('reward', {}).get('distance_reward_multiplier', 1.0),
         # Land avoidance
         land_proximity_threshold=env_config.get('reward', {}).get('land_proximity_threshold', 10.0),
-        land_proximity_penalty_max=env_config.get('reward', {}).get('land_proximity_penalty_max', -1.0),
-        n_discrete_actions=agent_config.get('n_discrete_actions', 4),
+        land_proximity_penalty_max=env_config.get('reward', {}).get('land_proximity_penalty_max', -5.0),
+        n_discrete_actions=agent_config.get('n_discrete_actions', 8),
         # Spawn constraints
         spawn_min_distance=env_config.get('spawn', {}).get('min_distance', 200),
-        spawn_max_distance=env_config.get('spawn', {}).get('max_distance', 3000),
+        spawn_max_distance=env_config.get('spawn', {}).get('max_distance', 1500),
         spawn_min_land_distance=env_config.get('spawn', {}).get('min_land_distance', 50.0),
         spawn_start_frame=env_config.get('spawn', {}).get('start_frame', 1440),
         spawn_conc_threshold=env_config.get('spawn', {}).get('conc_threshold', 0.5),
@@ -261,18 +272,35 @@ def create_env(
     return env
 
 
+def mask_fn(env: gym.Env) -> np.ndarray:
+    """Funzione per estrarre la maschera azioni dall'env.
+    
+    Attraversa i wrapper (Monitor, etc.) per raggiungere SourceSeekingEnv.
+    """
+    inner = env
+    while hasattr(inner, 'env'):
+        inner = inner.env
+    return inner.action_masks()
+
+
 def make_env_fn(
     config: Dict[str, Any],
     concentration_field: Optional[ConcentrationField],
     rank: int,
     seed: int,
     data_dir: Optional[str] = None,
-    randomize_field: bool = False
+    randomize_field: bool = False,
+    use_action_masking: bool = True
 ) -> Callable[[], gym.Env]:
     """Factory function per la creazione di ambienti paralleli."""
     def _init() -> gym.Env:
         env = create_env(config, concentration_field, data_dir, randomize_field)
         env.reset(seed=seed + rank)
+        
+        # Applica action masking se disponibile
+        if use_action_masking and MASKABLE_PPO_AVAILABLE:
+            env = ActionMasker(env, mask_fn)
+        
         return env
     return _init
 
@@ -391,17 +419,24 @@ def train(
         'activation_fn': activation_fn
     }
 
+    # Scegli algoritmo: MaskablePPO se disponibile, altrimenti PPO standard
+    use_maskable = MASKABLE_PPO_AVAILABLE
+    PPOClass = MaskablePPO if use_maskable else PPO
+    algo_name = "MaskablePPO" if use_maskable else "PPO"
+    
     # Crea o carica modello
     if resume_from:
         print(f"\nResuming training from: {resume_from}")
-        model = PPO.load(
+        model = PPOClass.load(
             resume_from,
             env=vec_env,
             tensorboard_log=str(log_dir / "tensorboard")
         )
     else:
-        print("\nCreating new PPO model...")
-        model = PPO(
+        print(f"\nCreating new {algo_name} model...")
+        if use_maskable:
+            print("  Action masking: ENABLED (evita land collision)")
+        model = PPOClass(
             policy=training_config.get('policy', 'MlpPolicy'),
             env=vec_env,
             learning_rate=training_config.get('learning_rate', 3e-4),
@@ -422,6 +457,7 @@ def train(
         )
 
     print(f"\nModel architecture:")
+    print(f"  Algorithm: {algo_name}")
     print(f"  Policy: {training_config.get('policy', 'MlpPolicy')}")
     print(f"  Network: {net_arch}")
     print(f"  Activation: {activation_fn_name}")

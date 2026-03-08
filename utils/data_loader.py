@@ -264,9 +264,6 @@ class NetCDFLoader:
             # Assicurati che sia float32 per efficienza
             conc_data = conc_data.astype(np.float32)
 
-            # Debug info
-            print(f"  Data loaded: min={conc_data.min():.2f}, max={conc_data.max():.2f}")
-
         # Estrai info sulla sorgente dal nome file
         source_pos = self._extract_source_position(filename)
 
@@ -371,10 +368,8 @@ class DataManager:
         # Applica filtro source_id se specificato
         if source_id_filter:
             self._nc_files = [f for f in all_nc_files if source_id_filter in f.name]
-            print(f"Found {len(self._nc_files)} NC files for {source_id_filter} in {self.data_dir}")
         else:
             self._nc_files = all_nc_files
-            print(f"Found {len(self._nc_files)} NC files in {self.data_dir}")
 
         if not self._nc_files:
             raise FileNotFoundError(
