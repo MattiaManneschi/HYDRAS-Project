@@ -65,7 +65,6 @@ class SourceSeekingConfig:
     source_found_reward: float = 100.0
     step_penalty: float = -0.1
     boundary_penalty: float = -10.0
-    gradient_reward_scale: float = 10.0
     concentration_reward_scale: float = 1.0
     distance_reward_multiplier: float = 1.0  # Moltiplicatore dinamico per reward scaling
 
@@ -408,7 +407,7 @@ class SourceSeekingEnv(gym.Env):
     def _compute_reward(self, action: np.ndarray) -> Tuple[float, Dict[str, float]]:
         """
         Calcola il reward basato su:
-        1. Allineamento con il gradiente di concentrazione (gradient following)
+        1. Delta concentrazione temporale (concentrazione attuale vs precedente)
         2. Distanza dalla sorgente
         3. Tempo trascorso (time efficiency)
         """
@@ -425,14 +424,6 @@ class SourceSeekingEnv(gym.Env):
         raw_conc = self.field.get_concentration(self.state.x, self.state.y)
         on_land = np.isnan(raw_conc)
         current_conc = 0.0 if on_land else raw_conc
-
-        # Calcola gradiente di concentrazione
-        gradient = self.field.get_gradient(self.state.x, self.state.y)
-        grad_magnitude = np.linalg.norm(gradient)
-
-        # Velocità corrente dell'agente
-        velocity = np.array([self.state.vx, self.state.vy])
-        vel_magnitude = np.linalg.norm(velocity)
 
         # ============================================================
         # 1. BONUS SORGENTE RAGGIUNTA
@@ -462,40 +453,30 @@ class SourceSeekingEnv(gym.Env):
             info['boundary'] = self.config.boundary_penalty
 
         # ============================================================
-        # 4. REWARD GRADIENTE (gradient following)
+        # 4. REWARD DISTANZA (SEGNALE PRINCIPALE - FORTE)
         # ============================================================
-        if grad_magnitude > 1e-6 and vel_magnitude > 1e-6 and current_conc > 0.1:
-            # Segui il gradiente se siamo sopra lo 0.1 di concentrazione
-            alignment = np.dot(gradient, velocity) / (grad_magnitude * vel_magnitude)
-            gradient_reward = alignment * 10.0  # AUMENTATO: max +10 per step
-            reward += gradient_reward
-            info['gradient_alignment'] = alignment
-            info['gradient_magnitude'] = grad_magnitude
-            info['gradient_reward'] = gradient_reward
-        else:
-            info['gradient_alignment'] = 0.0
-            info['gradient_magnitude'] = grad_magnitude
-            info['gradient_reward'] = 0.0
-
-        # ============================================================
-        # 5. REWARD DISTANZA (distance accuracy)
-        # ============================================================
+        # Il distance_reward è il segnale forte che spinge verso la sorgente
+        # L'agente non sa DOVE sia la sorgente, solo se si avvicina o allontana
         distance_improvement = self.prev_distance - current_distance
-        distance_reward = distance_improvement * 2.0 * self.config.distance_reward_multiplier  # SCALABILE
+        distance_reward = distance_improvement * 5.0 * self.config.distance_reward_multiplier
         reward += distance_reward
         info['distance_reward'] = distance_reward
 
         # ============================================================
-        # 6. BONUS CONCENTRAZIONE
+        # 5. BONUS CONCENTRAZIONE (SEGNALE DI POSIZIONE)
         # ============================================================
+        # Bonus per essere sul pennacchio - indica che si è nella zona giusta
+        # L'agente deve esplorare per trovare quale direzione lo avvicina
+        max_conc = max(self.field.max_concentration, 1.0)
         if current_conc > 0.1:
-            max_conc = max(self.field.max_concentration, 1.0)
-            conc_bonus = (current_conc / max_conc) * 1.0  # max +1 per step
+            conc_bonus = (current_conc / max_conc) * 0.5
             reward += conc_bonus
             info['concentration_bonus'] = conc_bonus
+        else:
+            info['concentration_bonus'] = 0.0
 
         # ============================================================
-        # 7. PENALITÀ TEMPO (time efficiency)
+        # 6. PENALITÀ TEMPO (time efficiency)
         # ============================================================
         reward += self.config.step_penalty  # -0.1
         info['time_penalty'] = self.config.step_penalty

@@ -40,7 +40,7 @@ agent:
   
   # Action space
   max_velocity: 1.0  # m/s - velocità dell'AUV
-  action_type: "continuous"  # "continuous" o "discrete"
+  action_type: "discrete"  # "continuous" o "discrete"
   n_discrete_actions: 8  # solo se action_type = "discrete"
 
   # Memory - concentrazioni istanti precedenti
@@ -60,7 +60,7 @@ environment:
     boundary_penalty: -10.0
     source_threshold: 0.8  # frazione della concentrazione max per "trovato"
     distance_threshold: 100  # m - distanza dalla sorgente per "trovato"
-    auto_detect_source: true  # Usa il max concentrazione globale come fonte
+    auto_detect_source: false  # Usa le coordinate hardcoded delle sorgenti
 
   # Normalization
   normalize_obs: true
@@ -79,8 +79,8 @@ training:
   gamma: 0.99
   gae_lambda: 0.95
   clip_range: 0.2
-  ent_coef: 0.01  # RIDOTTO: meno esplorazione casuale, più sfruttamento
-  vf_coef: 0.5
+  ent_coef: 0.05  # AUMENTATO: più esplorazione casuale
+  vf_coef: 0.3
   max_grad_norm: 0.5
 
   # Network architecture

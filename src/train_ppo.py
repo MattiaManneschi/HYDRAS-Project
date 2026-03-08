@@ -119,7 +119,6 @@ def create_env(
         source_found_reward=env_config.get('reward', {}).get('source_reached_bonus', 100),
         step_penalty=env_config.get('reward', {}).get('step_penalty', -0.1),
         boundary_penalty=env_config.get('reward', {}).get('boundary_penalty', -10),
-        gradient_reward_scale=env_config.get('reward', {}).get('concentration_gradient_scale', 10),
         source_distance_threshold=env_config.get('reward', {}).get('distance_threshold', 100),
         action_type=agent_config.get('action_type', 'continuous'),
         auto_detect_source=env_config.get('reward', {}).get('auto_detect_source', False),
