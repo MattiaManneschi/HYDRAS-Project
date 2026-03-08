@@ -39,8 +39,8 @@ agent:
   action_type: "discrete"  # 4 direzioni cardinali (N/S/E/W)
   n_discrete_actions: 4  # N, S, E, W
 
-  # Memory - ultimi N step (concentrazioni + spostamenti)
-  memory_length: 9  # 9 step passati -> obs: 1 + 9 + 18 = 28 valori
+  # Memory - ultimi N step (concentrazioni + spostamenti + sensori terra)
+  memory_length: 9  # 9 step passati -> obs: 1 + 9 + 18 + 4 = 32 valori
 
 # Environment configuration
 environment:
@@ -53,7 +53,9 @@ environment:
     source_reached_bonus: 100.0
     step_penalty: -0.1
     boundary_penalty: -10.0
-    land_penalty: -50.0  # penalità per collisione con terra
+    land_penalty: -200.0  # penalità per collisione con terra (aumentata per ridurre land collisions)
+    land_proximity_threshold: 10.0  # m - distanza dalla terra per penalità progressiva
+    land_proximity_penalty_max: -1.0  # penalità massima per vicinanza terra
     distance_threshold: 100  # m - distanza dalla sorgente per "trovato"
     distance_reward_multiplier: 1.0  # moltiplicatore per reward distanza
     plume_reward_positive: 0.3  # reward binario dentro il plume
@@ -64,6 +66,7 @@ environment:
   spawn:
     min_distance: 200  # m - distanza minima dalla sorgente
     max_distance: 3000  # m - distanza massima dalla sorgente (con 1080 step x 10m = 10.8km budget)
+    min_land_distance: 50  # m - distanza minima dalla terra per spawn
     start_frame: 1440  # frame di partenza (metà simulazione)
     conc_threshold: 0.5  # soglia minima concentrazione
 

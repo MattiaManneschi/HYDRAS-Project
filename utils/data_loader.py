@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional, Tuple, Dict, List, Union
 from dataclasses import dataclass
 from scipy.interpolate import RegularGridInterpolator
+from scipy.ndimage import distance_transform_edt
 
 
 @dataclass
@@ -71,10 +72,11 @@ class ConcentrationField:
         self._is_time_varying = data.ndim == 3
         self._current_time_idx = 0
         self._land_interpolator = None
+        self._land_dist_interpolator = None
         self._build_land_interpolator()
     
     def _build_land_interpolator(self):
-        """Costruisce l'interpolatore per la maschera terra (una sola volta)."""
+        """Costruisce l'interpolatore per la maschera terra e la distance map (una sola volta)."""
         if self.land_mask is not None:
             self._land_interpolator = RegularGridInterpolator(
                 (self.y_coords, self.x_coords),
@@ -82,6 +84,21 @@ class ConcentrationField:
                 method='nearest',
                 bounds_error=False,
                 fill_value=1.0  # fuori dominio = terra
+            )
+            
+            # Precompute distance map to land using EDT
+            # ~self.land_mask = True where there's water (not land)
+            # distance_transform_edt computes distance to nearest False (land)
+            resolution = self.x_coords[1] - self.x_coords[0] if len(self.x_coords) > 1 else 10.0
+            pixel_dist = distance_transform_edt(~self.land_mask)
+            land_distance_map = pixel_dist * resolution  # convert to meters
+            
+            self._land_dist_interpolator = RegularGridInterpolator(
+                (self.y_coords, self.x_coords),
+                land_distance_map.astype(np.float32),
+                method='linear',
+                bounds_error=False,
+                fill_value=0.0  # fuori dominio = sulla terra
             )
     
     def set_time(self, time_idx: int):
@@ -133,6 +150,16 @@ class ConcentrationField:
         if self._land_interpolator is None:
             return False  # sintetico: nessuna terra
         return bool(self._land_interpolator((y, x)) > 0.5)
+    
+    def get_land_distance(self, x: float, y: float) -> float:
+        """Ritorna la distanza in metri dalla terra più vicina.
+        
+        Usa la distance map precomputata (O(1) invece di O(160) chiamate).
+        Returns 0 se sulla terra, valore alto se nessuna terra.
+        """
+        if self._land_dist_interpolator is None:
+            return 100.0  # sintetico: nessuna terra -> ritorna max
+        return float(self._land_dist_interpolator((y, x)))
     
     def get_current_field(self) -> np.ndarray:
         """Ritorna il campo di concentrazione corrente [y, x]."""

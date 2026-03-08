@@ -63,11 +63,16 @@ class SourceSeekingConfig:
     source_found_reward: float = 100.0
     step_penalty: float = -0.1
     boundary_penalty: float = -10.0
-    land_penalty: float = -50.0  # penalità per collisione con terra
+    land_penalty: float = -200.0  # penalità per collisione con terra (aumentata)
     distance_reward_multiplier: float = 1.0  # Moltiplicatore per reward distanza
     plume_reward_positive: float = 0.3  # reward binario dentro il plume
     plume_reward_negative: float = -0.3  # penalità fuori dal plume
     plume_threshold: float = 0.1  # soglia concentrazione per "dentro il plume"
+
+    # Land avoidance
+    land_proximity_threshold: float = 10.0  # m - distanza dalla terra per penalità progressiva
+    land_proximity_penalty_max: float = -1.0  # penalità massima per vicinanza terra
+    spawn_min_land_distance: float = 50.0  # m - distanza minima dalla terra per spawn
 
     # Action
     action_type: str = "discrete"  # "discrete" (N/S/E/W)
@@ -81,10 +86,11 @@ class SourceSeekingEnv(gym.Env):
     L'agente (AUV) deve navigare in un campo di concentrazione
     per trovare la sorgente dell'inquinante.
 
-    Observation Space (28 valori):
+    Observation Space (32 valori):
         - 1 concentrazione corrente
         - 9 concentrazioni passate
         - 9 x (Δx, Δy) spostamenti passati in metri
+        - 4 sensori terra direzionali (N, S, E, W) - binari
         (normalizzazione delegata a VecNormalize)
 
     Action Space:
@@ -95,7 +101,8 @@ class SourceSeekingEnv(gym.Env):
         - Reward distanza (segnale dominante continuo)
         - Reward binario plume (+0.3 dentro, -0.3 fuori)
         - Penalità per step (-0.1)
-        - Penalità bordi (-10) e terra (-50)
+        - Penalità bordi (-10) e terra (-200)
+        - Penalità progressiva avvicinamento terra
     """
 
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 10}
@@ -203,13 +210,14 @@ class SourceSeekingEnv(gym.Env):
     def _setup_observation_space(self):
         """Configura lo spazio delle osservazioni.
         
-        Osservazione (28 valori):
+        Osservazione (32 valori):
         - 1 concentrazione corrente
         - 9 concentrazioni passate (memory_length)
         - 9 * 2 spostamenti passati (Δx, Δy) normalizzati
+        - 4 sensori terra direzionali (N, S, E, W) - binari
         """
-        obs_dim = 1 + self.config.memory_length + self.config.memory_length * 2
-        # = 1 + 9 + 18 = 28
+        obs_dim = 1 + self.config.memory_length + self.config.memory_length * 2 + 4
+        # = 1 + 9 + 18 + 4 = 32
 
         self.observation_space = spaces.Box(
             low=-np.inf,
@@ -280,6 +288,18 @@ class SourceSeekingEnv(gym.Env):
             valid_x = x_coords
             valid_y = y_coords
 
+        # Filtra punti troppo vicini alla terra
+        land_safe_mask = np.array([
+            self._min_distance_to_land(valid_x[i], valid_y[i]) >= self.config.spawn_min_land_distance
+            for i in range(len(valid_x))
+        ])
+        
+        if np.any(land_safe_mask):
+            valid_x = valid_x[land_safe_mask]
+            valid_y = valid_y[land_safe_mask]
+        else:
+            print(f"WARNING: No points satisfy min_land_distance={self.config.spawn_min_land_distance}m, using all")
+
         # Scegli una cella random tra quelle valide
         idx = self.np_random.integers(len(valid_x))
         x = valid_x[idx]
@@ -292,7 +312,7 @@ class SourceSeekingEnv(gym.Env):
         return (float(x), float(y))
 
     def _get_observation(self) -> np.ndarray:
-        """Costruisce il vettore di osservazione (28 valori) RAW.
+        """Costruisce il vettore di osservazione (32 valori) RAW.
         
         I valori NON vengono normalizzati manualmente: la normalizzazione
         è delegata interamente a VecNormalize (running mean/std adattiva).
@@ -301,6 +321,7 @@ class SourceSeekingEnv(gym.Env):
         - [0]      : concentrazione corrente
         - [1:10]   : 9 concentrazioni passate
         - [10:28]  : 9 spostamenti passati (Δx, Δy) in metri
+        - [28:32]  : 4 sensori terra direzionali (N, S, E, W)
         """
         obs = []
 
@@ -316,6 +337,17 @@ class SourceSeekingEnv(gym.Env):
         for dx, dy in self._displacement_memory:
             obs.append(dx)
             obs.append(dy)
+
+        # 4 sensori terra direzionali (distanza di sensing = max_velocity * dt)
+        sensing_dist = self.config.max_velocity * self.config.dt
+        x, y = self.state.x, self.state.y
+        land_sensors = [
+            float(self.field.is_land(x, y + sensing_dist)),  # Nord
+            float(self.field.is_land(x, y - sensing_dist)),  # Sud
+            float(self.field.is_land(x + sensing_dist, y)),  # Est
+            float(self.field.is_land(x - sensing_dist, y)),  # Ovest
+        ]
+        obs.extend(land_sensors)
 
         return np.array(obs, dtype=np.float32)
 
@@ -367,6 +399,18 @@ class SourceSeekingEnv(gym.Env):
             (self.state.y - self.source_position[1])**2
         )
         return distance < self.config.source_distance_threshold
+
+    def _min_distance_to_land(self, x: float, y: float) -> float:
+        """Ritorna la distanza minima dalla terra usando la distance map precomputata.
+        
+        Usa la EDT (Euclidean Distance Transform) calcolata una volta sola
+        al caricamento del campo — O(1) invece di O(160) chiamate a is_land().
+        
+        Returns:
+            Distanza in metri dalla terra più vicina (0 se sulla terra, max 100m)
+        """
+        dist = self.field.get_land_distance(x, y)
+        return min(dist, 100.0)  # Cap a 100m per coerenza con il comportamento precedente
 
     def _compute_reward(self, action: np.ndarray) -> Tuple[float, Dict[str, float]]:
         """
@@ -440,6 +484,19 @@ class SourceSeekingEnv(gym.Env):
         # ============================================================
         reward += self.config.step_penalty  # -0.1
         info['time_penalty'] = self.config.step_penalty
+
+        # ============================================================
+        # 7. PENALITÀ PROGRESSIVA AVVICINAMENTO TERRA
+        # Land proximity penalty (penalità progressiva vicino alla terra)
+        dist_to_land = self._min_distance_to_land(self.state.x, self.state.y)
+        if (dist_to_land < self.config.land_proximity_threshold 
+                and not on_land):
+            # Penalità lineare: 0 a threshold, max a 0
+            proximity_penalty = self.config.land_proximity_penalty_max * (
+                (self.config.land_proximity_threshold - dist_to_land) / self.config.land_proximity_threshold
+            )
+            reward += proximity_penalty
+            info['land_proximity_penalty'] = proximity_penalty
 
         # Aggiorna valori precedenti
         self.prev_concentration = current_conc

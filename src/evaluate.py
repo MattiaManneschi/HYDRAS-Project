@@ -81,10 +81,14 @@ def make_env_config(config: dict, max_steps: int = None) -> SourceSeekingConfig:
         step_penalty=env_config.get('reward', {}).get('step_penalty', -0.1),
         boundary_penalty=env_config.get('reward', {}).get('boundary_penalty', -10),
         distance_reward_multiplier=env_config.get('reward', {}).get('distance_reward_multiplier', 1.0),
-        land_penalty=env_config.get('reward', {}).get('land_penalty', -50.0),
+        land_penalty=env_config.get('reward', {}).get('land_penalty', -200.0),
+        # Land avoidance
+        land_proximity_threshold=env_config.get('reward', {}).get('land_proximity_threshold', 10.0),
+        land_proximity_penalty_max=env_config.get('reward', {}).get('land_proximity_penalty_max', -1.0),
         n_discrete_actions=agent_config.get('n_discrete_actions', 4),
         spawn_min_distance=env_config.get('spawn', {}).get('min_distance', 200),
         spawn_max_distance=env_config.get('spawn', {}).get('max_distance', 3000),
+        spawn_min_land_distance=env_config.get('spawn', {}).get('min_land_distance', 50.0),
         spawn_start_frame=env_config.get('spawn', {}).get('start_frame', 1440),
         spawn_conc_threshold=env_config.get('spawn', {}).get('conc_threshold', 0.5),
         plume_reward_positive=env_config.get('reward', {}).get('plume_reward_positive', 0.3),
@@ -104,9 +108,13 @@ def wrap_env(env, has_vec_normalize: bool, vec_normalize_path):
     return env, False
 
 
-def run_episode(model, env, is_vec_env: bool) -> Tuple[np.ndarray, float, int, dict]:
+def run_episode(model, env, is_vec_env: bool, initial_obs=None, deterministic: bool = True) -> Tuple[np.ndarray, float, int, dict]:
     """
-    Esegue un singolo episodio deterministico.
+    Esegue un singolo episodio.
+    
+    Args:
+        initial_obs: Osservazione iniziale (se None, fa reset)
+        deterministic: Se True usa policy deterministica, altrimenti stocastica
     
     Returns:
         trajectory: np.ndarray shape (N, 2)
@@ -114,7 +122,9 @@ def run_episode(model, env, is_vec_env: bool) -> Tuple[np.ndarray, float, int, d
         step_count: int
         last_info: dict (info dell'ultimo step)
     """
-    if is_vec_env:
+    if initial_obs is not None:
+        obs = initial_obs
+    elif is_vec_env:
         obs = env.reset()
     else:
         obs_tuple = env.reset()
@@ -126,8 +136,14 @@ def run_episode(model, env, is_vec_env: bool) -> Tuple[np.ndarray, float, int, d
     step_count = 0
     last_info = {}
 
+    # Aggiungi posizione iniziale alla traiettoria
+    if is_vec_env:
+        trajectory.append(env.envs[0].state.position.copy())
+    else:
+        trajectory.append(env.state.position.copy())
+
     while not done:
-        action, _ = model.predict(obs, deterministic=True)
+        action, _ = model.predict(obs, deterministic=deterministic)
 
         if is_vec_env:
             obs, rewards, dones, infos = env.step(action)
@@ -212,10 +228,16 @@ def evaluate_and_visualize(
             data_dir=data_dir if data_dir else None,
             randomize_field=randomize and not variant_field
         )
-        env.reset(seed=ep)  # seed via Gymnasium API
+        # Seed sull'env raw PRIMA del wrap (env.seed() deprecato in SB3)
+        env.reset(seed=ep)
+        
+        # IMPORTANTE: wrap con VecNormalize PRIMA del reset finale
         env, is_vec = wrap_env(env, has_vec_norm, vec_norm_path)
+        
+        # Reset DOPO il wrapping per garantire normalizzazione corretta
+        obs = env.reset() if is_vec else env.reset(seed=ep)[0]
 
-        traj, ep_reward, steps, info = run_episode(model, env, is_vec)
+        traj, ep_reward, steps, info = run_episode(model, env, is_vec, initial_obs=obs)
         field = get_field(env, is_vec)
         is_success, final_dist = check_success(traj, field, success_threshold)
 

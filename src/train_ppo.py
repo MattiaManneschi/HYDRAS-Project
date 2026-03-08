@@ -68,8 +68,10 @@ class SourceSeekingCallback(BaseCallback):
             if not done:
                 continue
             # Episodio terminato: registra se successo o collisione terra
-            if 'source_reached' in info:
-                self.success_rate.append(float(info['source_reached']))
+            if 'source_found' in info:  # Fixed: was 'source_reached', now 'source_found'
+                self.success_rate.append(1.0)
+            elif 'distance_to_source' in info:  # Episode ended without success
+                self.success_rate.append(0.0)
             if 'on_land' in info:
                 self.land_collisions.append(float(info['on_land']))
 
@@ -165,6 +167,29 @@ class CurriculumCallback(BaseCallback):
         return True
 
 
+class SyncNormCallback(BaseCallback):
+    """
+    Callback per sincronizzare le statistiche VecNormalize tra train_env e eval_env.
+    
+    Senza sincronizzazione, le running stats divergono durante il training
+    e l'EvalCallback valuta su statistiche diverse da quelle di training.
+    """
+
+    def __init__(self, train_env, eval_env, eval_freq: int, verbose: int = 0):
+        super().__init__(verbose)
+        self.train_env = train_env
+        self.eval_env = eval_env
+        self.eval_freq = eval_freq
+
+    def _on_step(self) -> bool:
+        # Sincronizza prima di ogni valutazione
+        if self.num_timesteps % self.eval_freq == 0 and self.num_timesteps > 0:
+            sync_envs_normalization(self.train_env, self.eval_env)
+            if self.verbose > 0:
+                print(f"[Step {self.num_timesteps}] Synced VecNormalize stats")
+        return True
+
+
 def load_config(config_path: str) -> Dict[str, Any]:
     """Carica la configurazione da file YAML."""
     with open(config_path, 'r') as f:
@@ -202,12 +227,16 @@ def create_env(
         step_penalty=env_config.get('reward', {}).get('step_penalty', -0.1),
         boundary_penalty=env_config.get('reward', {}).get('boundary_penalty', -10),
         source_distance_threshold=env_config.get('reward', {}).get('distance_threshold', 100),
-        land_penalty=env_config.get('reward', {}).get('land_penalty', -50.0),
+        land_penalty=env_config.get('reward', {}).get('land_penalty', -200.0),
         distance_reward_multiplier=env_config.get('reward', {}).get('distance_reward_multiplier', 1.0),
+        # Land avoidance
+        land_proximity_threshold=env_config.get('reward', {}).get('land_proximity_threshold', 10.0),
+        land_proximity_penalty_max=env_config.get('reward', {}).get('land_proximity_penalty_max', -1.0),
         n_discrete_actions=agent_config.get('n_discrete_actions', 4),
         # Spawn constraints
         spawn_min_distance=env_config.get('spawn', {}).get('min_distance', 200),
         spawn_max_distance=env_config.get('spawn', {}).get('max_distance', 3000),
+        spawn_min_land_distance=env_config.get('spawn', {}).get('min_land_distance', 50.0),
         spawn_start_frame=env_config.get('spawn', {}).get('start_frame', 1440),
         spawn_conc_threshold=env_config.get('spawn', {}).get('conc_threshold', 0.5),
         # Plume reward
@@ -402,16 +431,27 @@ def train(
     callbacks = []
 
     # Evaluation callback
+    eval_freq = training_config.get('eval_freq', 10000) // n_envs
     eval_callback = EvalCallback(
         eval_env,
         best_model_save_path=str(model_dir / "best"),
         log_path=str(log_dir / "eval"),
-        eval_freq=training_config.get('eval_freq', 10000) // n_envs,
+        eval_freq=eval_freq,
         n_eval_episodes=training_config.get('n_eval_episodes', 10),
         deterministic=True,
         render=False
     )
     callbacks.append(eval_callback)
+
+    # Sync normalization callback (sincronizza stats prima di ogni eval)
+    if config.get('environment', {}).get('normalize_obs', True):
+        sync_callback = SyncNormCallback(
+            train_env=vec_env,
+            eval_env=eval_env,
+            eval_freq=eval_freq * n_envs,  # Converti in timesteps totali
+            verbose=0
+        )
+        callbacks.append(sync_callback)
 
     # Checkpoint callback
     checkpoint_callback = CheckpointCallback(
@@ -514,7 +554,7 @@ def train(
         ax.axhline(y=0.15, color='red', linestyle='--', alpha=0.7, label='Soglia critica (15%)')
         ax.set_xlabel('Timesteps')
         ax.set_ylabel('Land Collision Rate')
-        ax.set_title('Land Collision Rate (terra = NaN)')
+        ax.set_title('Land Collision Rate')
         ax.set_ylim(-0.02, max(0.3, max(custom_callback._lc_values) * 1.2))
         ax.legend()
         ax.grid(True, alpha=0.3)
