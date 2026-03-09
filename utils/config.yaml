@@ -65,7 +65,7 @@ environment:
   # Spawn constraints
   spawn:
     min_distance: 200  # m - distanza minima dalla sorgente
-    max_distance: 1500  # m - distanza massima dalla sorgente (ridotto per training più facile)
+    max_distance: 1500  # m - distanza massima dalla sorgente
     min_land_distance: 50  # m - distanza minima dalla terra per spawn
     start_frame: 1440  # frame di partenza (metà simulazione)
     conc_threshold: 0.5  # soglia minima concentrazione

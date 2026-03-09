@@ -251,10 +251,11 @@ class NetCDFLoader:
                 conc_data = np.where(conc_data.mask, np.nan, conc_data.data)
 
             # Salva la maschera terra PRIMA di nan_to_num
-            # True dove c'è terra (NaN nel primo timestep)
+            # True dove c'è terra (NaN in QUALSIASI timestep)
             conc_float = conc_data.astype(np.float32)
             if conc_float.ndim == 3:
-                land_mask = np.isnan(conc_float[0])  # [y, x]
+                # Unione di tutti i NaN su tutti i timesteps
+                land_mask = np.any(np.isnan(conc_float), axis=0)  # [y, x]
             else:
                 land_mask = np.isnan(conc_float)  # [y, x]
 

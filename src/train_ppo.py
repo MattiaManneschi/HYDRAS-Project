@@ -55,20 +55,17 @@ from utils.data_loader import ConcentrationField
 
 class SourceSeekingCallback(BaseCallback):
     """
-    Callback per logging di success rate e land collision rate durante il training.
-    Raccoglie loss, success_rate e land_collision_rate per i plot finali.
+    Callback per logging di success rate durante il training.
+    Raccoglie loss e success_rate per i plot finali.
     """
 
     def __init__(self, verbose: int = 0):
         super().__init__(verbose)
         self.success_rate = []
-        self.land_collisions = []
         self._loss_steps = []
         self._loss_values = []
         self._sr_steps = []
         self._sr_values = []
-        self._lc_steps = []
-        self._lc_values = []
 
     def _on_step(self) -> bool:
         # Raccogli info solo a fine episodio (dones=True)
@@ -83,8 +80,6 @@ class SourceSeekingCallback(BaseCallback):
                 self.success_rate.append(1.0)
             elif 'distance_to_source' in info:  # Episode ended without success
                 self.success_rate.append(0.0)
-            if 'on_land' in info:
-                self.land_collisions.append(float(info['on_land']))
 
         # Log ogni 1000 steps
         if self.num_timesteps % 1000 == 0 and len(self.success_rate) > 0:
@@ -92,17 +87,6 @@ class SourceSeekingCallback(BaseCallback):
             self.logger.record('custom/success_rate', recent_success)
             self._sr_steps.append(self.num_timesteps)
             self._sr_values.append(recent_success)
-
-        if self.num_timesteps % 1000 == 0 and len(self.land_collisions) > 0:
-            recent_land = np.mean(self.land_collisions[-100:]) if len(self.land_collisions) >= 100 else np.mean(self.land_collisions)
-            self.logger.record('custom/land_collision_rate', recent_land)
-            self._lc_steps.append(self.num_timesteps)
-            self._lc_values.append(recent_land)
-
-            # Warning se supera il 10%
-            if recent_land > 0.10:
-                if self.verbose > 0 and self.num_timesteps % 10000 == 0:
-                    print(f"\n⚠️  [WARNING] Land collision rate = {recent_land:.1%} (>{10}%) — valuta di restringere lo spawn")
 
         # Raccogli loss dal logger di SB3
         if self.num_timesteps % 1000 == 0:
@@ -118,17 +102,15 @@ class SourceSeekingCallback(BaseCallback):
             print(f"\nTraining completed!")
             if len(self.success_rate) > 0:
                 print(f"Final success rate: {np.mean(self.success_rate[-100:]):.2%}")
-            if len(self.land_collisions) > 0:
-                print(f"Final land collision rate: {np.mean(self.land_collisions[-100:]):.2%}")
 
 
 class CurriculumCallback(BaseCallback):
     """
     Callback per il curriculum learning.
     Gestisce le fasi di addestramento con sorgenti progressive:
-      Fase 1 (0-100K):   solo S1
-      Fase 2 (100K-350K): S1 + S2
-      Fase 3 (350K-900K): S1 + S2 + S3
+      Fase 1 (0-1M):   solo S1
+      Fase 2 (1M-2M): S1 + S2
+      Fase 3 (2M-3M): S1 + S2 + S3
     """
 
     def __init__(self, vec_env, config: Dict[str, Any], verbose: int = 0):
@@ -581,23 +563,6 @@ def train(
         fig.savefig(plots_dir / 'training_success_rate.png', dpi=150)
         plt.close(fig)
         print(f"Success rate plot saved to: {plots_dir / 'training_success_rate.png'}")
-
-    # Plot Land Collision Rate
-    if custom_callback._lc_steps:
-        fig, ax = plt.subplots(figsize=(10, 5))
-        ax.plot(custom_callback._lc_steps, custom_callback._lc_values, linewidth=0.8, color='red')
-        ax.axhline(y=0.10, color='orange', linestyle='--', alpha=0.7, label='Soglia warning (10%)')
-        ax.axhline(y=0.15, color='red', linestyle='--', alpha=0.7, label='Soglia critica (15%)')
-        ax.set_xlabel('Timesteps')
-        ax.set_ylabel('Land Collision Rate')
-        ax.set_title('Land Collision Rate')
-        ax.set_ylim(-0.02, max(0.3, max(custom_callback._lc_values) * 1.2))
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        fig.tight_layout()
-        fig.savefig(plots_dir / 'land_collision_rate.png', dpi=150)
-        plt.close(fig)
-        print(f"Land collision plot saved to: {plots_dir / 'land_collision_rate.png'}")
 
     # Cleanup
     vec_env.close()
