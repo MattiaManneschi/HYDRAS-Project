@@ -3,7 +3,7 @@ HYDRAS Inference — 12 scenari × 5 episodi
 Modello: /Users/mattiamanneschi/PycharmProjects/HYDRAS-Project/trained_models/ppo_20260309_100641/models/final_model.zip
 ======================================================================
 
-8 directional sensors -> 50 meters;
+8 directional concentrations sensors -> 50 meters;
 
 [S1_01]
   Ep 1/5: ✓ [success ] init=603m  final=96m  steps=211
