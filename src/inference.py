@@ -14,7 +14,6 @@ Output:
 import sys
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
 import yaml
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
@@ -334,57 +333,6 @@ def save_trajectory_plot(result: EpisodeResult, field, output_path: Path, thresh
     plt.close(fig)
 
 
-def save_source_summary_plot(all_stats: List[ScenarioStats], output_path: Path):
-    """Salva un plot riassuntivo con success rate e distanza per sorgente."""
-    sources = ['S1', 'S2', 'S3']
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-
-    # Success rate per scenario
-    ax = axes[0]
-    colors = {'S1': '#2196F3', 'S2': '#4CAF50', 'S3': '#FF9800'}
-    for source in sources:
-        stats = [s for s in all_stats if s.source_id == source]
-        scenarios = [s.scenario for s in stats]
-        sr_values = [s.success_rate * 100 for s in stats]
-        x = range(len(scenarios))
-        ax.bar([i + sources.index(source) * 0.25 for i in x],
-               sr_values, width=0.25, label=source, color=colors[source], alpha=0.8)
-
-    ax.set_xticks(range(4))
-    ax.set_xticklabels(['01', '02', '03', '04'])
-    ax.set_xlabel('Scenario')
-    ax.set_ylabel('Success Rate (%)')
-    ax.set_title('Success Rate per Scenario')
-    ax.set_ylim(0, 105)
-    ax.axhline(y=50, color='gray', linestyle='--', alpha=0.5, label='50%')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-
-    # Distanza finale media per scenario
-    ax = axes[1]
-    for source in sources:
-        stats = [s for s in all_stats if s.source_id == source]
-        scenarios = [s.scenario for s in stats]
-        dist_values = [s.mean_final_dist for s in stats]
-        x = range(len(scenarios))
-        ax.bar([i + sources.index(source) * 0.25 for i in x],
-               dist_values, width=0.25, label=source, color=colors[source], alpha=0.8)
-
-    ax.set_xticks(range(4))
-    ax.set_xticklabels(['01', '02', '03', '04'])
-    ax.set_xlabel('Scenario')
-    ax.set_ylabel('Distanza finale media (m)')
-    ax.set_title('Distanza Finale Media dalla Sorgente')
-    ax.axhline(y=100, color='red', linestyle='--', alpha=0.7, label='Soglia successo (100m)')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    plt.close(fig)
-    print(f"Summary plot salvato: {output_path}")
-
-
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 def run_inference(
@@ -493,10 +441,6 @@ def run_inference(
     print(f"GLOBALE: success_rate={global_sr*100:.1f}%  mean_final_dist={global_dist:.0f}m")
     print(f"{'='*70}\n")
 
-    # Plot riassuntivo
-    summary_plot_path = output_path / "summary.png"
-    save_source_summary_plot(all_stats, summary_plot_path)
-
     return all_stats
 
 
@@ -507,15 +451,26 @@ def main():
     CONFIG_PATH = str(PROJECT_ROOT / "utils" / "config.yaml")
     OUTPUT_DIR  = str(PROJECT_ROOT / "evaluations")
 
-    # Seleziona automaticamente il modello più recente
+    # Seleziona l'ultimo modello addestrato (directory più recente per nome)
     trained_dir = PROJECT_ROOT / "trained_models"
-    candidates = sorted(trained_dir.glob("*/models/final_model.zip"))
-    candidates += sorted(trained_dir.glob("*/models/best/best_model.zip"))
-    if not candidates:
-        print("ERRORE: Nessun modello trovato in trained_models/")
+    run_dirs = sorted([d for d in trained_dir.iterdir() if d.is_dir() and d.name.startswith("ppo_")])
+    
+    if not run_dirs:
+        print("ERRORE: Nessuna directory di training trovata in trained_models/")
+        sys.exit(1)
+    
+    latest_run = run_dirs[-1]  # L'ultima per ordine alfabetico (timestamp nel nome)
+    
+    # Cerca il modello nella directory: prima final_model, poi best_model
+    model_path = latest_run / "models" / "final_model.zip"
+    if not model_path.exists():
+        model_path = latest_run / "models" / "best" / "best_model.zip"
+    
+    if not model_path.exists():
+        print(f"ERRORE: Nessun modello trovato in {latest_run}/models/")
         sys.exit(1)
 
-    MODEL_PATH = str(max(candidates, key=lambda p: p.stat().st_mtime))
+    MODEL_PATH = str(model_path)
     print(f"Modello selezionato: {MODEL_PATH}")
 
     run_inference(
