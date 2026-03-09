@@ -1,0 +1,134 @@
+======================================================================
+HYDRAS Inference — 12 scenari × 5 episodi
+Modello: /Users/mattiamanneschi/PycharmProjects/HYDRAS-Project/trained_models/ppo_20260309_100641/models/final_model.zip
+======================================================================
+
+8 directional sensors -> 50 meters;
+
+[S1_01]
+  Ep 1/5: ✓ [success ] init=603m  final=96m  steps=211
+  Ep 2/5: ✓ [success ] init=935m  final=99m  steps=104
+  Ep 3/5: ✓ [success ] init=377m  final=99m  steps=38
+  Ep 4/5: ✓ [success ] init=349m  final=92m  steps=40
+  Ep 5/5: ✓ [success ] init=318m  final=99m  steps=32
+  S1_01     SR=100%   dist=97m (min=92m, max=99m)  steps_success=85  [success=5]
+
+[S1_02]
+  Ep 1/5: ✓ [success ] init=562m  final=94m  steps=51
+  Ep 2/5: ✓ [success ] init=897m  final=90m  steps=111
+  Ep 3/5: ✓ [success ] init=288m  final=94m  steps=36
+  Ep 4/5: ✓ [success ] init=1253m  final=94m  steps=124
+  Ep 5/5: ✓ [success ] init=342m  final=100m  steps=110
+  S1_02     SR=100%   dist=94m (min=90m, max=100m)  steps_success=86  [success=5]
+
+[S1_03]
+  Ep 1/5: ✗ [timeout ] init=426m  final=831m  steps=1080
+  Ep 2/5: ✗ [timeout ] init=700m  final=842m  steps=1080
+  Ep 3/5: ✗ [timeout ] init=442m  final=999m  steps=1080
+  Ep 4/5: ✗ [timeout ] init=1379m  final=882m  steps=1080
+  Ep 5/5: ✓ [success ] init=441m  final=95m  steps=86
+  S1_03     SR=20%    dist=730m (min=95m, max=999m)  steps_success=86  [timeout=4, success=1]
+
+[S1_04]
+  Ep 1/5: ✗ [timeout ] init=581m  final=319m  steps=1080
+  Ep 2/5: ✗ [timeout ] init=1271m  final=1340m  steps=1080
+  Ep 3/5: ✗ [timeout ] init=1020m  final=1320m  steps=1080
+  Ep 4/5: ✓ [success ] init=518m  final=96m  steps=55
+  Ep 5/5: ✗ [timeout ] init=1262m  final=904m  steps=1080
+  S1_04     SR=20%    dist=796m (min=96m, max=1340m)  steps_success=55  [timeout=4, success=1]
+
+[S2_01]
+  Ep 1/5: ✓ [success ] init=904m  final=99m  steps=95
+  Ep 2/5: ✓ [success ] init=372m  final=99m  steps=30
+  Ep 3/5: ✓ [success ] init=1233m  final=91m  steps=127
+  Ep 4/5: ✓ [success ] init=391m  final=97m  steps=32
+  Ep 5/5: ✓ [success ] init=421m  final=97m  steps=35
+  S2_01     SR=100%   dist=97m (min=91m, max=99m)  steps_success=64  [success=5]
+
+[S2_02]
+  Ep 1/5: ✓ [success ] init=856m  final=97m  steps=113
+  Ep 2/5: ✓ [success ] init=891m  final=94m  steps=82
+  Ep 3/5: ✓ [success ] init=492m  final=98m  steps=40
+  Ep 4/5: ✓ [success ] init=649m  final=95m  steps=57
+  Ep 5/5: ✓ [success ] init=1087m  final=93m  steps=101
+  S2_02     SR=100%   dist=95m (min=93m, max=98m)  steps_success=79  [success=5]
+
+[S2_03]
+  Ep 1/5: ✓ [success ] init=895m  final=99m  steps=99
+  Ep 2/5: ✗ [timeout ] init=364m  final=1295m  steps=1080
+  Ep 3/5: ✓ [success ] init=1148m  final=93m  steps=109
+  Ep 4/5: ✓ [success ] init=1160m  final=96m  steps=111
+  Ep 5/5: ✓ [success ] init=1379m  final=100m  steps=140
+  S2_03     SR=80%    dist=337m (min=93m, max=1295m)  steps_success=115  [success=4, timeout=1]
+
+[S2_04]
+  Ep 1/5: ✓ [success ] init=1483m  final=93m  steps=140
+  Ep 2/5: ✓ [success ] init=725m  final=100m  steps=78
+  Ep 3/5: ✓ [success ] init=790m  final=96m  steps=778
+  Ep 4/5: ✓ [success ] init=1377m  final=93m  steps=131
+  Ep 5/5: ✓ [success ] init=1252m  final=95m  steps=117
+  S2_04     SR=100%   dist=95m (min=93m, max=100m)  steps_success=249  [success=5]
+
+[S3_01]
+  Ep 1/5: ✓ [success ] init=744m  final=96m  steps=96
+  Ep 2/5: ✗ [timeout ] init=220m  final=1476m  steps=1080
+  Ep 3/5: ✗ [timeout ] init=937m  final=1609m  steps=1080
+  Ep 4/5: ✗ [timeout ] init=921m  final=1474m  steps=1080
+  Ep 5/5: ✗ [timeout ] init=1107m  final=1323m  steps=1080
+  S3_01     SR=20%    dist=1196m (min=96m, max=1609m)  steps_success=96  [success=1, timeout=4]
+
+[S3_02]
+  Ep 1/5: ✓ [success ] init=680m  final=97m  steps=74
+  Ep 2/5: ✗ [timeout ] init=426m  final=1636m  steps=1080
+  Ep 3/5: ✓ [success ] init=343m  final=96m  steps=29
+  Ep 4/5: ✓ [success ] init=282m  final=100m  steps=31
+  Ep 5/5: ✓ [success ] init=461m  final=99m  steps=46
+  S3_02     SR=80%    dist=406m (min=96m, max=1636m)  steps_success=45  [success=4, timeout=1]
+
+[S3_03]
+  Ep 1/5: ✓ [success ] init=1477m  final=99m  steps=819
+  Ep 2/5: ✓ [success ] init=756m  final=99m  steps=831
+  Ep 3/5: ✓ [success ] init=995m  final=99m  steps=764
+  Ep 4/5: ✓ [success ] init=466m  final=99m  steps=690
+  Ep 5/5: ✗ [timeout ] init=1461m  final=364m  steps=1080
+  S3_03     SR=80%    dist=152m (min=99m, max=364m)  steps_success=776  [success=4, timeout=1]
+
+[S3_04]
+  Ep 1/5: ✓ [success ] init=1437m  final=92m  steps=263
+  Ep 2/5: ✓ [success ] init=1283m  final=95m  steps=163
+  Ep 3/5: ✓ [success ] init=563m  final=99m  steps=74
+  Ep 4/5: ✓ [success ] init=1301m  final=98m  steps=212
+  Ep 5/5: ✓ [success ] init=551m  final=90m  steps=71
+  S3_04     SR=100%   dist=95m (min=90m, max=99m)  steps_success=157  [success=5]
+
+======================================================================
+RIEPILOGO PER SORGENTE
+======================================================================
+
+  S1:
+  S1_01     SR=100%   dist=97m (min=92m, max=99m)  steps_success=85  [success=5]
+  S1_02     SR=100%   dist=94m (min=90m, max=100m)  steps_success=86  [success=5]
+  S1_03     SR=20%    dist=730m (min=95m, max=999m)  steps_success=86  [timeout=4, success=1]
+  S1_04     SR=20%    dist=796m (min=96m, max=1340m)  steps_success=55  [timeout=4, success=1]
+
+  S1 SUMMARY: SR=60%  mean_dist=429m  mean_steps_success=78
+
+  S2:
+  S2_01     SR=100%   dist=97m (min=91m, max=99m)  steps_success=64  [success=5]
+  S2_02     SR=100%   dist=95m (min=93m, max=98m)  steps_success=79  [success=5]
+  S2_03     SR=80%    dist=337m (min=93m, max=1295m)  steps_success=115  [success=4, timeout=1]
+  S2_04     SR=100%   dist=95m (min=93m, max=100m)  steps_success=249  [success=5]
+
+  S2 SUMMARY: SR=95%  mean_dist=156m  mean_steps_success=126
+
+  S3:
+  S3_01     SR=20%    dist=1196m (min=96m, max=1609m)  steps_success=96  [success=1, timeout=4]
+  S3_02     SR=80%    dist=406m (min=96m, max=1636m)  steps_success=45  [success=4, timeout=1]
+  S3_03     SR=80%    dist=152m (min=99m, max=364m)  steps_success=776  [success=4, timeout=1]
+  S3_04     SR=100%   dist=95m (min=90m, max=99m)  steps_success=157  [success=5]
+
+  S3 SUMMARY: SR=70%  mean_dist=462m  mean_steps_success=268
+
+======================================================================
+GLOBALE: success_rate=75.0%  mean_final_dist=349m
+======================================================================
