@@ -220,7 +220,6 @@ def create_env(
         step_penalty=env_config.get('reward', {}).get('step_penalty', -0.1),
         boundary_penalty=env_config.get('reward', {}).get('boundary_penalty', -10),
         source_distance_threshold=env_config.get('reward', {}).get('distance_threshold', 100),
-        land_penalty=env_config.get('reward', {}).get('land_penalty', -200.0),
         distance_reward_multiplier=env_config.get('reward', {}).get('distance_reward_multiplier', 1.0),
         # Land avoidance
         land_proximity_threshold=env_config.get('reward', {}).get('land_proximity_threshold', 10.0),

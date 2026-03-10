@@ -163,7 +163,6 @@ def make_env_config(config: dict) -> SourceSeekingConfig:
         source_found_reward=reward_cfg.get('source_reached_bonus', 100),
         step_penalty=reward_cfg.get('step_penalty', -0.1),
         boundary_penalty=reward_cfg.get('boundary_penalty', -10),
-        land_penalty=reward_cfg.get('land_penalty', -200.0),
         distance_reward_multiplier=reward_cfg.get('distance_reward_multiplier', 1.0),
         land_proximity_threshold=reward_cfg.get('land_proximity_threshold', 10.0),
         land_proximity_penalty_max=reward_cfg.get('land_proximity_penalty_max', -5.0),

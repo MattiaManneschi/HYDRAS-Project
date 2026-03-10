@@ -63,7 +63,6 @@ class SourceSeekingConfig:
     source_found_reward: float = 100.0
     step_penalty: float = -0.1
     boundary_penalty: float = -10.0
-    land_penalty: float = -200.0  # penalità per collisione con terra (aumentata)
     distance_reward_multiplier: float = 1.0  # Moltiplicatore per reward distanza
     plume_reward_positive: float = 0.3  # reward binario dentro il plume
     plume_reward_negative: float = -0.3  # penalità fuori dal plume
@@ -503,25 +502,21 @@ class SourceSeekingEnv(gym.Env):
             info['source_found'] = self.config.source_found_reward
             info['time_bonus'] = time_bonus
 
-        # ============================================================
-        # 2. PENALITÀ TERRA (configurabile, default -50)
-        # ============================================================
+        # Traccia se l'agente è su terra (per terminazione)
         if on_land:
-            reward += self.config.land_penalty
-            info['on_land_penalty'] = self.config.land_penalty
             self._on_land = True
         else:
             self._on_land = False
 
         # ============================================================
-        # 3. PENALITÀ USCITA DAL DOMINIO (-10)
+        # 2. PENALITÀ USCITA DAL DOMINIO (-10)
         # ============================================================
         if self._check_boundary():
             reward += self.config.boundary_penalty
             info['boundary'] = self.config.boundary_penalty
 
         # ============================================================
-        # 4. REWARD DISTANZA (SEGNALE DOMINANTE CONTINUO)
+        # 3. REWARD DISTANZA (SEGNALE DOMINANTE CONTINUO)
         # ============================================================
         distance_improvement = self.prev_distance - current_distance
         distance_reward = distance_improvement * 5.0 * self.config.distance_reward_multiplier
@@ -529,7 +524,7 @@ class SourceSeekingEnv(gym.Env):
         info['distance_reward'] = distance_reward
 
         # ============================================================
-        # 5. REWARD BINARIO PLUME (+0.3 dentro, -0.3 fuori)
+        # 4. REWARD BINARIO PLUME (+0.3 dentro, -0.3 fuori)
         # ============================================================
         if current_conc > self.config.plume_threshold:
             reward += self.config.plume_reward_positive
@@ -539,13 +534,13 @@ class SourceSeekingEnv(gym.Env):
             info['plume_reward'] = self.config.plume_reward_negative
 
         # ============================================================
-        # 6. PENALITÀ TEMPO (time efficiency)
+        # 5. PENALITÀ TEMPO (time efficiency)
         # ============================================================
         reward += self.config.step_penalty  # -0.1
         info['time_penalty'] = self.config.step_penalty
 
         # ============================================================
-        # 7. PENALITÀ PROGRESSIVA AVVICINAMENTO TERRA
+        # 6. PENALITÀ PROGRESSIVA AVVICINAMENTO TERRA
         # Land proximity penalty (penalità progressiva vicino alla terra)
         dist_to_land = self._min_distance_to_land(self.state.x, self.state.y)
         if (dist_to_land < self.config.land_proximity_threshold 
