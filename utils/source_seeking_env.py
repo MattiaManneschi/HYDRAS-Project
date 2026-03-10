@@ -210,14 +210,15 @@ class SourceSeekingEnv(gym.Env):
     def _setup_observation_space(self):
         """Configura lo spazio delle osservazioni.
         
-        Osservazione (36 valori):
+        Osservazione (44 valori):
         - 1 concentrazione corrente
         - 9 concentrazioni passate (memory_length)
         - 9 * 2 spostamenti passati (Δx, Δy) normalizzati
-        - 8 sensori concentrazione direzionali (8 direzioni)
+        - 8 sensori concentrazione @ 50m (navigazione locale)
+        - 8 sensori concentrazione @ 200m (orientamento globale)
         """
-        obs_dim = 1 + self.config.memory_length + self.config.memory_length * 2 + 8
-        # = 1 + 9 + 18 + 8 = 36
+        obs_dim = 1 + self.config.memory_length + self.config.memory_length * 2 + 8 + 8
+        # = 1 + 9 + 18 + 8 + 8 = 44
 
         self.observation_space = spaces.Box(
             low=-np.inf,
@@ -316,7 +317,7 @@ class SourceSeekingEnv(gym.Env):
         return (float(x), float(y))
 
     def _get_observation(self) -> np.ndarray:
-        """Costruisce il vettore di osservazione (36 valori) RAW.
+        """Costruisce il vettore di osservazione (44 valori) RAW.
         
         I valori NON vengono normalizzati manualmente: la normalizzazione
         è delegata interamente a VecNormalize (running mean/std adattiva).
@@ -325,7 +326,8 @@ class SourceSeekingEnv(gym.Env):
         - [0]      : concentrazione corrente
         - [1:10]   : 9 concentrazioni passate
         - [10:28]  : 9 spostamenti passati (Δx, Δy) in metri
-        - [28:36]  : 8 sensori concentrazione direzionali
+        - [28:36]  : 8 sensori concentrazione @ 50m (locale)
+        - [36:44]  : 8 sensori concentrazione @ 200m (globale)
         """
         obs = []
 
@@ -342,24 +344,25 @@ class SourceSeekingEnv(gym.Env):
             obs.append(dx)
             obs.append(dy)
 
-        # 8 sensori concentrazione direzionali (sensing a 50m)
-        sensing_dist = 50.0  # metri
         x, y = self.state.x, self.state.y
-        conc_sensors = []
-        for action_idx in range(8):
-            dx_dir, dy_dir = self._ACTION_MAP[action_idx]
-            sense_x = x + dx_dir * sensing_dist
-            sense_y = y + dy_dir * sensing_dist
-            # Se il punto è su terra o fuori dominio, concentrazione = 0
-            out_of_bounds = (sense_x < self.config.xmin or sense_x > self.config.xmax or
-                             sense_y < self.config.ymin or sense_y > self.config.ymax)
-            if out_of_bounds or self.field.is_land(sense_x, sense_y):
-                conc_sensors.append(0.0)
-            else:
-                conc = self.field.get_concentration(sense_x, sense_y)
-                # Safety: nan_to_num per evitare NaN a VecNormalize
-                conc_sensors.append(float(np.nan_to_num(conc, nan=0.0)))
-        obs.extend(conc_sensors)
+        
+        # Sensori concentrazione direzionali a distanze multiple
+        for sensing_dist in [50.0, 200.0]:  # metri
+            conc_sensors = []
+            for action_idx in range(8):
+                dx_dir, dy_dir = self._ACTION_MAP[action_idx]
+                sense_x = x + dx_dir * sensing_dist
+                sense_y = y + dy_dir * sensing_dist
+                # Se il punto è su terra o fuori dominio, concentrazione = 0
+                out_of_bounds = (sense_x < self.config.xmin or sense_x > self.config.xmax or
+                                 sense_y < self.config.ymin or sense_y > self.config.ymax)
+                if out_of_bounds or self.field.is_land(sense_x, sense_y):
+                    conc_sensors.append(0.0)
+                else:
+                    conc = self.field.get_concentration(sense_x, sense_y)
+                    # Safety: nan_to_num per evitare NaN a VecNormalize
+                    conc_sensors.append(float(np.nan_to_num(conc, nan=0.0)))
+            obs.extend(conc_sensors)
 
         return np.array(obs, dtype=np.float32)
 
