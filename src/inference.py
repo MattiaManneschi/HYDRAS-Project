@@ -16,7 +16,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import yaml
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
