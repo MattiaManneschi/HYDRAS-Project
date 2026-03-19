@@ -193,10 +193,14 @@ def create_env(
     config: Dict[str, Any],
     concentration_field: Optional[ConcentrationField] = None,
     data_dir: Optional[str] = None,
-    randomize_field: bool = False
+    randomize_field: bool = False,
+    chunk_id: int = 0
 ) -> gym.Env:
     """
     Crea un'istanza dell'ambiente con i wrapper appropriati.
+    
+    Args:
+        chunk_id: 0 = spawn @1/4, 1 = spawn @3/4 della simulazione
     """
     # Estrai configurazioni
     env_config = config.get('environment', {})
@@ -231,6 +235,7 @@ def create_env(
         spawn_min_land_distance=env_config.get('spawn', {}).get('min_land_distance', 50.0),
         spawn_start_frame=env_config.get('spawn', {}).get('start_frame', 1440),
         spawn_conc_threshold=env_config.get('spawn', {}).get('conc_threshold', 0.5),
+        chunk_id=chunk_id,
         # Plume reward
         plume_reward_positive=env_config.get('reward', {}).get('plume_reward_positive', 0.3),
         plume_reward_negative=env_config.get('reward', {}).get('plume_reward_negative', -0.3),
@@ -268,14 +273,19 @@ def make_env_fn(
     config: Dict[str, Any],
     concentration_field: Optional[ConcentrationField],
     rank: int,
+    chunk_id: int,
     seed: int,
     data_dir: Optional[str] = None,
     randomize_field: bool = False,
     use_action_masking: bool = True
 ) -> Callable[[], gym.Env]:
-    """Factory function per la creazione di ambienti paralleli."""
+    """Factory function per la creazione di ambienti paralleli.
+    
+    Args:
+        chunk_id: 0 = spawn @1/4, 1 = spawn @3/4 della simulazione
+    """
     def _init() -> gym.Env:
-        env = create_env(config, concentration_field, data_dir, randomize_field)
+        env = create_env(config, concentration_field, data_dir, randomize_field, chunk_id=chunk_id)
         env.reset(seed=seed + rank)
         
         # Applica action masking se disponibile
@@ -348,13 +358,17 @@ def train(
     print("  Mode: Random field each episode")
 
     # Crea ambienti vettorizzati
-    print(f"\nCreating {n_envs} parallel environments...")
+    print(f"\nCreating {n_envs*2} parallel environments...")
+    print(f"  (2 chunks per file: spawn @1/4 e @3/4 della simulazione)")
 
     timesteps = total_timesteps or training_config.get('total_timesteps', 900000)
 
+    # Crea 2 environments per ogni "file" (rank):
+    # - chunk_id=0: spawn @1/4 della simulazione
+    # - chunk_id=1: spawn @3/4 della simulazione
     env_fns = [
-        make_env_fn(config, concentration_field, i, seed, data_dir, randomize_field)
-        for i in range(n_envs)
+        make_env_fn(config, concentration_field, i, chunk_id, seed, data_dir, randomize_field)
+        for i in range(n_envs) for chunk_id in [0, 1]
     ]
 
     # DummyVecEnv sempre (necessario per accesso diretto agli env nel curriculum)
@@ -371,7 +385,7 @@ def train(
 
     # Crea ambiente di valutazione (usa primo file NC o sintetico, non random)
     eval_env = DummyVecEnv([
-        make_env_fn(config, concentration_field, 0, seed + 1000, data_dir, False)
+        make_env_fn(config, concentration_field, 0, 0, seed + 1000, data_dir, False)
     ])
     if config.get('environment', {}).get('normalize_obs', True):
         eval_env = VecNormalize(

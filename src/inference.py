@@ -30,6 +30,7 @@ try:
     MASKABLE_PPO_AVAILABLE = True
 except ImportError:
     from stable_baselines3 import PPO as MaskablePPO
+    ActionMasker = None  # Fallback per ActionMasker
     MASKABLE_PPO_AVAILABLE = False
     print("WARNING: sb3_contrib non disponibile, uso PPO standard")
 
@@ -167,7 +168,7 @@ def make_env_config(config: dict) -> SourceSeekingConfig:
         land_proximity_threshold=reward_cfg.get('land_proximity_threshold', 10.0),
         land_proximity_penalty_max=reward_cfg.get('land_proximity_penalty_max', -5.0),
         n_discrete_actions=agent_cfg.get('n_discrete_actions', 8),
-        spawn_min_distance=spawn_cfg.get('min_distance', 200),
+        spawn_min_distance=spawn_cfg.get('min_distance', 500),
         spawn_max_distance=spawn_cfg.get('max_distance', 1500),
         spawn_min_land_distance=spawn_cfg.get('min_land_distance', 50.0),
         spawn_start_frame=spawn_cfg.get('start_frame', 1440),
@@ -194,7 +195,7 @@ def build_env(env_cfg, field, source_id, vec_norm_path, use_masking):
         source_id=source_id,
     )
 
-    if use_masking and MASKABLE_PPO_AVAILABLE:
+    if use_masking and MASKABLE_PPO_AVAILABLE and ActionMasker is not None:
         raw_env = ActionMasker(raw_env, mask_fn)
 
     vec_env = DummyVecEnv([lambda e=raw_env: e])

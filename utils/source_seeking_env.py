@@ -9,6 +9,7 @@ import gymnasium as gym
 from gymnasium import spaces
 from typing import Optional, Tuple, Dict, Any, List
 from dataclasses import dataclass
+from scipy.ndimage import binary_erosion
 
 from .data_loader import (
     ConcentrationField, DataManager, DomainConfig
@@ -53,10 +54,11 @@ class SourceSeekingConfig:
     max_steps: int = 1080  # 3 ore: 10800s / 10s = 1080 steps
 
     # Spawn
-    spawn_min_distance: float = 200.0  # m distanza minima dalla sorgente
+    spawn_min_distance: float = 500.0  # m distanza minima dalla sorgente
     spawn_max_distance: float = 1500.0  # m distanza massima dalla sorgente
     spawn_start_frame: int = 1440  # frame di partenza (metà simulazione)
     spawn_conc_threshold: float = 0.5  # soglia minima concentrazione per spawn
+    chunk_id: int = 0  # 0 = spawn @1/4, 1 = spawn @3/4 della simulazione (data augmentation)
 
     # Reward
     source_distance_threshold: float = 100  # m (intorno di successo)
@@ -67,6 +69,8 @@ class SourceSeekingConfig:
     plume_reward_positive: float = 0.3  # reward binario dentro il plume
     plume_reward_negative: float = -0.3  # penalità fuori dal plume
     plume_threshold: float = 0.1  # soglia concentrazione per "dentro il plume"
+    concentration_gradient_reward_positive: float = 0.1  # reward per aumento concentrazione
+    concentration_gradient_reward_negative: float = -0.1  # penalty per diminuzione concentrazione
 
     # Land avoidance
     land_proximity_threshold: float = 10.0  # m - distanza dalla terra per penalità progressiva
@@ -85,11 +89,11 @@ class SourceSeekingEnv(gym.Env):
     L'agente (AUV) deve navigare in un campo di concentrazione
     per trovare la sorgente dell'inquinante.
 
-    Observation Space (32 valori):
+    Observation Space (36 valori):
         - 1 concentrazione corrente
         - 9 concentrazioni passate
         - 9 x (Δx, Δy) spostamenti passati in metri
-        - 4 sensori terra direzionali (N, S, E, W) - binari
+        - 8 sensori concentrazione @ 20m (navigazione locale)
         (normalizzazione delegata a VecNormalize)
 
     Action Space:
@@ -99,9 +103,9 @@ class SourceSeekingEnv(gym.Env):
         - Bonus sorgente raggiunta + time bonus (terminale dominante)
         - Reward distanza (segnale dominante continuo)
         - Reward binario plume (+0.3 dentro, -0.3 fuori)
+        - Reward gradiente concentrazione (+0.1 aumento, -0.1 diminuzione)
         - Penalità per step (-0.1)
-        - Penalità bordi (-10) e terra (-200)
-        - Penalità progressiva avvicinamento terra
+        - Penalità bordi (-10) e terra
     """
 
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 10}
@@ -209,15 +213,14 @@ class SourceSeekingEnv(gym.Env):
     def _setup_observation_space(self):
         """Configura lo spazio delle osservazioni.
         
-        Osservazione (44 valori):
+        Osservazione (36 valori):
         - 1 concentrazione corrente
         - 9 concentrazioni passate (memory_length)
         - 9 * 2 spostamenti passati (Δx, Δy) normalizzati
-        - 8 sensori concentrazione @ 50m (navigazione locale)
-        - 8 sensori concentrazione @ 200m (orientamento globale)
+        - 8 sensori concentrazione @ 20m (navigazione locale)
         """
-        obs_dim = 1 + self.config.memory_length + self.config.memory_length * 2 + 8 + 8
-        # = 1 + 9 + 18 + 8 + 8 = 44
+        obs_dim = 1 + self.config.memory_length + self.config.memory_length * 2 + 8
+        # = 1 + 9 + 18 + 8 = 36
 
         self.observation_space = spaces.Box(
             low=-np.inf,
@@ -242,55 +245,49 @@ class SourceSeekingEnv(gym.Env):
         self.action_space = spaces.Discrete(self.config.n_discrete_actions)
 
     def _spawn_on_plume(self) -> Tuple[float, float]:
-        """Spawn su una cella con concentrazione > soglia, con vincoli di distanza dalla sorgente."""
+        """Spawn sul BORDO del plume, con vincoli di distanza."""
 
-        # Imposta il timestep al frame configurato (1440 = metà simulazione)
+        # Imposta il timestep al frame configurato
         if self.field.n_timesteps > 1:
             start_frame = min(self.config.spawn_start_frame, self.field.n_timesteps - 1)
             self.field.set_time(start_frame)
 
-        # Ottieni il campo corrente
-        field_data = self.field.get_current_field()
+        # Ottieni il campo e crea una maschera binaria del plume
+        field_data = np.nan_to_num(self.field.get_current_field(), nan=0.0)
+        plume_mask = field_data > self.config.spawn_conc_threshold
 
-        # Sostituisci NaN con 0
-        field_clean = np.nan_to_num(field_data, nan=0.0)
+        # Calcola il bordo del plume usando l'erosione
+        # Il bordo è la differenza tra la maschera originale e la sua versione erosa
+        eroded_mask = binary_erosion(plume_mask)
+        edge_mask = plume_mask & ~eroded_mask
 
-        # Trova TUTTE le celle con concentrazione > soglia
-        valid_mask = field_clean > self.config.spawn_conc_threshold
-        valid_indices = np.where(valid_mask)
+        valid_indices = np.where(edge_mask)
 
         if len(valid_indices[0]) == 0:
-            # Nessuna cella valida, fallback vicino alla sorgente
-            print("WARNING: No plume cells found, spawning near source")
-            return (
-                self.source_position[0] + self.np_random.uniform(-50, 50),
-                self.source_position[1] + self.np_random.uniform(-50, 50)
-            )
+            # Fallback: se non c'è un bordo, spawna dentro il plume
+            print("WARNING: No plume edge found, falling back to spawn inside plume.")
+            valid_indices = np.where(plume_mask)
 
         # Converti indici in coordinate
         y_coords = self.field.y_coords[valid_indices[0]]
         x_coords = self.field.x_coords[valid_indices[1]]
 
-        # Calcola distanze dalla sorgente
+        # Applica vincoli di distanza dalla sorgente
         distances = np.sqrt(
             (x_coords - self.source_position[0])**2 +
             (y_coords - self.source_position[1])**2
         )
-
-        # Applica vincoli di distanza minima e massima dalla sorgente
         distance_mask = (
             (distances >= self.config.spawn_min_distance) &
             (distances <= self.config.spawn_max_distance)
         )
-
+        
         valid_x = x_coords[distance_mask]
         valid_y = y_coords[distance_mask]
 
         if len(valid_x) == 0:
-            # Rilassa vincoli se nessun punto valido
-            print("WARNING: No points satisfy distance constraints, relaxing...")
-            valid_x = x_coords
-            valid_y = y_coords
+            print("WARNING: No edge points satisfy distance constraints, relaxing...")
+            valid_x, valid_y = x_coords, y_coords
 
         # Filtra punti troppo vicini alla terra
         land_safe_mask = np.array([
@@ -302,18 +299,26 @@ class SourceSeekingEnv(gym.Env):
             valid_x = valid_x[land_safe_mask]
             valid_y = valid_y[land_safe_mask]
         else:
-            print(f"WARNING: No points satisfy min_land_distance={self.config.spawn_min_land_distance}m, using all")
+            print(f"WARNING: No edge points satisfy min_land_distance={self.config.spawn_min_land_distance}m, using all valid edge points.")
 
-        # Scegli una cella random tra quelle valide
+        if len(valid_x) == 0:
+             print("WARNING: No valid points found after all filters, spawning near source.")
+             return (
+                 self.source_position[0] + self.np_random.uniform(-50, 50),
+                 self.source_position[1] + self.np_random.uniform(-50, 50)
+             )
+
+        # Scegli una cella random tra quelle valide sul bordo
         idx = self.np_random.integers(len(valid_x))
         x = valid_x[idx]
         y = valid_y[idx]
 
-        # Aggiungi piccolo rumore per non essere esattamente sul centro cella
+        # Aggiungi piccolo rumore
         x += self.np_random.uniform(-5, 5)
         y += self.np_random.uniform(-5, 5)
 
         return (float(x), float(y))
+
 
     def _get_observation(self) -> np.ndarray:
         """Costruisce il vettore di osservazione (44 valori) RAW.
@@ -345,23 +350,22 @@ class SourceSeekingEnv(gym.Env):
 
         x, y = self.state.x, self.state.y
         
-        # Sensori concentrazione direzionali a distanze multiple
-        for sensing_dist in [50.0, 200.0]:  # metri
-            conc_sensors = []
-            for action_idx in range(8):
-                dx_dir, dy_dir = self._ACTION_MAP[action_idx]
-                sense_x = x + dx_dir * sensing_dist
-                sense_y = y + dy_dir * sensing_dist
-                # Se il punto è su terra o fuori dominio, concentrazione = 0
-                out_of_bounds = (sense_x < self.config.xmin or sense_x > self.config.xmax or
-                                 sense_y < self.config.ymin or sense_y > self.config.ymax)
-                if out_of_bounds or self.field.is_land(sense_x, sense_y):
-                    conc_sensors.append(0.0)
-                else:
-                    conc = self.field.get_concentration(sense_x, sense_y)
-                    # Safety: nan_to_num per evitare NaN a VecNormalize
-                    conc_sensors.append(float(np.nan_to_num(conc, nan=0.0)))
-            obs.extend(conc_sensors)
+        # Sensori concentrazione direzionali a 20m
+        conc_sensors = []
+        for action_idx in range(8):
+            dx_dir, dy_dir = self._ACTION_MAP[action_idx]
+            sense_x = x + dx_dir * 20.0
+            sense_y = y + dy_dir * 20.0
+            # Se il punto è su terra o fuori dominio, concentrazione = 0
+            out_of_bounds = (sense_x < self.config.xmin or sense_x > self.config.xmax or
+                             sense_y < self.config.ymin or sense_y > self.config.ymax)
+            if out_of_bounds or self.field.is_land(sense_x, sense_y):
+                conc_sensors.append(0.0)
+            else:
+                conc = self.field.get_concentration(sense_x, sense_y)
+                # Safety: nan_to_num per evitare NaN a VecNormalize
+                conc_sensors.append(float(np.nan_to_num(conc, nan=0.0)))
+        obs.extend(conc_sensors)
 
         return np.array(obs, dtype=np.float32)
 
@@ -477,7 +481,9 @@ class SourceSeekingEnv(gym.Env):
         2. Penalità terra e bordi (terminale)
         3. Reward distanza (segnale dominante continuo)
         4. Reward binario plume (+0.3 dentro, -0.3 fuori)
-        5. Penalità tempo
+        5. Reward gradiente concentrazione (+0.1 aumento, -0.1 diminuzione)
+        6. Penalità tempo (-0.1 per step)
+        7. Penalità progressiva avvicinamento terra
         """
         reward = 0.0
         info = {}
@@ -534,13 +540,24 @@ class SourceSeekingEnv(gym.Env):
             info['plume_reward'] = self.config.plume_reward_negative
 
         # ============================================================
-        # 5. PENALITÀ TEMPO (time efficiency)
+        # 5. REWARD GRADIENTE CONCENTRAZIONE
+        # ============================================================
+        conc_gradient = current_conc - self.prev_concentration
+        if conc_gradient > 0:
+            reward += self.config.concentration_gradient_reward_positive
+            info['conc_gradient_reward'] = self.config.concentration_gradient_reward_positive
+        else:
+            reward += self.config.concentration_gradient_reward_negative
+            info['conc_gradient_reward'] = self.config.concentration_gradient_reward_negative
+
+        # ============================================================
+        # 6. PENALITÀ TEMPO (time efficiency)
         # ============================================================
         reward += self.config.step_penalty  # -0.1
         info['time_penalty'] = self.config.step_penalty
 
         # ============================================================
-        # 6. PENALITÀ PROGRESSIVA AVVICINAMENTO TERRA
+        # 7. PENALITÀ PROGRESSIVA AVVICINAMENTO TERRA
         # Land proximity penalty (penalità progressiva vicino alla terra)
         dist_to_land = self._min_distance_to_land(self.state.x, self.state.y)
         if (dist_to_land < self.config.land_proximity_threshold 
@@ -596,9 +613,19 @@ class SourceSeekingEnv(gym.Env):
                     f"Controlla DataManager.SOURCE_CONFIGS e nome file NC."
                 )
 
-        # Imposta timestep al frame 1440 (metà simulazione)
+        # Determina spawn_start_frame: usa chunk_id (0 = 1/4, 1 = 3/4)
+        spawn_frame = self.config.spawn_start_frame
+        if self.field.n_timesteps > 1 and self.config.chunk_id in [0, 1]:
+            # chunk_id=0: spawn a 1/4 della simulazione
+            # chunk_id=1: spawn a 3/4 della simulazione
+            if self.config.chunk_id == 0:
+                spawn_frame = self.field.n_timesteps // 4
+            else:  # chunk_id == 1
+                spawn_frame = (self.field.n_timesteps * 3) // 4
+
+        # Imposta timestep al frame calcolato
         if self.field.n_timesteps > 1:
-            self._start_time_idx = min(self.config.spawn_start_frame, self.field.n_timesteps - 1)
+            self._start_time_idx = min(spawn_frame, self.field.n_timesteps - 1)
             self.field.set_time(self._start_time_idx)
         else:
             self._start_time_idx = 0

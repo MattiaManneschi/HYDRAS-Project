@@ -60,10 +60,12 @@ environment:
     plume_reward_positive: 0.3  # reward binario dentro il plume
     plume_reward_negative: -0.3  # penalità fuori dal plume
     plume_threshold: 0.1  # soglia concentrazione per "dentro il plume"
+    concentration_gradient_reward_positive: 0.1
+    concentration_gradient_reward_negative: -0.1
 
   # Spawn constraints
   spawn:
-    min_distance: 200  # m - distanza minima dalla sorgente
+    min_distance: 500      # m - distanza minima dalla sorgente
     max_distance: 1500  # m - distanza massima dalla sorgente
     min_land_distance: 50  # m - distanza minima dalla terra per spawn
     start_frame: 1440  # frame di partenza (metà simulazione)

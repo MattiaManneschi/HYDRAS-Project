@@ -180,6 +180,116 @@ class ConcentrationField:
         return 1
 
 
+class ChunkedConcentrationField:
+    """
+    Wrappa un ConcentrationField per rappresentare una finestra temporale (chunk).
+    Permette data augmentation spezzando file lunghi in porzioni più piccole.
+    
+    Esempio: File NC con 2880 timestep diventa 2 "file virtuali":
+        - Chunk 0: spawn_start_frame = n_timesteps // 4 (primo quarto, spawn al 25%)
+        - Chunk 1: spawn_start_frame = n_timesteps * 3 // 4 (terzo quarto, spawn al 75%)
+    """
+    
+    def __init__(
+        self,
+        base_field: ConcentrationField,
+        chunk_id: int,
+        n_chunks: int = 2,
+        chunk_start_frame: Optional[int] = None,
+        chunk_end_frame: Optional[int] = None
+    ):
+        """
+        Args:
+            base_field: ConcentrationField originale
+            chunk_id: ID del chunk (0, 1, ...)
+            n_chunks: Numero totale di chunk per questo campo (default 2)
+            chunk_start_frame: Inizio del chunk (se None, calcolato automaticamente)
+            chunk_end_frame: Fine del chunk (se None, calcolato automaticamente)
+        """
+        self.base_field = base_field
+        self.chunk_id = chunk_id
+        self.n_chunks = n_chunks
+        self.source_position = base_field.source_position
+        self.land_mask = base_field.land_mask
+        
+        # Calcola i frame del chunk
+        total_frames = base_field.n_timesteps
+        
+        if chunk_start_frame is None or chunk_end_frame is None:
+            # Divisione semplice in n_chunks parte uguali
+            frames_per_chunk = total_frames // n_chunks
+            if chunk_start_frame is None:
+                self.chunk_start_frame = chunk_id * frames_per_chunk
+            else:
+                self.chunk_start_frame = chunk_start_frame
+                
+            if chunk_end_frame is None:
+                if chunk_id == n_chunks - 1:
+                    self.chunk_end_frame = total_frames  # Ultimo chunk prende tutto il resto
+                else:
+                    self.chunk_end_frame = (chunk_id + 1) * frames_per_chunk
+            else:
+                self.chunk_end_frame = chunk_end_frame
+        else:
+            self.chunk_start_frame = chunk_start_frame
+            self.chunk_end_frame = chunk_end_frame
+        
+        # Spawn point del chunk: 1/4 della simulazione totale per chunk 0, 3/4 per chunk 1
+        # (utilizzato da SourceSeekingConfig.spawn_start_frame)
+        if n_chunks == 2:
+            if chunk_id == 0:
+                self.spawn_start_frame = total_frames // 4  # 25% del file intero
+            else:  # chunk_id == 1
+                self.spawn_start_frame = (total_frames * 3) // 4  # 75% del file intero
+        else:
+            # Fallback per altri numeri di chunk
+            self.spawn_start_frame = self.chunk_start_frame + (self.chunk_end_frame - self.chunk_start_frame) // 4
+        
+        self.x_coords = base_field.x_coords
+        self.y_coords = base_field.y_coords
+        
+    def set_time(self, time_idx: int):
+        """Imposta il time index, limitato al range del chunk."""
+        # Converte l'indice locale del chunk a indice globale del base_field
+        clamped_idx = max(self.chunk_start_frame, min(time_idx, self.chunk_end_frame - 1))
+        self.base_field.set_time(clamped_idx)
+    
+    def get_concentration(self, x: float, y: float) -> float:
+        """Ritorna concentrazione al campo attuale (via base_field)."""
+        return self.base_field.get_concentration(x, y)
+    
+    def is_land(self, x: float, y: float) -> bool:
+        """Ritorna True se è terra (via base_field)."""
+        return self.base_field.is_land(x, y)
+    
+    def get_land_distance(self, x: float, y: float) -> float:
+        """Ritorna distanza dalla terra (via base_field)."""
+        return self.base_field.get_land_distance(x, y)
+    
+    def get_current_field(self) -> np.ndarray:
+        """Ritorna il campo di concentrazione corrente."""
+        return self.base_field.get_current_field()
+    
+    @property
+    def max_concentration(self) -> float:
+        """Massima concentrazione nel chunk."""
+        # Calcola il max considerando solo il range del chunk
+        if self.base_field._is_time_varying and self.base_field.data.ndim == 3:
+            chunk_data = self.base_field.data[self.chunk_start_frame:self.chunk_end_frame]
+            return float(np.max(chunk_data))
+        return self.base_field.max_concentration
+    
+    @property
+    def n_timesteps(self) -> int:
+        """Numero di timestep nel chunk."""
+        return self.chunk_end_frame - self.chunk_start_frame
+    
+    @property
+    def _is_time_varying(self) -> bool:
+        """È una serie temporale."""
+        return self.base_field._is_time_varying
+
+
 class NetCDFLoader:
     """
     Carica i dati di concentrazione dai file NetCDF prodotti da MIKE21.

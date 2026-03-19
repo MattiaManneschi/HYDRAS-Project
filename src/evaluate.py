@@ -73,21 +73,21 @@ def make_env_config(config: dict, max_steps: int = None) -> SourceSeekingConfig:
         resolution=config['domain'].get('grid_resolution', 10),
         max_velocity=agent_config.get('max_velocity', 1.0),
         memory_length=agent_config.get('memory_length', 9),
-        dt=env_config.get('dt', 120),
-        max_steps=max_steps or env_config.get('max_episode_steps', 90),
+        dt=env_config.get('dt', 10),
+        max_steps=max_steps or env_config.get('max_episode_steps', 1080),
         source_distance_threshold=env_config.get('reward', {}).get('distance_threshold', _DEFAULT_SUCCESS_THRESHOLD_M),
         source_found_reward=env_config.get('reward', {}).get('source_reached_bonus', 100),
         step_penalty=env_config.get('reward', {}).get('step_penalty', -0.1),
         boundary_penalty=env_config.get('reward', {}).get('boundary_penalty', -10),
         distance_reward_multiplier=env_config.get('reward', {}).get('distance_reward_multiplier', 1.0),
-        land_penalty=env_config.get('reward', {}).get('land_penalty', -50.0),
-        n_discrete_actions=agent_config.get('n_discrete_actions', 4),
-        sensor_distance=agent_config.get('sensor_distance', 20.0),
+        land_proximity_threshold=env_config.get('reward', {}).get('land_proximity_threshold', 10.0),
+        land_proximity_penalty_max=env_config.get('reward', {}).get('land_proximity_penalty_max', -5.0),
+        spawn_min_land_distance=env_config.get('spawn', {}).get('min_land_distance', 50.0),
         spawn_min_distance=env_config.get('spawn', {}).get('min_distance', 500),
         spawn_max_distance=env_config.get('spawn', {}).get('max_distance', 3000),
         spawn_start_frame=env_config.get('spawn', {}).get('start_frame', 1440),
-        spawn_use_virtual_splits=env_config.get('spawn', {}).get('use_virtual_splits', True),
         spawn_conc_threshold=env_config.get('spawn', {}).get('conc_threshold', 0.5),
+        chunk_id=0,  # Default: spawn @1/4
         plume_reward_positive=env_config.get('reward', {}).get('plume_reward_positive', 0.3),
         plume_reward_negative=env_config.get('reward', {}).get('plume_reward_negative', -0.3),
         plume_threshold=env_config.get('reward', {}).get('plume_threshold', 0.1),
@@ -263,7 +263,8 @@ def evaluate_and_visualize(
             concentration_field=variant_field,
             source_id=source_id,
             data_dir=data_dir if data_dir else None,
-            randomize_field=randomize and not variant_field
+            randomize_field=randomize and not variant_field,
+            chunk_id=ep % 2  # Alterna tra chunk_id=0 e chunk_id=1
         )
         env.reset(seed=ep)  # seed via Gymnasium API
         env, is_vec = wrap_env(env, has_vec_norm, vec_norm_path)
@@ -286,7 +287,7 @@ def evaluate_and_visualize(
     print(f"Mean reward: {total_reward/n_episodes:.1f}")
     print(f"{'='*60}\n")
 
-    # --- Salva solo trajectory plot ---
+    # --- Salva plot traiettoria per ogni episodio ---
     print("Creating trajectory plots...")
 
     for i, (traj, field) in enumerate(zip(trajectories, fields)):
