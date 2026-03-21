@@ -50,7 +50,7 @@ except ImportError:
     print("WARNING: stable-baselines3 non installato. Alcune funzionalità non saranno disponibili.")
 
 from utils.source_seeking_env import SourceSeekingEnv, SourceSeekingConfig
-from utils.data_loader import ConcentrationField
+from utils.data_loader import ConcentrationField, DataManager, WindData, CurrentData
 
 
 class SourceSeekingCallback(BaseCallback):
@@ -189,18 +189,39 @@ def load_config(config_path: str) -> Dict[str, Any]:
         return yaml.safe_load(f)
 
 
+def load_wind_mapping(mapping_path: str) -> Dict[str, str]:
+    """
+    Carica la mappatura simulazione -> file di vento.
+    
+    Args:
+        mapping_path: Path al file wind_mapping.yaml
+    
+    Returns:
+        Dict con chiavi S1_01, S1_02, etc. e valori nomi file di vento
+    """
+    with open(mapping_path, 'r') as f:
+        data = yaml.safe_load(f)
+    return data.get('wind_files', {})
+
+
 def create_env(
     config: Dict[str, Any],
     concentration_field: Optional[ConcentrationField] = None,
+    wind_data: Optional['WindData'] = None,
+    current_data: Optional['CurrentData'] = None,
     data_dir: Optional[str] = None,
     randomize_field: bool = False,
-    chunk_id: int = 0
+    chunk_id: int = 0,
+    data_manager: Optional[DataManager] = None,
+    wind_mapping: Optional[Dict[str, str]] = None
 ) -> gym.Env:
     """
     Crea un'istanza dell'ambiente con i wrapper appropriati.
     
     Args:
         chunk_id: 0 = spawn @1/4, 1 = spawn @3/4 della simulazione
+        data_manager: DataManager per caricamenti dinamici (opzionale)
+        wind_mapping: Dict con mappatura run_id -> wind_filename (opzionale)
     """
     # Estrai configurazioni
     env_config = config.get('environment', {})
@@ -248,8 +269,12 @@ def create_env(
     env = SourceSeekingEnv(
         config=env_kwargs,
         concentration_field=concentration_field,
+        wind_data=wind_data,
+        current_data=current_data,
         data_dir=data_dir,
-        randomize_field=randomize_field
+        randomize_field=randomize_field,
+        data_manager=data_manager,
+        wind_mapping=wind_mapping
     )
 
     # Wrap con Monitor per logging
@@ -272,20 +297,38 @@ def mask_fn(env: gym.Env) -> np.ndarray:
 def make_env_fn(
     config: Dict[str, Any],
     concentration_field: Optional[ConcentrationField],
-    rank: int,
-    chunk_id: int,
-    seed: int,
+    wind_data: Optional['WindData'] = None,
+    current_data: Optional['CurrentData'] = None,
+    rank: int = 0,
+    chunk_id: int = 0,
+    seed: int = 42,
     data_dir: Optional[str] = None,
     randomize_field: bool = False,
-    use_action_masking: bool = True
+    use_action_masking: bool = True,
+    data_manager: Optional[DataManager] = None,
+    wind_mapping: Optional[Dict[str, str]] = None
 ) -> Callable[[], gym.Env]:
     """Factory function per la creazione di ambienti paralleli.
     
     Args:
+        wind_data: Dati di vento (condivisi tra ambienti)
+        current_data: Dati di corrente (condivisi tra ambienti)
         chunk_id: 0 = spawn @1/4, 1 = spawn @3/4 della simulazione
+        data_manager: DataManager per caricamenti dinamici
+        wind_mapping: Dict con mappatura run_id -> wind_filename
     """
     def _init() -> gym.Env:
-        env = create_env(config, concentration_field, data_dir, randomize_field, chunk_id=chunk_id)
+        env = create_env(
+            config, 
+            concentration_field, 
+            wind_data, 
+            current_data, 
+            data_dir, 
+            randomize_field, 
+            chunk_id=chunk_id,
+            data_manager=data_manager,
+            wind_mapping=wind_mapping
+        )
         env.reset(seed=seed + rank)
         
         # Applica action masking se disponibile
@@ -348,7 +391,7 @@ def train(
     print(f"=" * 60)
     print(f"Run name: {run_name}")
     print(f"Output directory: {run_dir}")
-    print(f"Number of parallel environments: {n_envs}")
+    print(f"Number of parallel workers: {n_envs}")
 
     # Carica dati
     concentration_field = None
@@ -356,6 +399,46 @@ def train(
 
     print(f"\nUsing ALL NC files from: {data_dir}")
     print("  Mode: Random field each episode")
+    
+    # Carica wind mapping
+    wind_mapping_path = PROJECT_ROOT / "utils" / "wind_mapping.yaml"
+    if not wind_mapping_path.exists():
+        print(f"WARNING: File di mappatura vento non trovato: {wind_mapping_path}")
+        wind_mapping = {}
+    else:
+        wind_mapping = load_wind_mapping(str(wind_mapping_path))
+        print(f"Loaded wind mapping: {len(wind_mapping)} scenarios")
+    
+    # Per il training randomizzato, carichiamo una sample di wind e current data
+    # (in generale, ogni episodio potrebbe usare una coppia diversa)
+    data_manager = DataManager(
+        data_dir=data_dir,
+        preload_all=False
+    )
+    
+    wind_data = None
+    current_data = None
+    
+    # Carica un sample di dati (S1_01) come placeholder
+    # Nel reset randomizzato, verranno scelti dinamicamente
+    try:
+        if 'S1_01' in wind_mapping:
+            wind_filename = wind_mapping['S1_01']
+            wind_data = data_manager.load_wind_data(wind_filename)
+            print(f"Loaded wind data from: {wind_filename}")
+        
+        # Current data per S1_01
+        try:
+            current_data = data_manager.load_current_data("CMEMS_S1_01_UV_grid_10m_deltaTres5.nc")
+            print(f"Loaded current data from: CMEMS_S1_01_UV_grid_10m_deltaTres5.nc")
+        except FileNotFoundError:
+            print("WARNING: Current data file not found, will run without current data")
+            current_data = None
+    except (FileNotFoundError, KeyError) as e:
+        print(f"WARNING: Could not load wind/current data: {e}")
+        print("Will run with wind_data=None and current_data=None")
+        wind_data = None
+        current_data = None
 
     # Crea ambienti vettorizzati
     print(f"\nCreating {n_envs*2} parallel environments...")
@@ -367,7 +450,12 @@ def train(
     # - chunk_id=0: spawn @1/4 della simulazione
     # - chunk_id=1: spawn @3/4 della simulazione
     env_fns = [
-        make_env_fn(config, concentration_field, i, chunk_id, seed, data_dir, randomize_field)
+        make_env_fn(
+            config, concentration_field, wind_data, current_data, i, chunk_id, 
+            seed, data_dir, randomize_field,
+            data_manager=data_manager,
+            wind_mapping=wind_mapping
+        )
         for i in range(n_envs) for chunk_id in [0, 1]
     ]
 
@@ -385,7 +473,12 @@ def train(
 
     # Crea ambiente di valutazione (usa primo file NC o sintetico, non random)
     eval_env = DummyVecEnv([
-        make_env_fn(config, concentration_field, 0, 0, seed + 1000, data_dir, False)
+        make_env_fn(
+            config, concentration_field, wind_data, current_data, 0, 0, 
+            seed + 1000, data_dir, False,
+            data_manager=data_manager,
+            wind_mapping=wind_mapping
+        )
     ])
     if config.get('environment', {}).get('normalize_obs', True):
         eval_env = VecNormalize(

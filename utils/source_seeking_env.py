@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from scipy.ndimage import binary_erosion
 
 from .data_loader import (
-    ConcentrationField, DataManager, DomainConfig
+    ConcentrationField, DataManager, DomainConfig, WindData, CurrentData
 )
 
 
@@ -66,11 +66,15 @@ class SourceSeekingConfig:
     step_penalty: float = -0.1
     boundary_penalty: float = -10.0
     distance_reward_multiplier: float = 1.0  # Moltiplicatore per reward distanza
-    plume_reward_positive: float = 0.3  # reward binario dentro il plume
-    plume_reward_negative: float = -0.3  # penalità fuori dal plume
+    plume_reward_positive: float = 0.5  # reward binario dentro il plume
+    plume_reward_negative: float = -0.5  # penalità fuori dal plume
     plume_threshold: float = 0.1  # soglia concentrazione per "dentro il plume"
-    concentration_gradient_reward_positive: float = 0.1  # reward per aumento concentrazione
-    concentration_gradient_reward_negative: float = -0.1  # penalty per diminuzione concentrazione
+    concentration_gradient_reward_positive: float = 0.05  # reward per aumento concentrazione
+    concentration_gradient_reward_negative: float = -0.05  # penalty per diminuzione concentrazione
+    
+    # Wind alignment reward (seguire il vento controcorrente verso sorgente)
+    wind_alignment_reward: float = 0.1  # reward se movimento è controcorrente al vento
+    wind_alignment_penalty: float = -0.1  # penalty se movimento è a favore del vento
 
     # Land avoidance
     land_proximity_threshold: float = 10.0  # m - distanza dalla terra per penalità progressiva
@@ -114,20 +118,28 @@ class SourceSeekingEnv(gym.Env):
         self,
         config: Optional[SourceSeekingConfig] = None,
         concentration_field: Optional[ConcentrationField] = None,
+        wind_data: Optional[WindData] = None,
+        current_data: Optional[CurrentData] = None,
         source_id: str = "S1",
         render_mode: Optional[str] = None,
         data_dir: Optional[str] = None,
         randomize_field: bool = False,
+        data_manager: Optional['DataManager'] = None,
+        wind_mapping: Optional[Dict[str, str]] = None,
         **kwargs
     ):
         """
         Args:
             config: Configurazione dell'ambiente
             concentration_field: Campo di concentrazione pre-caricato
+            wind_data: Dati di vento pre-caricati
+            current_data: Dati di corrente pre-caricati
             source_id: ID della sorgente ('S1', 'S2', 'S3')
             render_mode: Modalità di rendering
             data_dir: Directory con file NC (per randomize_field)
             randomize_field: Se True, sceglie un NC random ad ogni reset
+            data_manager: DataManager per caricamenti dinamici (opzionale)
+            wind_mapping: Dict con mappatura run_id -> wind_filename (opzionale)
             **kwargs: Parametri aggiuntivi per la configurazione
         """
         super().__init__()
@@ -136,7 +148,11 @@ class SourceSeekingEnv(gym.Env):
         self.source_id = source_id
         self.render_mode = render_mode
         self.randomize_field = randomize_field
-
+        self._current_run_id = None  # Salvato dopo reset() con concentrazione random
+        
+        # Wind mapping per caricamenti dinamici
+        self.wind_mapping = wind_mapping or {}
+        
         # Setup dominio
         self.domain = DomainConfig(
             xmin=self.config.xmin,
@@ -147,8 +163,8 @@ class SourceSeekingEnv(gym.Env):
         )
 
         # Data Manager per gestione NC files
-        self._data_manager: Optional[DataManager] = None
-        if data_dir:
+        self._data_manager: Optional[DataManager] = data_manager
+        if data_manager is None and data_dir:
             self._data_manager = DataManager(
                 data_dir=data_dir,
                 domain_config=self.domain,
@@ -171,6 +187,10 @@ class SourceSeekingEnv(gym.Env):
                 f"o passa un campo con source_position."
             )
 
+        # Dati di vento e corrente
+        self.wind_data = wind_data
+        self.current_data = current_data
+
         # Stato agente
         self.state: Optional[AgentState] = None
         self.steps = 0
@@ -182,6 +202,12 @@ class SourceSeekingEnv(gym.Env):
 
         # Memory buffer per spostamenti passati (Δx, Δy)
         self._displacement_memory: List[Tuple[float, float]] = [(0.0, 0.0)] * self.config.memory_length
+
+        # Memory buffer per vento passato (u, v)
+        self._wind_memory: List[Tuple[float, float]] = [(0.0, 0.0)] * self.config.memory_length
+
+        # Memory buffer per corrente passata (u, v)
+        self._current_memory: List[Tuple[float, float]] = [(0.0, 0.0)] * self.config.memory_length
 
         # Allowed sources per curriculum learning
         self.allowed_sources: List[str] = ['S1', 'S2', 'S3']
@@ -213,14 +239,16 @@ class SourceSeekingEnv(gym.Env):
     def _setup_observation_space(self):
         """Configura lo spazio delle osservazioni.
         
-        Osservazione (36 valori):
+        Osservazione (40 valori):
         - 1 concentrazione corrente
         - 9 concentrazioni passate (memory_length)
         - 9 * 2 spostamenti passati (Δx, Δy) normalizzati
         - 8 sensori concentrazione @ 20m (navigazione locale)
+        - 2 componenti vento corrente (u, v)
+        - 2 componenti corrente corrente (u, v)
         """
-        obs_dim = 1 + self.config.memory_length + self.config.memory_length * 2 + 8
-        # = 1 + 9 + 18 + 8 = 36
+        obs_dim = 1 + self.config.memory_length + self.config.memory_length * 2 + 8 + 2 + 2
+        # = 1 + 9 + 18 + 8 + 2 + 2 = 40
 
         self.observation_space = spaces.Box(
             low=-np.inf,
@@ -321,7 +349,7 @@ class SourceSeekingEnv(gym.Env):
 
 
     def _get_observation(self) -> np.ndarray:
-        """Costruisce il vettore di osservazione (44 valori) RAW.
+        """Costruisce il vettore di osservazione (40 valori) RAW.
         
         I valori NON vengono normalizzati manualmente: la normalizzazione
         è delegata interamente a VecNormalize (running mean/std adattiva).
@@ -330,8 +358,9 @@ class SourceSeekingEnv(gym.Env):
         - [0]      : concentrazione corrente
         - [1:10]   : 9 concentrazioni passate
         - [10:28]  : 9 spostamenti passati (Δx, Δy) in metri
-        - [28:36]  : 8 sensori concentrazione @ 50m (locale)
-        - [36:44]  : 8 sensori concentrazione @ 200m (globale)
+        - [28:36]  : 8 sensori concentrazione @ 20m (locale)
+        - [36:38]  : vento corrente (u, v) in m/s
+        - [38:40]  : corrente corrente (u, v) in m/s
         """
         obs = []
 
@@ -366,6 +395,24 @@ class SourceSeekingEnv(gym.Env):
                 # Safety: nan_to_num per evitare NaN a VecNormalize
                 conc_sensors.append(float(np.nan_to_num(conc, nan=0.0)))
         obs.extend(conc_sensors)
+
+        # Vento corrente (u, v)
+        if self.wind_data is not None:
+            wind_u, wind_v = self.wind_data.get_wind_components()
+            obs.append(wind_u)
+            obs.append(wind_v)
+        else:
+            obs.append(0.0)
+            obs.append(0.0)
+
+        # Corrente corrente (u, v)
+        if self.current_data is not None:
+            current_u, current_v = self.current_data.get_current_components(x, y)
+            obs.append(current_u)
+            obs.append(current_v)
+        else:
+            obs.append(0.0)
+            obs.append(0.0)
 
         return np.array(obs, dtype=np.float32)
 
@@ -482,6 +529,7 @@ class SourceSeekingEnv(gym.Env):
         3. Reward distanza (segnale dominante continuo)
         4. Reward binario plume (+0.3 dentro, -0.3 fuori)
         5. Reward gradiente concentrazione (+0.1 aumento, -0.1 diminuzione)
+        5b. Reward allineamento vento (controcorrente = reward, a favore = penalty)
         6. Penalità tempo (-0.1 per step)
         7. Penalità progressiva avvicinamento terra
         """
@@ -551,6 +599,45 @@ class SourceSeekingEnv(gym.Env):
             info['conc_gradient_reward'] = self.config.concentration_gradient_reward_negative
 
         # ============================================================
+        # 5b. REWARD ALLINEAMENTO VENTO (seguire controcorrente)
+        # ============================================================
+        wind_reward = 0.0
+        if self.wind_data is not None and self.steps > 0:
+            # Direzione vento
+            wind_u, wind_v = self.wind_data.get_wind_components()
+            wind_mag = np.sqrt(wind_u**2 + wind_v**2)
+            
+            # Direzione movimento agente
+            agent_vx = self.state.vx
+            agent_vy = self.state.vy
+            agent_mag = np.sqrt(agent_vx**2 + agent_vy**2)
+            
+            if wind_mag > 0.01 and agent_mag > 0.01:
+                # Dot product normalizzato (coseno dell'angolo)
+                dot_product = (wind_u * agent_vx + wind_v * agent_vy) / (wind_mag * agent_mag)
+                
+                # Reward se movimento è controcorrente al vento (dot_product < 0 means opposite direction)
+                # Usiamo -dot_product per avere reward positivo quando opposti
+                alignment_score = -dot_product
+                
+                if alignment_score > 0:
+                    # Movimento controcorrente: reward proporzionale all'allineamento
+                    wind_reward = self.config.wind_alignment_reward * alignment_score
+                else:
+                    # Movimento a favore del vento: penalty
+                    wind_reward = self.config.wind_alignment_penalty * alignment_score
+                
+                reward += wind_reward
+                info['wind_alignment'] = alignment_score
+            else:
+                info['wind_alignment'] = 0.0
+            
+            info['wind_reward'] = wind_reward
+        else:
+            info['wind_reward'] = 0.0
+            info['wind_alignment'] = 0.0
+
+        # ============================================================
         # 6. PENALITÀ TEMPO (time efficiency)
         # ============================================================
         reward += self.config.step_penalty  # -0.1
@@ -603,7 +690,17 @@ class SourceSeekingEnv(gym.Env):
         # Curriculum: scegli sorgente random tra quelle consentite, poi scenario random
         if self.randomize_field and self._data_manager:
             source = self.np_random.choice(self.allowed_sources)
-            self.field, self.source_id = self._data_manager.get_random_field_for_source(source)
+            self.field, self._current_run_id = self._data_manager.get_random_field_for_source(source)
+            # Estrai source_id dal run_id (es. 'S1_02' -> 'S1')
+            self.source_id = self._current_run_id.split('_')[0]
+            
+            # Carica i dati di vento e corrente corretti per questo run_id
+            if self._data_manager and self.wind_mapping:
+                self.wind_data = self._data_manager.get_wind_data_for_run(
+                    self._current_run_id, self.wind_mapping
+                )
+                self.current_data = self._data_manager.get_current_data_for_run(self._current_run_id)
+            
             # Aggiorna posizione sorgente (sempre da coordinate hardcodate)
             if self.field.source_position is not None:
                 self.source_position = np.array(self.field.source_position)
@@ -659,6 +756,22 @@ class SourceSeekingEnv(gym.Env):
         # Reset memoria spostamenti passati (9 coppie Δx, Δy)
         self._displacement_memory = [(0.0, 0.0)] * self.config.memory_length
 
+        # Reset memoria vento passato (9 coppie u, v)
+        self._wind_memory = [(0.0, 0.0)] * self.config.memory_length
+
+        # Reset memoria corrente passata (9 coppie u, v)
+        self._current_memory = [(0.0, 0.0)] * self.config.memory_length
+
+        # Sincronizza vento e corrente al timestep di start usando tempo reale
+        if self.field.n_timesteps > 1:
+            # Calcola tempo reale in minuti: timestep * dt (assumendo dt=1 min per concentrazione)
+            time_minutes = self._start_time_idx * 1.0  # dt concentrazione = 1 min
+            
+            if self.wind_data is not None:
+                self.wind_data.set_time_from_minutes(time_minutes)
+            if self.current_data is not None:
+                self.current_data.set_time_from_minutes(time_minutes)
+
         observation = self._get_observation()
         info = {
             'spawn_position': spawn_pos,
@@ -704,11 +817,22 @@ class SourceSeekingEnv(gym.Env):
 
         # Avanza il tempo del campo se time-varying (partendo dal frame di start)
         if self.field.n_timesteps > 1:
-            time_offset = int(self.steps * self.config.dt / 60)  # assumendo dt NC = 1 min
-            time_idx = self._start_time_idx + time_offset
+            # Time offset in minutes (preserva precisione frazionaria per interpolazione)
+            time_offset_minutes = self.steps * self.config.dt / 60.0  # NO int() - preserve float!
+            time_idx = self._start_time_idx + time_offset_minutes
             # Clamp index to valid range
             time_idx = max(0, min(time_idx, self.field.n_timesteps - 1))
-            self.field.set_time(time_idx)
+            # Concentration field uses integer index (truncate for concentration data)
+            self.field.set_time(int(time_idx))
+            
+            # Sincronizza vento e corrente al stesso timestep usando tempo reale
+            # Tempo reale in minuti = (start_time_idx + time_offset_minutes) * 1.0 (dt conc = 1 min)
+            time_minutes = time_idx * 1.0  # dt concentrazione = 1 min (keep float for wind/current sync)
+            
+            if self.wind_data is not None:
+                self.wind_data.set_time_from_minutes(time_minutes)
+            if self.current_data is not None:
+                self.current_data.set_time_from_minutes(time_minutes)
 
         # Calcola reward
         reward, reward_info = self._compute_reward(action)

@@ -1,0 +1,17 @@
+# Mappatura simulazioni CDF -> file di vento
+wind_files:
+  # CI_WIND_TEST01.txt
+  S1_01: CI_WIND_TEST01.txt
+  S2_01: CI_WIND_TEST01.txt
+  S3_01: CI_WIND_TEST01.txt
+  
+  # 2025_Wind_ORB.txt
+  S1_02: 2025_Wind_ORB.txt
+  S1_03: 2025_Wind_ORB.txt
+  S1_04: 2025_Wind_ORB.txt
+  S2_02: 2025_Wind_ORB.txt
+  S2_03: 2025_Wind_ORB.txt
+  S2_04: 2025_Wind_ORB.txt
+  S3_02: 2025_Wind_ORB.txt
+  S3_03: 2025_Wind_ORB.txt
+  S3_04: 2025_Wind_ORB.txt

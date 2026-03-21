@@ -180,116 +180,6 @@ class ConcentrationField:
         return 1
 
 
-class ChunkedConcentrationField:
-    """
-    Wrappa un ConcentrationField per rappresentare una finestra temporale (chunk).
-    Permette data augmentation spezzando file lunghi in porzioni più piccole.
-    
-    Esempio: File NC con 2880 timestep diventa 2 "file virtuali":
-        - Chunk 0: spawn_start_frame = n_timesteps // 4 (primo quarto, spawn al 25%)
-        - Chunk 1: spawn_start_frame = n_timesteps * 3 // 4 (terzo quarto, spawn al 75%)
-    """
-    
-    def __init__(
-        self,
-        base_field: ConcentrationField,
-        chunk_id: int,
-        n_chunks: int = 2,
-        chunk_start_frame: Optional[int] = None,
-        chunk_end_frame: Optional[int] = None
-    ):
-        """
-        Args:
-            base_field: ConcentrationField originale
-            chunk_id: ID del chunk (0, 1, ...)
-            n_chunks: Numero totale di chunk per questo campo (default 2)
-            chunk_start_frame: Inizio del chunk (se None, calcolato automaticamente)
-            chunk_end_frame: Fine del chunk (se None, calcolato automaticamente)
-        """
-        self.base_field = base_field
-        self.chunk_id = chunk_id
-        self.n_chunks = n_chunks
-        self.source_position = base_field.source_position
-        self.land_mask = base_field.land_mask
-        
-        # Calcola i frame del chunk
-        total_frames = base_field.n_timesteps
-        
-        if chunk_start_frame is None or chunk_end_frame is None:
-            # Divisione semplice in n_chunks parte uguali
-            frames_per_chunk = total_frames // n_chunks
-            if chunk_start_frame is None:
-                self.chunk_start_frame = chunk_id * frames_per_chunk
-            else:
-                self.chunk_start_frame = chunk_start_frame
-                
-            if chunk_end_frame is None:
-                if chunk_id == n_chunks - 1:
-                    self.chunk_end_frame = total_frames  # Ultimo chunk prende tutto il resto
-                else:
-                    self.chunk_end_frame = (chunk_id + 1) * frames_per_chunk
-            else:
-                self.chunk_end_frame = chunk_end_frame
-        else:
-            self.chunk_start_frame = chunk_start_frame
-            self.chunk_end_frame = chunk_end_frame
-        
-        # Spawn point del chunk: 1/4 della simulazione totale per chunk 0, 3/4 per chunk 1
-        # (utilizzato da SourceSeekingConfig.spawn_start_frame)
-        if n_chunks == 2:
-            if chunk_id == 0:
-                self.spawn_start_frame = total_frames // 4  # 25% del file intero
-            else:  # chunk_id == 1
-                self.spawn_start_frame = (total_frames * 3) // 4  # 75% del file intero
-        else:
-            # Fallback per altri numeri di chunk
-            self.spawn_start_frame = self.chunk_start_frame + (self.chunk_end_frame - self.chunk_start_frame) // 4
-        
-        self.x_coords = base_field.x_coords
-        self.y_coords = base_field.y_coords
-        
-    def set_time(self, time_idx: int):
-        """Imposta il time index, limitato al range del chunk."""
-        # Converte l'indice locale del chunk a indice globale del base_field
-        clamped_idx = max(self.chunk_start_frame, min(time_idx, self.chunk_end_frame - 1))
-        self.base_field.set_time(clamped_idx)
-    
-    def get_concentration(self, x: float, y: float) -> float:
-        """Ritorna concentrazione al campo attuale (via base_field)."""
-        return self.base_field.get_concentration(x, y)
-    
-    def is_land(self, x: float, y: float) -> bool:
-        """Ritorna True se è terra (via base_field)."""
-        return self.base_field.is_land(x, y)
-    
-    def get_land_distance(self, x: float, y: float) -> float:
-        """Ritorna distanza dalla terra (via base_field)."""
-        return self.base_field.get_land_distance(x, y)
-    
-    def get_current_field(self) -> np.ndarray:
-        """Ritorna il campo di concentrazione corrente."""
-        return self.base_field.get_current_field()
-    
-    @property
-    def max_concentration(self) -> float:
-        """Massima concentrazione nel chunk."""
-        # Calcola il max considerando solo il range del chunk
-        if self.base_field._is_time_varying and self.base_field.data.ndim == 3:
-            chunk_data = self.base_field.data[self.chunk_start_frame:self.chunk_end_frame]
-            return float(np.max(chunk_data))
-        return self.base_field.max_concentration
-    
-    @property
-    def n_timesteps(self) -> int:
-        """Numero di timestep nel chunk."""
-        return self.chunk_end_frame - self.chunk_start_frame
-    
-    @property
-    def _is_time_varying(self) -> bool:
-        """È una serie temporale."""
-        return self.base_field._is_time_varying
-
-
 class NetCDFLoader:
     """
     Carica i dati di concentrazione dai file NetCDF prodotti da MIKE21.
@@ -419,6 +309,343 @@ class NetCDFLoader:
         return None
 
 
+class WindData:
+    """
+    Rappresenta dati di vento (velocità e direzione) nel tempo.
+    Supporta query temporali e conversione in componenti u, v.
+    """
+    
+    def __init__(
+        self,
+        time_coords: np.ndarray,
+        speed: np.ndarray,
+        direction: np.ndarray,
+        dt: float = 60.0
+    ):
+        """
+        Args:
+            time_coords: Array di indici temporali
+            speed: Array di velocità del vento [m/s]
+            direction: Array di direzione del vento [gradi da Nord, in senso orario]
+            dt: Intervallo temporale tra timestep in minuti (default 60 min per CI, 15 per ORB)
+        """
+        self.time_coords = time_coords
+        self.speed = speed
+        self.direction = direction
+        self.dt = dt  # Intervallo temporale in minuti
+        self._current_time_idx = 0
+        
+        # Interpola per affrontare diversi intervalli di tempo
+        self._speed_interp = RegularGridInterpolator(
+            (np.arange(len(time_coords)),),
+            speed,
+            method='linear',
+            bounds_error=False,
+            fill_value=speed[-1]
+        )
+        self._direction_interp = RegularGridInterpolator(
+            (np.arange(len(time_coords)),),
+            direction,
+            method='linear',
+            bounds_error=False,
+            fill_value=direction[-1]
+        )
+    
+    def set_time(self, time_idx: Union[int, float]):
+        """Imposta il timestep corrente."""
+        # Clamp tra 0 e len-1
+        self._current_time_idx = max(0, min(time_idx, len(self.time_coords) - 1))
+    
+    def set_time_from_minutes(self, time_minutes: float):
+        """
+        Imposta il timestep basato su tempo reale in minuti.
+        Utile per sincronizzazione con concentrazione che usa tempo reale.
+        
+        Args:
+            time_minutes: Tempo reale in minuti dall'inizio
+        """
+        # Calcola l'indice temporale basato su dt
+        time_idx = time_minutes / self.dt
+        self.set_time(time_idx)
+    
+    def get_wind_components(self, time_idx: Optional[Union[int, float]] = None) -> Tuple[float, float]:
+        """
+        Ritorna le componenti u, v del vento al timestep specificato.
+        
+        Converti dalla convenzione meteorologica (direzione di provenienza):
+        - u = -speed * sin(direction_rad)  (positivo verso Est)
+        - v = -speed * cos(direction_rad)  (positivo verso Nord)
+        
+        Args:
+            time_idx: Indice temporale (se None, usa l'ultimo set_time)
+        
+        Returns:
+            Tuple (u, v) in m/s
+        """
+        if time_idx is not None:
+            idx = max(0, min(time_idx, len(self.time_coords) - 1))
+        else:
+            idx = self._current_time_idx
+        
+        # Interpolazione lineare
+        speed_val = float(self._speed_interp([[idx]])[0])
+        direction_deg = float(self._direction_interp([[idx]])[0])
+        
+        # Converti da gradi (da Nord, senso orario) a radianti
+        direction_rad = np.radians(direction_deg)
+        
+        # Converti secondo convenzione meteorologica
+        u = -speed_val * np.sin(direction_rad)
+        v = -speed_val * np.cos(direction_rad)
+        
+        return u, v
+    
+    def get_wind_speed_direction(self, time_idx: Optional[Union[int, float]] = None) -> Tuple[float, float]:
+        """Ritorna velocità e direzione al timestep specificato."""
+        if time_idx is not None:
+            idx = max(0, min(time_idx, len(self.time_coords) - 1))
+        else:
+            idx = self._current_time_idx
+        
+        speed_val = float(self._speed_interp([[idx]])[0])
+        direction_val = float(self._direction_interp([[idx]])[0])
+        
+        return speed_val, direction_val
+
+
+class CurrentData:
+    """
+    Rappresenta i dati di corrente 2D (componenti u, v) nel tempo e spazio.
+    """
+    
+    def __init__(
+        self,
+        data_u: np.ndarray,
+        data_v: np.ndarray,
+        x_coords: np.ndarray,
+        y_coords: np.ndarray,
+        time_coords: Optional[np.ndarray] = None,
+        dt: float = 5.0
+    ):
+        """
+        Args:
+            data_u: Array di velocità Est [time, y, x] o [y, x]
+            data_v: Array di velocità Nord [time, y, x] o [y, x]
+            x_coords: Coordinate x della griglia
+            y_coords: Coordinate y della griglia  
+            time_coords: Coordinate temporali (opzionale)
+            dt: Intervallo temporale tra timestep in minuti (default 5 min)
+        """
+        self.data_u = data_u.astype(np.float32)
+        self.data_v = data_v.astype(np.float32)
+        self.x_coords = x_coords.astype(np.float32)
+        self.y_coords = y_coords.astype(np.float32)
+        self.time_coords = time_coords
+        self.dt = dt  # Intervallo temporale in minuti
+        
+        self._is_time_varying = data_u.ndim == 3
+        self._current_time_idx = 0.0  # Keep as float for interpolation
+        
+        # Costruisci interpolatori 3D (time, y, x) per supportare interpolazione temporale
+        self._u_interpolator = None
+        self._v_interpolator = None
+        self._build_3d_interpolators()
+    
+    def _build_3d_interpolators(self):
+        """Costruisce interpolatori 3D con supporto per interpolazione temporale."""
+        if self._is_time_varying:
+            n_times = self.data_u.shape[0]
+            # Sostituisci NaN con 0
+            data_u_clean = np.nan_to_num(self.data_u, nan=0.0)
+            data_v_clean = np.nan_to_num(self.data_v, nan=0.0)
+            
+            # Crea interpolatore 3D: (time, y, x)
+            self._u_interpolator = RegularGridInterpolator(
+                (np.arange(n_times, dtype=np.float32), self.y_coords, self.x_coords),
+                data_u_clean,
+                method='linear',
+                bounds_error=False,
+                fill_value=0.0
+            )
+            self._v_interpolator = RegularGridInterpolator(
+                (np.arange(n_times, dtype=np.float32), self.y_coords, self.x_coords),
+                data_v_clean,
+                method='linear',
+                bounds_error=False,
+                fill_value=0.0
+            )
+        else:
+            # Static field - crea interpolatore 2D
+            data_u_clean = np.nan_to_num(self.data_u, nan=0.0)
+            data_v_clean = np.nan_to_num(self.data_v, nan=0.0)
+            
+            self._u_interpolator = RegularGridInterpolator(
+                (self.y_coords, self.x_coords),
+                data_u_clean,
+                method='linear',
+                bounds_error=False,
+                fill_value=0.0
+            )
+            self._v_interpolator = RegularGridInterpolator(
+                (self.y_coords, self.x_coords),
+                data_v_clean,
+                method='linear',
+                bounds_error=False,
+                fill_value=0.0
+            )
+    
+    def set_time(self, time_idx: Union[int, float]):
+        """Imposta il timestep corrente (supporta float per interpolazione)."""
+        if self._is_time_varying:
+            n_times = self.data_u.shape[0]
+            self._current_time_idx = float(max(0, min(time_idx, n_times - 1)))
+        else:
+            self._current_time_idx = 0.0
+    
+    def set_time_from_minutes(self, time_minutes: float):
+        """
+        Imposta il timestep basato su tempo reale in minuti.
+        Utile per sincronizzazione con concentrazione che usa tempo reale.
+        
+        Args:
+            time_minutes: Tempo reale in minuti dall'inizio
+        """
+        # Calcola l'indice temporale basato su dt (PRESERVA FLOAT!)
+        time_idx = time_minutes / self.dt
+        self.set_time(time_idx)
+    
+    def get_current_components(self, x: float, y: float, time_idx: Optional[Union[int, float]] = None) -> Tuple[float, float]:
+        """
+        Ritorna le componenti u, v della corrente nel punto (x, y).
+        Supporta interpolazione temporale lineare quando time_idx è float.
+        
+        Args:
+            x, y: Coordinate spaziali
+            time_idx: Indice temporale (se None, usa l'ultimo set_time)
+        
+        Returns:
+            Tuple (u, v) in m/s
+        """
+        if time_idx is not None:
+            idx = float(time_idx)
+        else:
+            idx = self._current_time_idx
+        
+        if self._is_time_varying:
+            # Clamp al range valido
+            n_times = self.data_u.shape[0]
+            idx = max(0.0, min(idx, float(n_times - 1)))
+            # Interpola su (time, y, x)
+            u = float(self._u_interpolator([[idx, y, x]])[0])
+            v = float(self._v_interpolator([[idx, y, x]])[0])
+        else:
+            # Static field - interpola solo spazialmente
+            u = float(self._u_interpolator([[y, x]])[0])
+            v = float(self._v_interpolator([[y, x]])[0])
+        
+        return u, v
+    
+    @property
+    def n_timesteps(self) -> int:
+        return self.data_u.shape[0] if self._is_time_varying else 1
+
+
+class WindDataLoader:
+    """Carica dati di vento dai file di testo."""
+    
+    @staticmethod
+    def load_from_txt(filepath: Path, speed_col: int = 1, direction_col: int = 2, dt: float = 60.0) -> WindData:
+        """
+        Carica dati di vento da file di testo.
+        
+        Supporta due formati:
+        1. CI_WIND_TEST01.txt: Time, Speed, Direction (indici 1, 2), dt=60 min
+        2. 2025_Wind_ORB.txt: Time, Direction, Speed (indici 2, 1), dt=15 min
+        
+        Entrambi hanno: Riga 1=nome, Riga 2=intestazioni, Riga 3=metadata, Riga 4+=dati
+        
+        Args:
+            filepath: Path al file di testo
+            speed_col: Indice colonna velocità (default 1 per formato CI)
+            direction_col: Indice colonna direzione (default 2 per formato CI)
+            dt: Intervallo temporale in minuti (60 per CI, 15 per ORB)
+        
+        Returns:
+            WindData object
+        """
+        data = []
+        with open(filepath, 'r') as f:
+            lines = f.readlines()
+        
+        # Skip prima 3 righe (nome + intestazioni + metadata)
+        for line in lines[3:]:  # Skip righe 0, 1, 2 (index 0-2)
+            parts = line.strip().split('\t')  # Separa per TAB
+            if len(parts) < 3:
+                continue
+            
+            try:
+                # Formato flessibile: speed_col e direction_col indicano le colonne
+                speed = float(parts[speed_col])
+                direction = float(parts[direction_col])
+                data.append((speed, direction))
+            except (ValueError, IndexError):
+                continue
+        
+        if not data:
+            raise ValueError(f"Nessun dato di vento trovato in {filepath}")
+        
+        speeds = np.array([d[0] for d in data], dtype=np.float32)
+        directions = np.array([d[1] for d in data], dtype=np.float32)
+        time_coords = np.arange(len(speeds))  # Indici temporali
+        
+        return WindData(time_coords, speeds, directions, dt=dt)
+
+
+class CurrentDataLoader:
+    """Carica dati di corrente dai file netCDF."""
+    
+    @staticmethod
+    def load_from_nc(filepath: Path, u_var: str = "u", v_var: str = "v", dt: float = 5.0) -> CurrentData:
+        """
+        Carica dati di corrente da file netCDF.
+        
+        Args:
+            filepath: Path al file netCDF
+            u_var: Nome della variabile velocità Est
+            v_var: Nome della variabile velocità Nord
+            dt: Intervallo temporale in minuti (default 5 min per CMEMS)
+        
+        Returns:
+            CurrentData object con dt specificato
+        """
+        try:
+            import netCDF4 as nc
+        except ImportError:
+            raise ImportError("netCDF4 non installato. Esegui: pip install netCDF4")
+        
+        with nc.Dataset(filepath, 'r') as ds:
+            # Leggi le coordinate
+            x_coords = ds.variables['x'][:]
+            y_coords = ds.variables['y'][:]
+            
+            # Leggi le componenti di velocità
+            data_u = ds.variables[u_var][:]
+            data_v = ds.variables[v_var][:]
+            
+            # Leggi il tempo se presente
+            time_coords = None
+            if 'time' in ds.variables:
+                time_coords = ds.variables['time'][:]
+            
+            # Gestisci masked arrays
+            if hasattr(data_u, 'mask'):
+                data_u = np.ma.filled(data_u, 0.0)
+            if hasattr(data_v, 'mask'):
+                data_v = np.ma.filled(data_v, 0.0)
+        
+        return CurrentData(data_u, data_v, x_coords, y_coords, time_coords, dt=dt)
+
+
 class DataManager:
     """
     Classe principale per la gestione dei dati NC (MIKE21).
@@ -520,7 +747,15 @@ class DataManager:
             source_id = 'S1' if 'S1' in key else ('S2' if 'S2' in key else 'S3')
             return field, source_id
 
-        nc_file = np.random.choice(self._nc_files)
+        # Filtra SOLO file di concentrazione (non UV/corrente)
+        conc_files = [f for f in self._nc_files if 'conc' in f.name]
+        if not conc_files:
+            raise FileNotFoundError(
+                f"Nessun file di concentrazione trovato in {self.data_dir}\n"
+                f"File disponibili: {[f.name for f in self._nc_files]}"
+            )
+        
+        nc_file = np.random.choice(conc_files)
         field = self._nc_loader.load(
             str(nc_file),
             concentration_var="Concentration - component 1"
@@ -537,18 +772,21 @@ class DataManager:
             source_id: ID della sorgente ('S1', 'S2', 'S3')
 
         Returns:
-            Tuple di (ConcentrationField, source_id)
+            Tuple di (ConcentrationField, run_id) dove run_id è es. 'S1_02'
         """
         if self._preloaded_fields:
             source_keys = [k for k in self._preloaded_fields.keys() if source_id in k]
             if source_keys:
                 key = np.random.choice(source_keys)
-                return self._preloaded_fields[key], source_id
+                # Estrai run_id dal key (es. 'CMEMS_S1_02_conc_grid_10m.nc' -> 'S1_02')
+                run_id = '_'.join(key.split('_')[1:3])  # Estrai 'S1_02' da 'CMEMS_S1_02_...'
+                return self._preloaded_fields[key], run_id
 
-        source_files = [f for f in self._nc_files if source_id in f.name]
+        # Filtra per sorgente E per concentrazione (non UV/corrente)
+        source_files = [f for f in self._nc_files if source_id in f.name and 'conc' in f.name]
         if not source_files:
             raise FileNotFoundError(
-                f"Nessun file NC per sorgente {source_id}.\n"
+                f"Nessun file concentrazione NC per sorgente {source_id}.\n"
                 f"File disponibili: {[f.name for f in self._nc_files]}"
             )
 
@@ -557,7 +795,11 @@ class DataManager:
             str(nc_file),
             concentration_var="Concentration - component 1"
         )
-        return field, source_id
+        
+        # Estrai run_id dal filename (es. 'CMEMS_S1_02_conc_grid_10m.nc' -> 'S1_02')
+        run_id = '_'.join(nc_file.stem.split('_')[1:3])  # stem = 'CMEMS_S1_02_conc_grid_10m'
+        
+        return field, run_id
 
     def get_concentration_field(
         self,
@@ -580,7 +822,87 @@ class DataManager:
         # Prendi un file random per questa sorgente
         field, _ = self.get_random_field_for_source(source_id)
         return field
+    
+    def load_wind_data(self, wind_filename: str) -> WindData:
+        """
+        Carica i dati di vento da file di testo.
+        Auto-detect il formato in base al nome file:
+        - CI_WIND: Time, Speed, Direction (dt=60 min)
+        - ORB: Time, Direction, Speed (dt=15 min)
+        
+        Args:
+            wind_filename: Nome del file di vento (es. 'CI_WIND_TEST01.txt')
+        
+        Returns:
+            WindData object
+        """
+        filepath = self.data_dir / wind_filename
+        if not filepath.exists():
+            raise FileNotFoundError(f"File di vento non trovato: {filepath}")
+        
+        # Auto-detect formato e dt
+        if 'ORB' in wind_filename.upper():
+            # Formato ORB: Time, Direction, Speed, dt=15 min (15 minuti tra timestep)
+            return WindDataLoader.load_from_txt(filepath, speed_col=2, direction_col=1, dt=15.0)
+        else:
+            # Formato CI: Time, Speed, Direction, dt=60 min (1 ora tra timestep)
+            return WindDataLoader.load_from_txt(filepath, speed_col=1, direction_col=2, dt=60.0)
+    
+    def load_current_data(self, current_filename: str) -> CurrentData:
+        """
+        Carica i dati di corrente da file netCDF.
+        
+        Args:
+            current_filename: Nome del file di corrente (es. 'CMEMS_S1_01_UV_grid_10m_deltaTres5.nc')
+        
+        Returns:
+            CurrentData object
+        """
+        filepath = self.data_dir / current_filename
+        if not filepath.exists():
+            raise FileNotFoundError(f"File di corrente non trovato: {filepath}")
+        
+        return CurrentDataLoader.load_from_nc(filepath, u_var="u_velocity", v_var="v_velocity")
 
+    def get_wind_data_for_run(self, run_id: str, wind_mapping: Dict[str, str]) -> Optional[WindData]:
+        """
+        Carica i dati di vento corretti per un run_id specifico usando la mappatura.
+        
+        Args:
+            run_id: ID del run (es. 'S1_02')
+            wind_mapping: Dict con mappatura run_id -> wind_filename
+        
+        Returns:
+            WindData object o None se non trovato
+        """
+        if run_id not in wind_mapping:
+            print(f"WARNING: run_id '{run_id}' non trovato in wind_mapping")
+            return None
+        
+        wind_filename = wind_mapping[run_id]
+        try:
+            return self.load_wind_data(wind_filename)
+        except FileNotFoundError as e:
+            print(f"WARNING: {e}")
+            return None
+    
+    def get_current_data_for_run(self, run_id: str) -> Optional[CurrentData]:
+        """
+        Carica i dati di corrente corretti per un run_id specifico.
+        Il file di corrente segue il pattern: CMEMS_{run_id}_UV_grid_10m_deltaTres5.nc
+        
+        Args:
+            run_id: ID del run (es. 'S1_02')
+        
+        Returns:
+            CurrentData object o None se non trovato
+        """
+        current_filename = f"CMEMS_{run_id}_UV_grid_10m_deltaTres5.nc"
+        try:
+            return self.load_current_data(current_filename)
+        except FileNotFoundError as e:
+            print(f"WARNING: {e}")
+            return None
 
 
 if __name__ == "__main__":

@@ -35,7 +35,7 @@ except ImportError:
     print("WARNING: sb3_contrib non disponibile, uso PPO standard")
 
 from utils.source_seeking_env import SourceSeekingEnv, SourceSeekingConfig
-from utils.data_loader import NetCDFLoader
+from utils.data_loader import NetCDFLoader, DataManager, WindData, CurrentData
 
 
 def plot_trajectory(trajectory: np.ndarray, field, ax=None, title: str = "",
@@ -133,11 +133,19 @@ def load_config(config_path: str) -> dict:
         return yaml.safe_load(f)
 
 
+def load_wind_mapping(mapping_path: str) -> Dict[str, str]:
+    """Carica la mappatura simulazione -> file di vento."""
+    with open(mapping_path, 'r') as f:
+        data = yaml.safe_load(f)
+    return data.get('wind_files', {})
+
+
 def load_model(model_path: str):
     """Carica MaskablePPO o PPO dal path."""
     try:
-        model = MaskablePPO.load(model_path)
+        model = MaskablePPO.load(model_path, device='cpu')
         print(f"  Modello caricato: {model_path}")
+        print(f"  Device: cpu (forzato per CUDA compatibility)")
     except Exception as e:
         raise RuntimeError(f"Impossibile caricare il modello: {e}")
     return model
@@ -187,11 +195,31 @@ def mask_fn(env) -> np.ndarray:
     return inner.action_masks()
 
 
-def build_env(env_cfg, field, source_id, vec_norm_path, use_masking):
-    """Costruisce e wrappa l'environment per l'inferenza."""
+def build_env(env_cfg, field, source_id, vec_norm_path, use_masking,
+              data_manager: Optional[DataManager] = None,
+              wind_mapping: Optional[Dict[str, str]] = None,
+              scenario_id: Optional[str] = None):
+    """Costruisce e wrappa l'environment per l'inferenza.
+    
+    Args:
+        scenario_id: Es. "S1_01" - usato per caricazione dinamica wind/current
+    """
+    # Carica wind e current dinamicamente per questo scenario
+    wind_data = None
+    current_data = None
+    
+    if data_manager and wind_mapping and scenario_id:
+        try:
+            wind_data = data_manager.get_wind_data_for_run(scenario_id, wind_mapping)
+            current_data = data_manager.get_current_data_for_run(scenario_id)
+        except (FileNotFoundError, KeyError) as e:
+            print(f"  WARNING: Could not load wind/current for {scenario_id}: {e}")
+    
     raw_env = SourceSeekingEnv(
         config=env_cfg,
         concentration_field=field,
+        wind_data=wind_data,
+        current_data=current_data,
         source_id=source_id,
     )
 
@@ -365,6 +393,21 @@ def run_inference(
 
     vec_norm_path = Path(model_path).parent / "vec_normalize.pkl"
     loader = NetCDFLoader(data_dir)
+    
+    # Carica wind mapping e DataManager
+    project_root = Path(config_path).resolve().parent.parent  # utils/../..
+    wind_mapping_path = project_root / "utils" / "wind_mapping.yaml"
+    if not wind_mapping_path.exists():
+        print(f"WARNING: Wind mapping file not found: {wind_mapping_path}")
+        wind_mapping = {}
+    else:
+        wind_mapping = load_wind_mapping(str(wind_mapping_path))
+        print(f"Loaded wind mapping: {len(wind_mapping)} scenarios")
+    
+    data_manager = DataManager(
+        data_dir=data_dir,
+        preload_all=False
+    )
 
     scenarios = [(s, v) for s in ['S1', 'S2', 'S3'] for v in ['01', '02', '03', '04']]
     all_stats: List[ScenarioStats] = []
@@ -379,8 +422,8 @@ def run_inference(
         scenario_dir = output_path / source_id / scenario_name
         scenario_dir.mkdir(parents=True, exist_ok=True)
 
-        # Carica campo NC
-        nc_pattern = f"CMEMS_{source_id}_{variant}_*.nc"
+        # Carica campo NC (solo concentrazione, non UV)
+        nc_pattern = f"CMEMS_{source_id}_{variant}_*conc*.nc"
         nc_files = sorted(Path(data_dir).glob(nc_pattern))
         if not nc_files:
             print(f"[SKIP] {scenario_name}: nessun file NC trovato ({nc_pattern})")
@@ -395,7 +438,10 @@ def run_inference(
                                 concentration_var="Concentration - component 1")
 
             vec_env = build_env(env_cfg, field, source_id, vec_norm_path,
-                                use_masking=MASKABLE_PPO_AVAILABLE)
+                                use_masking=MASKABLE_PPO_AVAILABLE,
+                                data_manager=data_manager,
+                                wind_mapping=wind_mapping,
+                                scenario_id=scenario_name)
 
             result = run_episode(model, vec_env, deterministic=deterministic)
             result.scenario = scenario_name
@@ -449,7 +495,7 @@ def main():
 
     DATA_DIR    = str(PROJECT_ROOT / "data")
     CONFIG_PATH = str(PROJECT_ROOT / "utils" / "config.yaml")
-    OUTPUT_DIR  = str(PROJECT_ROOT / "evaluations")
+    OUTPUT_DIR  = str(PROJECT_ROOT / "evaluations_new")
 
     # Seleziona l'ultimo modello addestrato (directory più recente per nome)
     trained_dir = PROJECT_ROOT / "trained_models"
