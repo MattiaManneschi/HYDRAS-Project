@@ -151,7 +151,7 @@ def load_model(model_path: str):
     return model
 
 
-def make_env_config(config: dict) -> SourceSeekingConfig:
+def make_env_config(config: dict, chunk_id: int = 0) -> SourceSeekingConfig:
     env_cfg = config.get('environment', {})
     agent_cfg = config.get('agent', {})
     domain_cfg = config.get('domain', {})
@@ -181,8 +181,9 @@ def make_env_config(config: dict) -> SourceSeekingConfig:
         spawn_min_land_distance=spawn_cfg.get('min_land_distance', 50.0),
         spawn_start_frame=spawn_cfg.get('start_frame', 1440),
         spawn_conc_threshold=spawn_cfg.get('conc_threshold', 0.5),
-        plume_reward_positive=reward_cfg.get('plume_reward_positive', 0.3),
-        plume_reward_negative=reward_cfg.get('plume_reward_negative', -0.3),
+        chunk_id=chunk_id,
+        plume_reward_positive=reward_cfg.get('plume_reward_positive', 0.5),
+        plume_reward_negative=reward_cfg.get('plume_reward_negative', -0.5),
         plume_threshold=reward_cfg.get('plume_threshold', 0.1),
     )
 
@@ -413,7 +414,8 @@ def run_inference(
     all_stats: List[ScenarioStats] = []
 
     print(f"\n{'='*70}")
-    print(f"HYDRAS Inference — {len(scenarios)} scenari × {n_episodes} episodi")
+    print(f"HYDRAS Inference — {len(scenarios)} scenari × 2 chunk × {n_episodes} episodi")
+    print(f"  = {len(scenarios)*2*n_episodes} episodi totali (12 fisici, 24 virtuali)")
     print(f"Modello: {model_path}")
     print(f"{'='*70}\n")
 
@@ -421,7 +423,7 @@ def run_inference(
         scenario_name = f"{source_id}_{variant}"
         scenario_dir = output_path / source_id / scenario_name
         scenario_dir.mkdir(parents=True, exist_ok=True)
-
+        
         # Carica campo NC (solo concentrazione, non UV)
         nc_pattern = f"CMEMS_{source_id}_{variant}_*conc*.nc"
         nc_files = sorted(Path(data_dir).glob(nc_pattern))
@@ -429,45 +431,50 @@ def run_inference(
             print(f"[SKIP] {scenario_name}: nessun file NC trovato ({nc_pattern})")
             continue
 
-        print(f"\n[{scenario_name}]")
-        episode_results: List[EpisodeResult] = []
+        for chunk_id in [0, 1]:  # chunk_id=0 → spawn @1/4, chunk_id=1 → spawn @3/4
+            chunk_label = "Q1/4" if chunk_id == 0 else "Q3/4"
+            print(f"\n[{scenario_name} — spawn @{chunk_label}]")
+            episode_results: List[EpisodeResult] = []
 
-        for ep in range(n_episodes):
-            # Ricarica campo fresco ad ogni episodio
-            field = loader.load(str(nc_files[0]),
-                                concentration_var="Concentration - component 1")
+            for ep in range(n_episodes):
+                # Ricarica campo fresco ad ogni episodio
+                field = loader.load(str(nc_files[0]),
+                                    concentration_var="Concentration - component 1")
 
-            vec_env = build_env(env_cfg, field, source_id, vec_norm_path,
-                                use_masking=MASKABLE_PPO_AVAILABLE,
-                                data_manager=data_manager,
-                                wind_mapping=wind_mapping,
-                                scenario_id=scenario_name)
+                # Crea env config con chunk_id appropriato
+                env_cfg = make_env_config(config, chunk_id=chunk_id)
 
-            result = run_episode(model, vec_env, deterministic=deterministic)
-            result.scenario = scenario_name
-            result.source_id = source_id
-            result.episode = ep
+                vec_env = build_env(env_cfg, field, source_id, vec_norm_path,
+                                    use_masking=MASKABLE_PPO_AVAILABLE,
+                                    data_manager=data_manager,
+                                    wind_mapping=wind_mapping,
+                                    scenario_id=scenario_name)
 
-            # Aggiorna field con quello effettivamente usato dall'env
-            inner = get_inner_env(vec_env)
-            used_field = inner.field
+                result = run_episode(model, vec_env, deterministic=deterministic)
+                result.scenario = scenario_name
+                result.source_id = source_id
+                result.episode = ep
 
-            status = "✓" if result.success else "✗"
-            term = result.termination
-            print(f"  Ep {ep+1}/{n_episodes}: {status} [{term:8s}] "
-                  f"init={result.initial_distance:.0f}m  final={result.final_distance:.0f}m  steps={result.steps}")
+                # Aggiorna field con quello effettivamente usato dall'env
+                inner = get_inner_env(vec_env)
+                used_field = inner.field
 
-            # Salva plot traiettoria
-            plot_path = scenario_dir / f"ep{ep+1:02d}_trajectory.png"
-            save_trajectory_plot(result, used_field, plot_path, success_threshold)
+                status = "✓" if result.success else "✗"
+                term = result.termination
+                print(f"  Ep {ep+1}/{n_episodes}: {status} [{term:8s}] "
+                      f"init={result.initial_distance:.0f}m  final={result.final_distance:.0f}m  steps={result.steps}")
 
-            episode_results.append(result)
-            vec_env.close()
+                # Salva plot traiettoria: ep01_chunk0_trajectory.png / ep01_chunk1_trajectory.png
+                plot_path = scenario_dir / f"ep{ep+1:02d}_chunk{chunk_id}_trajectory.png"
+                save_trajectory_plot(result, used_field, plot_path, success_threshold)
 
-        # Statistiche scenario
-        stats = compute_scenario_stats(episode_results, scenario_name, source_id)
-        all_stats.append(stats)
-        print_scenario_stats(stats)
+                episode_results.append(result)
+                vec_env.close()
+
+            # Statistiche scenario+chunk
+            stats = compute_scenario_stats(episode_results, f"{scenario_name}_{chunk_label}", source_id)
+            all_stats.append(stats)
+            print_scenario_stats(stats)
 
     # Riepilogo per sorgente
     print(f"\n{'='*70}")

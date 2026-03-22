@@ -57,13 +57,13 @@ environment:
     land_proximity_penalty_max: -5.0  # penalità massima per vicinanza terra (aumentata)
     distance_threshold: 100  # m - distanza dalla sorgente per "trovato"
     distance_reward_multiplier: 1.0  # moltiplicatore per reward distanza
-    plume_reward_positive: 0.5  # reward binario dentro il plume
-    plume_reward_negative: -0.5  # penalità fuori dal plume
+    plume_reward_positive: 1.0  # reward binario dentro il plume (PRIORITARIO)
+    plume_reward_negative: -1.0  # penalità fuori dal plume (PRIORITARIO)
     plume_threshold: 0.1  # soglia concentrazione per "dentro il plume"
     concentration_gradient_reward_positive: 0.05
     concentration_gradient_reward_negative: -0.05
-    wind_alignment_reward: 0.1  # reward if moving upwind (against wind)
-    wind_alignment_penalty: -0.1  # penalty if moving downwind (with wind)
+    wind_alignment_reward: 0.05  # reward if moving upwind (against wind) - RIDOTTO per prioritizzare plume
+    wind_alignment_penalty: -0.05  # penalty if moving downwind (with wind) - RIDOTTO per prioritizzare plume
 
   # Spawn constraints
   spawn:

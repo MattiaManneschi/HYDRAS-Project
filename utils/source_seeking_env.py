@@ -542,12 +542,12 @@ class SourceSeekingEnv(gym.Env):
             (self.state.y - self.source_position[1])**2
         )
 
-        # Verifica terra tramite maschera (non più NaN)
+        # Verifica terra tramite maschera
         on_land = self.field.is_land(self.state.x, self.state.y)
         current_conc = self.field.get_concentration(self.state.x, self.state.y)
 
         # ============================================================
-        # 1. BONUS SORGENTE RAGGIUNTA (TERMINALE DOMINANTE)
+        # 1. BONUS SORGENTE RAGGIUNTA
         # ============================================================
         if self._check_source_reached():
             time_bonus = max(0, (self.config.max_steps - self.steps) / self.config.max_steps * 50)
@@ -563,29 +563,41 @@ class SourceSeekingEnv(gym.Env):
             self._on_land = False
 
         # ============================================================
-        # 2. PENALITÀ USCITA DAL DOMINIO (-10)
+        # 2. PENALITÀ USCITA DAL DOMINIO
         # ============================================================
         if self._check_boundary():
             reward += self.config.boundary_penalty
             info['boundary'] = self.config.boundary_penalty
 
         # ============================================================
-        # 3. REWARD DISTANZA (SEGNALE DOMINANTE CONTINUO)
+        # 3. REWARD BINARIO PLUME (PRIORITARIO)
         # ============================================================
-        distance_improvement = self.prev_distance - current_distance
-        distance_reward = distance_improvement * 5.0 * self.config.distance_reward_multiplier
-        reward += distance_reward
-        info['distance_reward'] = distance_reward
-
-        # ============================================================
-        # 4. REWARD BINARIO PLUME (+0.5 dentro, -0.5 fuori)
-        # ============================================================
-        if current_conc > self.config.plume_threshold:
+        in_plume = current_conc > self.config.plume_threshold
+        if in_plume:
             reward += self.config.plume_reward_positive
             info['plume_reward'] = self.config.plume_reward_positive
         else:
             reward += self.config.plume_reward_negative
             info['plume_reward'] = self.config.plume_reward_negative
+        info['in_plume'] = in_plume
+
+        # ============================================================
+        # 4. REWARD DISTANZA (GATED: funziona solo se dentro plume)
+        # ============================================================
+        distance_improvement = self.prev_distance - current_distance
+        distance_reward = distance_improvement * 5.0 * self.config.distance_reward_multiplier
+        
+        if in_plume:
+            # Dentro plume: distance_reward conta normalmente
+            reward += distance_reward
+            info['distance_reward'] = distance_reward
+        else:
+            # Fuori plume: annulla il reward positivo di distanza
+            # Questo obbliga l'agente a rientrare nel plume prima di avanzare
+            if distance_reward > 0:
+                distance_reward = 0.0
+            reward += distance_reward
+            info['distance_reward'] = distance_reward
 
         # ============================================================
         # 5. REWARD GRADIENTE CONCENTRAZIONE

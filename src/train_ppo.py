@@ -258,9 +258,15 @@ def create_env(
         spawn_conc_threshold=env_config.get('spawn', {}).get('conc_threshold', 0.5),
         chunk_id=chunk_id,
         # Plume reward
-        plume_reward_positive=env_config.get('reward', {}).get('plume_reward_positive', 0.3),
-        plume_reward_negative=env_config.get('reward', {}).get('plume_reward_negative', -0.3),
+        plume_reward_positive=env_config.get('reward', {}).get('plume_reward_positive', 0.5),
+        plume_reward_negative=env_config.get('reward', {}).get('plume_reward_negative', -0.5),
         plume_threshold=env_config.get('reward', {}).get('plume_threshold', 0.1),
+        # Concentration gradient reward
+        concentration_gradient_reward_positive=env_config.get('reward', {}).get('concentration_gradient_reward_positive', 0.05),
+        concentration_gradient_reward_negative=env_config.get('reward', {}).get('concentration_gradient_reward_negative', -0.05),
+        # Wind alignment reward
+        wind_alignment_reward=env_config.get('reward', {}).get('wind_alignment_reward', 0.1),
+        wind_alignment_penalty=env_config.get('reward', {}).get('wind_alignment_penalty', -0.1),
     )
 
     print(f"  [DEBUG] spawn=on_plume, threshold={env_kwargs.source_distance_threshold}m")
@@ -527,8 +533,8 @@ def train(
         model = PPOClass(
             policy=training_config.get('policy', 'MlpPolicy'),
             env=vec_env,
-            learning_rate=training_config.get('learning_rate', 3e-4),
-            n_steps=training_config.get('n_steps', 2048),
+            learning_rate=training_config.get('learning_rate', 5e-5),
+            n_steps=training_config.get('n_steps', 4096),
             batch_size=training_config.get('batch_size', 64),
             n_epochs=training_config.get('n_epochs', 10),
             gamma=training_config.get('gamma', 0.99),
