@@ -1,10 +1,6 @@
 # Data files (NetCDF) - raw data stays local
 data/
 
-# Evaluation results
-evaluations_wind_current/
-evaluations_old/
-
 # Python cache
 __pycache__/
 *.py[cod]
