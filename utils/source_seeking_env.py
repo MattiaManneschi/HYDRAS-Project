@@ -578,7 +578,7 @@ class SourceSeekingEnv(gym.Env):
         info['distance_reward'] = distance_reward
 
         # ============================================================
-        # 4. REWARD BINARIO PLUME (+0.3 dentro, -0.3 fuori)
+        # 4. REWARD BINARIO PLUME (+0.5 dentro, -0.5 fuori)
         # ============================================================
         if current_conc > self.config.plume_threshold:
             reward += self.config.plume_reward_positive

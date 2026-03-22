@@ -160,11 +160,3 @@ synthetic:
   # Time-varying parameters
   time_varying: true
   wind_variability: 0.2  # coefficiente di variabilità
-
-# Multi-agent configuration (for future extension)
-multi_agent:
-  enabled: false
-  n_agents: 3
-  communication_range: 100  # m
-  shared_reward: false
-  coordination_bonus: 5.0
