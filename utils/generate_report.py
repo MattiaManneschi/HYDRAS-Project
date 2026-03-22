@@ -163,8 +163,6 @@ class HydrasReportGenerator:
         ogni scenario NetCDF viene suddiviso in due chunk temporali: <b>Chunk 1/4</b> (inizio simulazione) 
         e <b>Chunk 3/4</b> (metà simulazione). L'agente può così essere inizializzato in fasi diverse 
         della propagazione del plume, aumentando la robustezza del modello addestrato.<br/><br/>
-        
-        <b>Velocità e Correnti:</b> Dati reali CMEMS + variabilità del vento sintetica (20% stocasticità).
         """
         self.story.append(Paragraph(text, self.styles['Normal']))
         
