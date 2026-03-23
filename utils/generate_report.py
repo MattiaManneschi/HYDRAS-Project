@@ -191,7 +191,7 @@ class HydrasReportGenerator:
         N, S, E, W e le 4 diagonali (NE, SE, NW, SW). La velocità è 1 m/s e il timestep dt=10s, 
         quindi ogni azione sposta l'agente di 10 metri (o ~7m per componente nelle direzioni diagonali). 
         L'agente viene posizionato a metà simulazione (frame 1440) su una cella con concentrazione > 0.5, 
-        a distanza 200-1500m dalla sorgente e almeno 50m dalla costa. 
+        a distanza 500-1500m dalla sorgente e almeno 50m dalla costa. 
         Il campo evolve nel tempo: ogni 6 step dell'agente (~1 minuto) il campo avanza di 1 frame.
         """
         self.story.append(Paragraph(text, self.styles['Normal']))
@@ -234,8 +234,8 @@ class HydrasReportGenerator:
             ['Memoria Concentrazione', '9', 'Concentrazioni degli ultimi 9 timestep'],
             ['Storico Movimento', '18', '9 step di spostamenti (Δx, Δy) [m]'],
             ['Sensori Locali', '8', 'Concentrazione a sensori radiali ±20m'],
-            ['Velocità Vento', '2', 'Componenti vento corrente (u, v)'],
-            ['Velocità Corrente', '2', 'Componenti corrente oceanica (u, v)']
+            ['Vento', '2', 'Componenti vento corrente (u, v)'],
+            ['Corrente', '2', 'Componenti corrente oceanica (u, v)']
         ]
         
         obs_table = Table(obs_data, colWidths=[4*cm, 2.8*cm, 7.2*cm])
@@ -352,7 +352,7 @@ class HydrasReportGenerator:
         # Descrizione prima della tabella
         description = """
         Valutato con vento e correnti reali su 3 sorgenti (S1, S2, S3) con 2 chunk temporali (Q1/4, Q3/4) e 5 episodi ciascuno = 120 episodi totali, 
-        <b>con un success rate medio del 90.8%</b>:
+        <b>con un success rate medio del 91%</b>:
         """
         self.story.append(Paragraph(description, self.styles['Normal']))
         
