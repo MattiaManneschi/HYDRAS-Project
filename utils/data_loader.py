@@ -265,8 +265,8 @@ class NetCDFLoader:
             # Assicurati che sia float32 per efficienza
             conc_data = conc_data.astype(np.float32)
 
-        # Estrai info sulla sorgente dal nome file
-        source_pos = self._extract_source_position(filename)
+        # Le coordinate della sorgente verranno caricate dal CSV in DataManager
+        source_pos = None
 
         return ConcentrationField(
             data=conc_data,
@@ -300,13 +300,6 @@ class NetCDFLoader:
                 return f
 
         raise FileNotFoundError(f"File {filename} non trovato in {self.data_dir}")
-
-    def _extract_source_position(self, filename: str) -> Optional[Tuple[float, float]]:
-        """Estrae la posizione della sorgente dal nome file."""
-        for source_id, cfg in DataManager.SOURCE_CONFIGS.items():
-            if source_id in filename:
-                return (cfg['x'], cfg['y'])
-        return None
 
 
 class WindData:
@@ -653,12 +646,7 @@ class DataManager:
     Scopre automaticamente le sorgenti dai file disponibili.
     """
 
-    # Configurazioni delle sorgenti dal report DICEA (legacy)
-    SOURCE_CONFIGS = {
-        'S1': {'x': 620100, 'y': 4796210},
-        'S2': {'x': 619800, 'y': 4795900},
-        'S3': {'x': 620200, 'y': 4795800},
-    }
+
 
     def __init__(
         self,
@@ -1136,11 +1124,13 @@ if __name__ == "__main__":
     if data_dir.exists() and list(data_dir.glob("*.nc")):
         print(f"\nTesting DataManager with NC files from {data_dir}...")
         dm = DataManager(data_dir=data_dir)
-        field = dm.get_concentration_field(source_id='S1')
+        field = dm.get_concentration_field(source_id='SRC001')
         print(f"Field max concentration: {field.max_concentration:.2f} g/m³")
         print(f"Source position: {field.source_position}")
-        print(f"Concentration at source: {field.get_concentration(620100, 4796210):.2f} g/m³")
-        print(f"Is land at source: {field.is_land(620100, 4796210)}")
+        coords = dm.get_source_coordinates('SRC001')
+        if coords:
+            print(f"Concentration at source: {field.get_concentration(coords[0], coords[1]):.2f} g/m³")
+            print(f"Is land at source: {field.is_land(coords[0], coords[1])}")
         print(f"Timesteps: {field.n_timesteps}")
     else:
         print(f"\n[SKIP] Nessun file NC in {data_dir}")

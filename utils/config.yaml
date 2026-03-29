@@ -16,22 +16,11 @@ domain:
   nx: 300  # (622000 - 619000) / 10
   ny: 250  # (4797000 - 4794500) / 10
 
-# Source configuration (from report)
+# Emission parameters
 sources:
-  S1:
-    x: 620100  # m UTM
-    y: 4796210  # m UTM
-  S2:
-    x: 619800
-    y: 4795900
-  S3:
-    x: 620200
-    y: 4795800
-  
-  # Emission parameters
   flow_rate: 50  # l/s
   concentration: 1000  # g/m³
-
+  
 # Agent configuration
 agent:
   # Action space
@@ -112,19 +101,22 @@ training:
   tensorboard_log: "./logs/tensorboard"
   verbose: 1
 
-# Curriculum learning
+# Curriculum learning - Progressive training on increasing source sets
 curriculum:
   enabled: true
   phases:
     - start: 0
       end: 1000000
-      sources: ["S1"]
+      num_sources: 26  # SRC001-SRC026 (first 26 sources)
+      description: "Phase 1: Initial 26 sources"
     - start: 1000000
       end: 2000000
-      sources: ["S1", "S2"]
+      num_sources: 52  # SRC001-SRC052 (first 52 sources)
+      description: "Phase 2: Extended to 52 sources"
     - start: 2000000
       end: 3000000
-      sources: ["S1", "S2", "S3"]
+      num_sources: 80  # SRC001-SRC080 (first 80 sources)
+      description: "Phase 3: Full 80 sources"
 
 # Data configuration
 data:

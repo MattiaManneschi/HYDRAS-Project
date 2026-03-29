@@ -120,7 +120,7 @@ class SourceSeekingEnv(gym.Env):
         concentration_field: Optional[ConcentrationField] = None,
         wind_data: Optional[WindData] = None,
         current_data: Optional[CurrentData] = None,
-        source_id: str = "S1",
+        source_id: str = "SRC001",
         render_mode: Optional[str] = None,
         data_dir: Optional[str] = None,
         randomize_field: bool = False,
@@ -134,7 +134,7 @@ class SourceSeekingEnv(gym.Env):
             concentration_field: Campo di concentrazione pre-caricato
             wind_data: Dati di vento pre-caricati
             current_data: Dati di corrente pre-caricati
-            source_id: ID della sorgente ('S1', 'S2', 'S3')
+            source_id: ID della sorgente (es. 'SRC001', 'SRC042', 'SRC132')
             render_mode: Modalità di rendering
             data_dir: Directory con file NC (per randomize_field)
             randomize_field: Se True, sceglie un NC random ad ogni reset
@@ -209,8 +209,9 @@ class SourceSeekingEnv(gym.Env):
         # Memory buffer per corrente passata (u, v)
         self._current_memory: List[Tuple[float, float]] = [(0.0, 0.0)] * self.config.memory_length
 
-        # Allowed sources per curriculum learning
-        self.allowed_sources: List[str] = ['S1', 'S2', 'S3']
+        # Allowed sources per curriculum learning (sarà impostato dal CurriculumCallback)
+        # Default vuoto: richiede che sia impostato dal training script
+        self.allowed_sources: List[str] = []
 
         # History per analisi
         self.trajectory: List[np.ndarray] = []
@@ -701,9 +702,12 @@ class SourceSeekingEnv(gym.Env):
 
         # Curriculum: scegli sorgente random tra quelle consentite, poi scenario random
         if self.randomize_field and self._data_manager:
-            source = self.np_random.choice(self.allowed_sources)
+            # Fallback per allowed_sources vuota (es. al startup, prima che CurriculumCallback imposti i limiti)
+            available_sources = self.allowed_sources if self.allowed_sources else [f"SRC{i:03d}" for i in range(1, 81)]
+            
+            source = self.np_random.choice(available_sources)
             self.field, self._current_run_id = self._data_manager.get_random_field_for_source(source)
-            # Estrai source_id dal run_id (es. 'S1_02' -> 'S1')
+            # Estrai source_id dal run_id (es. 'SRC042_chunk0' -> 'SRC042')
             self.source_id = self._current_run_id.split('_')[0]
             
             # Carica i dati di vento e corrente corretti per questo run_id
@@ -1002,7 +1006,7 @@ if __name__ == "__main__":
     print("Testing SourceSeekingEnv...")
 
     env = SourceSeekingEnv(
-        source_id='S1',
+        source_id='SRC001',
         render_mode=None,
     )
 

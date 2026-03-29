@@ -106,62 +106,78 @@ class SourceSeekingCallback(BaseCallback):
 
 class CurriculumCallback(BaseCallback):
     """
-    Callback per il curriculum learning.
-    Gestisce le fasi di addestramento con sorgenti progressive.
+    Callback per implementare curriculum learning con progressione di sorgenti.
     
-    Supporta sia config YAMLche named sources come 'S1', 'S2'
-    che discovered source IDs come 'SRC000', 'SRC001', ..., 'SRC131'
+    Progressione:
+    - Fase 1 (0-1M steps): SRC001-SRC026 (26 sorgenti)
+    - Fase 2 (1M-2M steps): SRC001-SRC052 (52 sorgenti)
+    - Fase 3 (2M-3M steps): SRC001-SRC080 (80 sorgenti)
     """
-
-    def __init__(self, vec_env, config: Dict[str, Any], discovered_sources: List[str] = None, verbose: int = 0):
+    
+    def __init__(
+        self, 
+        vec_env,
+        curriculum_config: Dict[str, Any],
+        verbose: int = 0
+    ):
         super().__init__(verbose)
         self.vec_env = vec_env
-        self._current_phase = -1
-        self.discovered_sources = discovered_sources or []
+        self.curriculum_config = curriculum_config
+        self.current_phase = -1
+        self.phases = curriculum_config.get('phases', [])
+        
+        if not self.phases:
+            raise ValueError("No curriculum phases defined in config")
+        
+        # Estendi default sources list: SRC001-SRC132
+        self._all_sources = [f"SRC{i:03d}" for i in range(1, 133)]
+        
+        print(f"[CurriculumCallback] Initialized with {len(self.phases)} phases")
+        for i, phase in enumerate(self.phases):
+            print(f"  Phase {i}: [{phase['start']:,} - {phase['end']:,} steps] "
+                  f"-> {phase['num_sources']} sources")
 
-        # Carica fasi dal config
-        curriculum_config = config.get('curriculum', {})
-        if curriculum_config.get('enabled', False):
-            self.phases = [
-                (p['start'], p['end'], p['sources'])
-                for p in curriculum_config.get('phases', [])
-            ]
-        else:
-            # Default: tutte le sorgenti scoperte da subito (o S1/S2/S3 per legacy)
-            if self.discovered_sources:
-                all_sources = self.discovered_sources
+    def _get_sources_for_step(self, step: int) -> List[str]:
+        """Ritorna la lista di sorgenti alla quale agent deve avere accesso al passo dato."""
+        for phase in self.phases:
+            if phase['start'] <= step < phase['end']:
+                num_sources = min(phase['num_sources'], len(self._all_sources))
+                return self._all_sources[:num_sources]
+        
+        # Se oltre tutte le fasi, usa tutte le sorgenti disponibili
+        return self._all_sources
+
+    def _on_step(self) -> bool:
+        # Determina la fase attuale
+        current_sources = self._get_sources_for_step(self.num_timesteps)
+        current_phase = None
+        
+        for i, phase in enumerate(self.phases):
+            if phase['start'] <= self.num_timesteps < phase['end']:
+                current_phase = i
+                break
+        
+        # Se cambia fase, aggiorna allowed_sources e disconnexiona messaggi
+        if current_phase != self.current_phase:
+            self.current_phase = current_phase
+            
+            if current_phase is not None:
+                phase_info = self.phases[current_phase]
+                print(f"\n[Step {self.num_timesteps:,}] Transitioning to Phase {current_phase + 1}: "
+                      f"{len(current_sources)} sources ({current_sources[0]} - {current_sources[-1]})")
+                self.logger.record(f'curriculum/phase', current_phase)
             else:
-                all_sources = ['S1', 'S2', 'S3']  # Legacy fallback
-            self.phases = [(0, 10_000_000, all_sources)]
-
-    def _get_source_seeking_envs(self):
-        """Estrai le istanze SourceSeekingEnv dal vec env wrappato."""
-        base = self.vec_env
-        while hasattr(base, 'venv'):
-            base = base.venv
-        envs = []
-        for env in base.envs:
+                print(f"\n[Step {self.num_timesteps:,}] Training beyond defined phases")
+        
+        # Aggiorna allowed_sources in tutti gli ambienti
+        for env in self.vec_env.envs:
             inner = env
             while hasattr(inner, 'env'):
                 inner = inner.env
-            envs.append(inner)
-        return envs
-
-    def _on_step(self) -> bool:
-        steps = self.num_timesteps
-
-        for phase_idx, (start, end, sources) in enumerate(self.phases):
-            if start <= steps < end:
-                if phase_idx != self._current_phase:
-                    self._current_phase = phase_idx
-                    print(f"\n[Curriculum] Fase {phase_idx + 1}: sources={sources} (step {steps:,})")
-                    # Aggiorna sorgenti consentite in tutti gli ambienti
-                    for env in self._get_source_seeking_envs():
-                        env.allowed_sources = list(sources)
-                    self.logger.record('curriculum/phase', phase_idx + 1)
-                    self.logger.record('curriculum/n_sources', len(sources))
-                break
-
+            inner.allowed_sources = current_sources
+        
+        self.logger.record('curriculum/n_sources', len(current_sources))
+        
         return True
 
 
@@ -194,19 +210,7 @@ def load_config(config_path: str) -> Dict[str, Any]:
         return yaml.safe_load(f)
 
 
-def load_wind_mapping(mapping_path: str) -> Dict[str, str]:
-    """
-    Carica la mappatura simulazione -> file di vento.
-    
-    Args:
-        mapping_path: Path al file wind_mapping.yaml
-    
-    Returns:
-        Dict con chiavi S1_01, S1_02, etc. e valori nomi file di vento
-    """
-    with open(mapping_path, 'r') as f:
-        data = yaml.safe_load(f)
-    return data.get('wind_files', {})
+
 
 
 def create_env(
@@ -431,15 +435,8 @@ def train(
     if wind_data is None or current_data is None:
         print("\nWARNING: Wind or current data not loaded. Will run without them.")
     
-    # Vecchio caricamento legacy (dontused if data_manager è loaded correttamente)
-    # Carica wind mapping SE ESISTE (per backward compatibility)
-    wind_mapping_path = PROJECT_ROOT / "utils" / "wind_mapping.yaml"
-    if not wind_mapping_path.exists():
-        print(f"(No wind mapping file: {wind_mapping_path})")
-        wind_mapping = {}
-    else:
-        wind_mapping = load_wind_mapping(str(wind_mapping_path))
-        print(f"(Wind mapping for legacy scenarios: {len(wind_mapping)} scenarios)")
+    # Wind mapping initialization (empty - legacy support removed)
+    wind_mapping = {}
 
     # Crea ambienti vettorizzati
     print(f"\nCreating {n_envs*2} parallel environments...")
@@ -460,7 +457,7 @@ def train(
         for i in range(n_envs) for chunk_id in [0, 1]
     ]
 
-    # DummyVecEnv sempre (necessario per accesso diretto agli env nel curriculum)
+    # DummyVecEnv sempre (necessario per accesso diretto agli env)
     vec_env = DummyVecEnv(env_fns)
 
     # Normalizzazione
@@ -555,6 +552,18 @@ def train(
     # Setup callbacks
     callbacks = []
 
+    # Curriculum Learning callback (applica fasi progressive di sorgenti)
+    if config.get('curriculum', {}).get('enabled', False):
+        curriculum_callback = CurriculumCallback(
+            vec_env=vec_env,
+            curriculum_config=config.get('curriculum', {}),
+            verbose=1
+        )
+        callbacks.append(curriculum_callback)
+        print("\n[Curriculum Learning] ENABLED")
+    else:
+        print("\n[Curriculum Learning] DISABLED")
+
     # Evaluation callback
     eval_freq = training_config.get('eval_freq', 10000) // n_envs
     eval_callback = EvalCallback(
@@ -589,22 +598,6 @@ def train(
     # Custom callback
     custom_callback = SourceSeekingCallback(verbose=1)
     callbacks.append(custom_callback)
-
-    # Curriculum callback
-    curriculum_config = config.get('curriculum', {})
-    if curriculum_config.get('enabled', False):
-        discovered_sources = data_manager.get_discovered_sources()
-        curriculum_callback = CurriculumCallback(vec_env, config, discovered_sources=discovered_sources, verbose=1)
-        callbacks.append(curriculum_callback)
-        # Imposta fase iniziale dal config (o prima sorgente scoperta)
-        initial_sources = curriculum_config.get('phases', [{}])[0].get('sources', discovered_sources)
-        print(f"\n[Curriculum] Enabled - Initial sources: {initial_sources}")
-        # Imposta in tutti gli ambienti
-        for env in curriculum_callback._get_source_seeking_envs():
-            env.allowed_sources = list(initial_sources)
-    else:
-        discovered_sources = data_manager.get_discovered_sources()
-        print(f"\n[Curriculum] Disabled - using all {len(discovered_sources)} discovered sources: {discovered_sources[:5]}... (e altri)")
 
     callback = CallbackList(callbacks)
 
@@ -690,7 +683,7 @@ def main():
 
     config_path = str(PROJECT_ROOT / "utils" / "config.yaml")
     output_dir = str(PROJECT_ROOT / "trained_models")
-    data_dir = str(PROJECT_ROOT / "data")
+    data_dir = str(PROJECT_ROOT / "data" / "Output_HD_FaseII_CL2_V1")
 
     if not Path(data_dir).exists():
         raise FileNotFoundError(

@@ -35,7 +35,7 @@ except ImportError:
     print("WARNING: sb3_contrib non disponibile, uso PPO standard")
 
 from utils.source_seeking_env import SourceSeekingEnv, SourceSeekingConfig
-from utils.data_loader import NetCDFLoader, DataManager, WindData, CurrentData
+from utils.data_loader import DataManager
 
 
 def plot_trajectory(trajectory: np.ndarray, field, ax=None, title: str = "",
@@ -102,8 +102,8 @@ def plot_trajectory(trajectory: np.ndarray, field, ax=None, title: str = "",
 
 @dataclass
 class EpisodeResult:
-    scenario: str          # es. "S1_01"
-    source_id: str         # "S1" / "S2" / "S3"
+    scenario: str          # es. "SRC001"
+    source_id: str         # "SRC001" ... "SRC132"
     episode: int
     success: bool
     termination: str       # "success" / "timeout" / "boundary"
@@ -115,8 +115,8 @@ class EpisodeResult:
 
 @dataclass
 class ScenarioStats:
-    scenario: str
-    source_id: str
+    scenario: str          # es. "SRC001_Q1/4"
+    source_id: str         # es. "SRC001"
     n_episodes: int
     success_rate: float
     mean_final_dist: float
@@ -133,11 +133,7 @@ def load_config(config_path: str) -> dict:
         return yaml.safe_load(f)
 
 
-def load_wind_mapping(mapping_path: str) -> Dict[str, str]:
-    """Carica la mappatura simulazione -> file di vento."""
-    with open(mapping_path, 'r') as f:
-        data = yaml.safe_load(f)
-    return data.get('wind_files', {})
+
 
 
 def load_model(model_path: str):
@@ -196,32 +192,23 @@ def mask_fn(env) -> np.ndarray:
     return inner.action_masks()
 
 
-def build_env(env_cfg, field, source_id, vec_norm_path, use_masking,
+def build_env(env_cfg, field, vec_norm_path, use_masking,
               data_manager: Optional[DataManager] = None,
-              wind_mapping: Optional[Dict[str, str]] = None,
-              scenario_id: Optional[str] = None):
+              wind_data = None,
+              current_data = None):
     """Costruisce e wrappa l'environment per l'inferenza.
     
     Args:
-        scenario_id: Es. "S1_01" - usato per caricazione dinamica wind/current
+        data_manager: DataManager per accesso ai dati
+        wind_data: Dati di vento (caricati da DataManager)
+        current_data: Dati di corrente (caricati da DataManager)
     """
-    # Carica wind e current dinamicamente per questo scenario
-    wind_data = None
-    current_data = None
-    
-    if data_manager and wind_mapping and scenario_id:
-        try:
-            wind_data = data_manager.get_wind_data_for_run(scenario_id, wind_mapping)
-            current_data = data_manager.get_current_data_for_run(scenario_id)
-        except (FileNotFoundError, KeyError) as e:
-            print(f"  WARNING: Could not load wind/current for {scenario_id}: {e}")
-    
     raw_env = SourceSeekingEnv(
         config=env_cfg,
         concentration_field=field,
         wind_data=wind_data,
         current_data=current_data,
-        source_id=source_id,
+        data_manager=data_manager,
     )
 
     if use_masking and MASKABLE_PPO_AVAILABLE and ActionMasker is not None:
@@ -371,17 +358,19 @@ def run_inference(
     output_dir: str,
     n_episodes: int = 5,
     deterministic: bool = True,
+    sources_csv: str = "Coordinate_Sorgenti_FaseII.csv",
 ):
     """
-    Esegue l'inferenza completa su tutti i 12 scenari.
+    Esegue l'inferenza completa su tutti i 132 sorgenti.
 
     Args:
         model_path:   Path al modello (.zip)
         config_path:  Path al config YAML
-        data_dir:     Directory con i file NC
+        data_dir:     Directory con i file NC (Output_HD_FaseII_CL2_V1)
         output_dir:   Directory di output per plot e risultati
-        n_episodes:   Episodi per scenario
+        n_episodes:   Episodi per sorgente
         deterministic: Policy deterministica o stocastica
+        sources_csv:  File CSV con coordinate delle sorgenti
     """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -393,65 +382,76 @@ def run_inference(
     success_threshold = config.get('environment', {}).get('reward', {}).get('distance_threshold', 100)
 
     vec_norm_path = Path(model_path).parent / "vec_normalize.pkl"
-    loader = NetCDFLoader(data_dir)
     
-    # Carica wind mapping e DataManager
-    project_root = Path(config_path).resolve().parent.parent  # utils/../..
-    wind_mapping_path = project_root / "utils" / "wind_mapping.yaml"
-    if not wind_mapping_path.exists():
-        print(f"WARNING: Wind mapping file not found: {wind_mapping_path}")
-        wind_mapping = {}
-    else:
-        wind_mapping = load_wind_mapping(str(wind_mapping_path))
-        print(f"Loaded wind mapping: {len(wind_mapping)} scenarios")
-    
+    # Inizializza DataManager con auto-discovery di 132 sorgenti
     data_manager = DataManager(
         data_dir=data_dir,
-        preload_all=False
+        preload_all=False,
+        sources_csv=sources_csv
     )
-
-    scenarios = [(s, v) for s in ['S1', 'S2', 'S3'] for v in ['01', '02', '03', '04']]
+    
+    # Usa le sorgenti escluse dal curriculum learning (SRC081-SRC132) per valutazione
+    # Il curriculum usa SRC001-SRC080 per training
+    all_sources = data_manager.get_discovered_sources()
+    inference_sources = [s for s in all_sources if int(s[3:]) > 80]  # SRC081-SRC132
+    
+    print(f"\n{'='*100}")
+    print(f"HYDRAS Inference — {len(inference_sources)} sorgenti (SRC081-SRC132, held-out) × 2 chunk × {n_episodes} episodi")
+    print(f"  = {len(inference_sources)*2*n_episodes} episodi totali")
+    print(f"Modello: {model_path}")
+    print(f"Dati: {data_dir}")
+    print(f"Sorgenti training curriculum: SRC001-SRC080 (80 sorgenti)")
+    print(f"Sorgenti inference (held-out): {len(inference_sources)}: {inference_sources}")
+    print(f"{'='*100}\n")
+    
+    # Carica dati vento e corrente (condivisi per tutte le sorgenti)
+    wind_data = data_manager.get_wind_data()
+    current_data = data_manager.get_current_data()
+    
+    if wind_data is None:
+        print("WARNING: Wind data not loaded")
+    else:
+        print(f"Wind data: {len(wind_data.speed)} timesteps")
+    
+    if current_data is None:
+        print("WARNING: Current data not loaded")
+    else:
+        print(f"Current data: {current_data.n_timesteps} timesteps")
+    
     all_stats: List[ScenarioStats] = []
 
-    print(f"\n{'='*70}")
-    print(f"HYDRAS Inference — {len(scenarios)} scenari × 2 chunk × {n_episodes} episodi")
-    print(f"  = {len(scenarios)*2*n_episodes} episodi totali (12 fisici, 24 virtuali)")
-    print(f"Modello: {model_path}")
-    print(f"{'='*70}\n")
-
-    for source_id, variant in scenarios:
-        scenario_name = f"{source_id}_{variant}"
-        scenario_dir = output_path / source_id / scenario_name
-        scenario_dir.mkdir(parents=True, exist_ok=True)
+    for src_idx, source_id in enumerate(inference_sources, 1):
+        if src_idx % 10 == 0:
+            print(f"\n[Progress: {src_idx}/{len(inference_sources)} sources]\n")
+            
+        source_dir = output_path / source_id
+        source_dir.mkdir(parents=True, exist_ok=True)
         
-        # Carica campo NC (solo concentrazione, non UV)
-        nc_pattern = f"CMEMS_{source_id}_{variant}_*conc*.nc"
-        nc_files = sorted(Path(data_dir).glob(nc_pattern))
-        if not nc_files:
-            print(f"[SKIP] {scenario_name}: nessun file NC trovato ({nc_pattern})")
-            continue
-
         for chunk_id in [0, 1]:  # chunk_id=0 → spawn @1/4, chunk_id=1 → spawn @3/4
             chunk_label = "Q1/4" if chunk_id == 0 else "Q3/4"
-            print(f"\n[{scenario_name} — spawn @{chunk_label}]")
+            scenario_label = f"{source_id}_{chunk_label}"
+            
+            print(f"[{src_idx:3d}/{len(discovered_sources)}] {source_id} — spawn @{chunk_label}", end="  ")
             episode_results: List[EpisodeResult] = []
 
             for ep in range(n_episodes):
-                # Ricarica campo fresco ad ogni episodio
-                field = loader.load(str(nc_files[0]),
-                                    concentration_var="Concentration - component 1")
+                # Carica campo fresco per questa sorgente ad ogni episodio
+                field, loaded_src_id = data_manager.get_random_field_for_source(source_id)
+                if field is None:
+                    print(f"\n  [SKIP] Could not load field for {source_id}")
+                    break
 
                 # Crea env config con chunk_id appropriato
-                env_cfg = make_env_config(config, chunk_id=chunk_id)
+                env_cfg_ep = make_env_config(config, chunk_id=chunk_id)
 
-                vec_env = build_env(env_cfg, field, source_id, vec_norm_path,
-                                    use_masking=MASKABLE_PPO_AVAILABLE,
-                                    data_manager=data_manager,
-                                    wind_mapping=wind_mapping,
-                                    scenario_id=scenario_name)
+                vec_env = build_env(env_cfg_ep, field, vec_norm_path,
+                                   use_masking=MASKABLE_PPO_AVAILABLE,
+                                   data_manager=data_manager,
+                                   wind_data=wind_data,
+                                   current_data=current_data)
 
                 result = run_episode(model, vec_env, deterministic=deterministic)
-                result.scenario = scenario_name
+                result.scenario = scenario_label
                 result.source_id = source_id
                 result.episode = ep
 
@@ -460,39 +460,31 @@ def run_inference(
                 used_field = inner.field
 
                 status = "✓" if result.success else "✗"
-                term = result.termination
-                print(f"  Ep {ep+1}/{n_episodes}: {status} [{term:8s}] "
-                      f"init={result.initial_distance:.0f}m  final={result.final_distance:.0f}m  steps={result.steps}")
-
-                # Salva plot traiettoria: ep01_chunk0_trajectory.png / ep01_chunk1_trajectory.png
-                plot_path = scenario_dir / f"ep{ep+1:02d}_chunk{chunk_id}_trajectory.png"
-                save_trajectory_plot(result, used_field, plot_path, success_threshold)
-
                 episode_results.append(result)
                 vec_env.close()
 
-            # Statistiche scenario+chunk
-            stats = compute_scenario_stats(episode_results, f"{scenario_name}_{chunk_label}", source_id)
-            all_stats.append(stats)
-            print_scenario_stats(stats)
+                # Salva plot traiettoria
+                plot_path = source_dir / f"ep{ep+1:02d}_chunk{chunk_id}_trajectory.png"
+                save_trajectory_plot(result, used_field, plot_path, success_threshold)
 
-    # Riepilogo per sorgente
-    print(f"\n{'='*70}")
-    print("RIEPILOGO PER SORGENTE")
-    print(f"{'='*70}")
-    for source in ['S1', 'S2', 'S3']:
-        print(f"\n  {source}:")
-        source_s = [s for s in all_stats if s.source_id == source]
-        for s in source_s:
-            print_scenario_stats(s)
-        print_source_summary(all_stats, source)
+            if episode_results:
+                # Statistiche sorgente+chunk
+                stats = compute_scenario_stats(episode_results, scenario_label, source_id)
+                all_stats.append(stats)
+                sr = stats.success_rate * 100
+                err = f" {sr:.0f}%" if stats.mean_steps_success is None else f" {sr:.0f}%"
+                print(f"SR={err:>4s}", end="\n")
+            else:
+                print("[FAILED]")
 
     # Riepilogo globale
-    global_sr = np.mean([s.success_rate for s in all_stats])
-    global_dist = np.mean([s.mean_final_dist for s in all_stats])
-    print(f"\n{'='*70}")
-    print(f"GLOBALE: success_rate={global_sr*100:.1f}%  mean_final_dist={global_dist:.0f}m")
-    print(f"{'='*70}\n")
+    if all_stats:
+        global_sr = np.mean([s.success_rate for s in all_stats])
+        global_dist = np.mean([s.mean_final_dist for s in all_stats])
+        print(f"\n{'='*100}")
+        print(f"GLOBALE: success_rate={global_sr*100:.1f}%  mean_final_dist={global_dist:.0f}m")
+        print(f"Episodi totali valutati: {sum(s.n_episodes for s in all_stats)}/{len(inference_sources)*2*n_episodes}")
+        print(f"{'='*100}\n")
 
     return all_stats
 
@@ -500,9 +492,10 @@ def run_inference(
 def main():
     PROJECT_ROOT = Path(__file__).resolve().parent.parent  # Root del progetto (parent di src/)
 
-    DATA_DIR    = str(PROJECT_ROOT / "data")
+    # Nuova struttura dati: 132 sorgenti in Output_HD_FaseII_CL2_V1
+    DATA_DIR    = str(PROJECT_ROOT / "data" / "Output_HD_FaseII_CL2_V1")
     CONFIG_PATH = str(PROJECT_ROOT / "utils" / "config.yaml")
-    OUTPUT_DIR  = str(PROJECT_ROOT / "evaluations_new")
+    OUTPUT_DIR  = str(PROJECT_ROOT / "evaluations_v3")  # Valutazione su 132 sorgenti
 
     # Seleziona l'ultimo modello addestrato (directory più recente per nome)
     trained_dir = PROJECT_ROOT / "trained_models"
@@ -531,8 +524,9 @@ def main():
         config_path=CONFIG_PATH,
         data_dir=DATA_DIR,
         output_dir=OUTPUT_DIR,
-        n_episodes=5,
+        n_episodes=3,  # Ridotto da 5 per testing su 132 sorgenti
         deterministic=True,
+        sources_csv="Coordinate_Sorgenti_FaseII.csv",  # CSV con coordinate delle sorgenti
     )
 
 
