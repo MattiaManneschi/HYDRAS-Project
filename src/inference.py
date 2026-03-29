@@ -123,6 +123,7 @@ class ScenarioStats:
     min_final_dist: float
     max_final_dist: float
     mean_steps_success: Optional[float]   # None se nessun successo
+    mean_initial_dist: float               # distanza media di partenza dalla sorgente
     termination_counts: Dict[str, int]
 
 
@@ -292,6 +293,7 @@ def compute_scenario_stats(results: List[EpisodeResult], scenario: str, source_i
     n = len(results)
     successes = [r for r in results if r.success]
     final_dists = [r.final_distance for r in results]
+    initial_dists = [r.initial_distance for r in results]
     termination_counts = {}
     for r in results:
         termination_counts[r.termination] = termination_counts.get(r.termination, 0) + 1
@@ -305,6 +307,7 @@ def compute_scenario_stats(results: List[EpisodeResult], scenario: str, source_i
         min_final_dist=float(np.min(final_dists)),
         max_final_dist=float(np.max(final_dists)),
         mean_steps_success=float(np.mean([r.steps for r in successes])) if successes else None,
+        mean_initial_dist=float(np.mean(initial_dists)),
         termination_counts=termination_counts,
     )
 
@@ -432,7 +435,6 @@ def run_inference(
             chunk_label = "Q1/4" if chunk_id == 0 else "Q3/4"
             scenario_label = f"{source_id}_{chunk_label}"
             
-            print(f"[{src_idx:3d}/{len(inference_sources)}] {source_id} — spawn @{chunk_label}", end="  ")
             episode_results: List[EpisodeResult] = []
 
             for ep in range(n_episodes):
@@ -445,47 +447,59 @@ def run_inference(
                 # Crea env config con chunk_id appropriato
                 env_cfg_ep = make_env_config(config, chunk_id=chunk_id)
 
-            vec_env = build_env(env_cfg_ep, field, vec_norm_path,
-                               use_masking=MASKABLE_PPO_AVAILABLE,
-                               data_manager=data_manager,
-                               wind_data=wind_data,
-                               current_data=current_data)
+                vec_env = build_env(env_cfg_ep, field, vec_norm_path,
+                                   use_masking=MASKABLE_PPO_AVAILABLE,
+                                   data_manager=data_manager,
+                                   wind_data=wind_data,
+                                   current_data=current_data)
 
-            result = run_episode(model, vec_env, deterministic=deterministic)
-            result.scenario = scenario_label
-            result.source_id = source_id
-            result.episode = ep
+                result = run_episode(model, vec_env, deterministic=deterministic)
+                result.scenario = scenario_label
+                result.source_id = source_id
+                result.episode = ep
 
-            # Aggiorna field con quello effettivamente usato dall'env
-            inner = get_inner_env(vec_env)
-            used_field = inner.field
+                # Aggiorna field con quello effettivamente usato dall'env
+                inner = get_inner_env(vec_env)
+                used_field = inner.field
 
-            status = "✓" if result.success else "✗"
-            episode_results.append(result)
-            vec_env.close()
+                episode_results.append(result)
+                vec_env.close()
 
-            # Salva plot traiettoria
-            plot_path = source_dir / f"ep{ep+1:02d}_chunk{chunk_id}_trajectory.png"
-            save_trajectory_plot(result, used_field, plot_path, success_threshold)
+                # Salva plot traiettoria
+                plot_path = source_dir / f"ep{ep+1:02d}_chunk{chunk_id}_trajectory.png"
+                save_trajectory_plot(result, used_field, plot_path, success_threshold)
 
-        if episode_results:
-            # Statistiche sorgente+chunk
-            stats = compute_scenario_stats(episode_results, scenario_label, source_id)
-            all_stats.append(stats)
-            sr = stats.success_rate * 100
-            err = f" {sr:.0f}%" if stats.mean_steps_success is None else f" {sr:.0f}%"
-            print(f"SR={err:>4s}", end="\n")
-        else:
-            print("[FAILED]")
+            if episode_results:
+                # Statistiche sorgente+chunk
+                stats = compute_scenario_stats(episode_results, scenario_label, source_id)
+                all_stats.append(stats)
+                status = "success" if stats.success_rate >= 0.5 else "failed"
+                print(f"[{src_idx:3d}/{len(inference_sources)}] {source_id:6s} {chunk_label:5s}  {status}")
 
     # Riepilogo globale
     if all_stats:
         global_sr = np.mean([s.success_rate for s in all_stats])
-        global_dist = np.mean([s.mean_final_dist for s in all_stats])
-        print(f"\n{'='*100}")
-        print(f"GLOBALE: success_rate={global_sr*100:.1f}%  mean_final_dist={global_dist:.0f}m")
-        print(f"Episodi totali valutati: {sum(s.n_episodes for s in all_stats)}/{len(inference_sources)*2*n_episodes}")
-        print(f"{'='*100}\n")
+        
+        # Calcola media degli steps sui successi
+        all_successful_steps = []
+        all_initial_distances = []
+        for stat in all_stats:
+            if stat.mean_steps_success is not None:
+                all_successful_steps.append(stat.mean_steps_success)
+            all_initial_distances.append(stat.mean_initial_dist)
+        
+        dt_seconds = config.get('environment', {}).get('dt', 10)
+        
+        print(f"\n{'='*60}")
+        print(f"Final Success Rate: {global_sr*100:.1f}%")
+        if all_successful_steps:
+            avg_steps = np.mean(all_successful_steps)
+            avg_time_minutes = (avg_steps * dt_seconds) / 60
+            print(f"Mean Steps (success): {avg_steps:.0f} (~{avg_time_minutes:.1f} min)")
+        if all_initial_distances:
+            avg_initial_dist = np.mean(all_initial_distances)
+            print(f"Mean Initial Distance: {avg_initial_dist:.0f}m")
+        print(f"{'='*60}\n")
 
     return all_stats
 
