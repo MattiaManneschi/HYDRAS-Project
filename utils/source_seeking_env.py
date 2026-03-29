@@ -61,7 +61,7 @@ class SourceSeekingConfig:
     chunk_id: int = 0  # 0 = spawn @1/4, 1 = spawn @3/4 della simulazione (data augmentation)
 
     # Reward
-    source_distance_threshold: float = 100  # m (intorno di successo)
+    source_distance_threshold: float = 50  # m (intorno di successo - abbassato a 50m per direttive relatore)
     source_found_reward: float = 100.0
     step_penalty: float = -0.1
     boundary_penalty: float = -10.0
@@ -209,6 +209,10 @@ class SourceSeekingEnv(gym.Env):
         # Memory buffer per corrente passata (u, v)
         self._current_memory: List[Tuple[float, float]] = [(0.0, 0.0)] * self.config.memory_length
 
+        # Memory buffer per concentrazioni direzionali passate (9 timestep x 8 direzioni)
+        # Ogni elemento è una lista di 8 float (uno per direzione)
+        self._directional_conc_memory: List[List[float]] = [[0.0] * 8 for _ in range(self.config.memory_length)]
+
         # Allowed sources per curriculum learning (sarà impostato dal CurriculumCallback)
         # Default vuoto: richiede che sia impostato dal training script
         self.allowed_sources: List[str] = []
@@ -240,16 +244,17 @@ class SourceSeekingEnv(gym.Env):
     def _setup_observation_space(self):
         """Configura lo spazio delle osservazioni.
         
-        Osservazione (40 valori):
+        Osservazione (112 valori):
         - 1 concentrazione corrente
         - 9 concentrazioni passate (memory_length)
         - 9 * 2 spostamenti passati (Δx, Δy) normalizzati
-        - 8 sensori concentrazione @ 20m (navigazione locale)
+        - 8 sensori concentrazione @ 20m (navigazione locale - CORRENTI)
+        - 9 * 8 = 72 sensori concentrazione passati @ 20m (9 timestep x 8 direzioni)
         - 2 componenti vento corrente (u, v)
         - 2 componenti corrente corrente (u, v)
         """
-        obs_dim = 1 + self.config.memory_length + self.config.memory_length * 2 + 8 + 2 + 2
-        # = 1 + 9 + 18 + 8 + 2 + 2 = 40
+        obs_dim = 1 + self.config.memory_length + self.config.memory_length * 2 + 8 + (self.config.memory_length * 8) + 2 + 2
+        # = 1 + 9 + 18 + 8 + 72 + 2 + 2 = 112
 
         self.observation_space = spaces.Box(
             low=-np.inf,
@@ -350,18 +355,19 @@ class SourceSeekingEnv(gym.Env):
 
 
     def _get_observation(self) -> np.ndarray:
-        """Costruisce il vettore di osservazione (40 valori) RAW.
+        """Costruisce il vettore di osservazione (112 valori) RAW.
         
         I valori NON vengono normalizzati manualmente: la normalizzazione
         è delegata interamente a VecNormalize (running mean/std adattiva).
         
         Struttura:
-        - [0]      : concentrazione corrente
-        - [1:10]   : 9 concentrazioni passate
-        - [10:28]  : 9 spostamenti passati (Δx, Δy) in metri
-        - [28:36]  : 8 sensori concentrazione @ 20m (locale)
-        - [36:38]  : vento corrente (u, v) in m/s
-        - [38:40]  : corrente corrente (u, v) in m/s
+        - [0]       : concentrazione corrente
+        - [1:10]    : 9 concentrazioni passate
+        - [10:28]   : 9 spostamenti passati (Δx, Δy) in metri
+        - [28:36]   : 8 sensori concentrazione @ 20m (locale - CORRENTI)
+        - [36:108]  : 9*8=72 sensori concentrazione passati @ 20m (9 timestep x 8 direzioni)
+        - [108:110] : vento corrente (u, v) in m/s
+        - [110:112] : corrente corrente (u, v) in m/s
         """
         obs = []
 
@@ -380,7 +386,7 @@ class SourceSeekingEnv(gym.Env):
 
         x, y = self.state.x, self.state.y
         
-        # Sensori concentrazione direzionali a 20m
+        # Sensori concentrazione direzionali a 20m - CORRENTI (8 valori)
         conc_sensors = []
         for action_idx in range(8):
             dx_dir, dy_dir = self._ACTION_MAP[action_idx]
@@ -396,6 +402,11 @@ class SourceSeekingEnv(gym.Env):
                 # Safety: nan_to_num per evitare NaN a VecNormalize
                 conc_sensors.append(float(np.nan_to_num(conc, nan=0.0)))
         obs.extend(conc_sensors)
+
+        # Sensori concentrazione direzionali PASSATI (9 * 8 = 72 valori)
+        # Memorizzo tutti i 9 timestep di sensori passati
+        for timestep_sensors in self._directional_conc_memory:
+            obs.extend(timestep_sensors)
 
         # Vento corrente (u, v)
         if self.wind_data is not None:
@@ -416,6 +427,30 @@ class SourceSeekingEnv(gym.Env):
             obs.append(0.0)
 
         return np.array(obs, dtype=np.float32)
+
+    def _compute_directional_sensors(self) -> List[float]:
+        """Calcola i 8 sensori di concentrazione direzionali a 20m.
+        
+        Returns:
+            Lista di 8 float (uno per direzione)
+        """
+        conc_sensors = []
+        x, y = self.state.x, self.state.y
+        
+        for action_idx in range(8):
+            dx_dir, dy_dir = self._ACTION_MAP[action_idx]
+            sense_x = x + dx_dir * 20.0
+            sense_y = y + dy_dir * 20.0
+            # Se il punto è su terra o fuori dominio, concentrazione = 0
+            out_of_bounds = (sense_x < self.config.xmin or sense_x > self.config.xmax or
+                             sense_y < self.config.ymin or sense_y > self.config.ymax)
+            if out_of_bounds or self.field.is_land(sense_x, sense_y):
+                conc_sensors.append(0.0)
+            else:
+                conc = self.field.get_concentration(sense_x, sense_y)
+                conc_sensors.append(float(np.nan_to_num(conc, nan=0.0)))
+        
+        return conc_sensors
 
     # Mappa azioni discrete: 8 direzioni (4 cardinali + 4 diagonali)
     _ACTION_MAP = {
@@ -778,6 +813,9 @@ class SourceSeekingEnv(gym.Env):
         # Reset memoria corrente passata (9 coppie u, v)
         self._current_memory = [(0.0, 0.0)] * self.config.memory_length
 
+        # Reset memoria concentrazioni direzionali passate (9 timestep x 8 direzioni)
+        self._directional_conc_memory = [[0.0] * 8 for _ in range(self.config.memory_length)]
+
         # Sincronizza vento e corrente al timestep di start usando tempo reale
         if self.field.n_timesteps > 1:
             # Calcola tempo reale in minuti: timestep * dt (assumendo dt=1 min per concentrazione)
@@ -861,6 +899,11 @@ class SourceSeekingEnv(gym.Env):
         # Aggiorna memoria concentrazioni (FIFO: rimuovi più vecchio, aggiungi attuale)
         self._concentration_memory.pop(0)
         self._concentration_memory.append(conc_now)
+
+        # Aggiorna memoria concentrazioni direzionali (FIFO: 9 timestep x 8 direzioni)
+        directional_conc = self._compute_directional_sensors()
+        self._directional_conc_memory.pop(0)
+        self._directional_conc_memory.append(directional_conc)
 
         # Controlla terminazione
         terminated = False
