@@ -56,7 +56,7 @@ class SourceSeekingConfig:
     # Spawn
     spawn_min_distance: float = 500.0  # m distanza minima dalla sorgente
     spawn_max_distance: float = 1500.0  # m distanza massima dalla sorgente
-    spawn_start_frame: int = 1440  # frame di partenza (metà simulazione)
+    spawn_start_frame: int = 352  # frame di partenza (25% della simulazione, Chunk 0) - sovrascitto da chunk_id
     spawn_conc_threshold: float = 0.5  # soglia minima concentrazione per spawn
     chunk_id: int = 0  # 0 = spawn @1/4, 1 = spawn @3/4 della simulazione (data augmentation)
 

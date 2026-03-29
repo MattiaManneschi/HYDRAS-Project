@@ -35,7 +35,7 @@ agent:
 environment:
   # Time settings
   dt: 10  # s - timestep della simulazione
-  max_episode_steps: 1080  # passi massimi per episodio (3 ore: 10800s / 10s = 1080 steps)
+  max_episode_steps: 300  # passi massimi per episodio (~50 min: 3000s / 10s = 300 steps) - adatto ai 1411 timesteps disponibili
 
   # Reward shaping
   reward:
@@ -59,7 +59,7 @@ environment:
     min_distance: 500      # m - distanza minima dalla sorgente
     max_distance: 1500  # m - distanza massima dalla sorgente
     min_land_distance: 50  # m - distanza minima dalla terra per spawn
-    start_frame: 1440  # frame di partenza (metà simulazione)
+    start_frame: 352  # frame di partenza (25% della simulazione, Chunk 0) - sovrascitto da chunk_id
     conc_threshold: 0.5  # soglia minima concentrazione
 
   # Normalization
