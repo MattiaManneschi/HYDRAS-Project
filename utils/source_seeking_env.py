@@ -279,7 +279,13 @@ class SourceSeekingEnv(gym.Env):
         self.action_space = spaces.Discrete(self.config.n_discrete_actions)
 
     def _spawn_on_plume(self) -> Tuple[float, float]:
-        """Spawn sul BORDO del plume, con vincoli di distanza."""
+        """Spawna il più semplice possibile: sul plume con vincoli di distanza.
+        
+        Non usa logica di bordo complicata, spawna direttamente sui punti
+        del plume che rispettano: 
+        - spawn_min_distance <= distanza_sorgente <= spawn_max_distance
+        - spawn_min_land_distance dalla terra
+        """
 
         # Imposta il timestep al frame configurato
         if self.field.n_timesteps > 1:
@@ -290,17 +296,15 @@ class SourceSeekingEnv(gym.Env):
         field_data = np.nan_to_num(self.field.get_current_field(), nan=0.0)
         plume_mask = field_data > self.config.spawn_conc_threshold
 
-        # Calcola il bordo del plume usando l'erosione
-        # Il bordo è la differenza tra la maschera originale e la sua versione erosa
-        eroded_mask = binary_erosion(plume_mask)
-        edge_mask = plume_mask & ~eroded_mask
-
-        valid_indices = np.where(edge_mask)
+        valid_indices = np.where(plume_mask)
 
         if len(valid_indices[0]) == 0:
-            # Fallback: se non c'è un bordo, spawna dentro il plume
-            print("WARNING: No plume edge found, falling back to spawn inside plume.")
-            valid_indices = np.where(plume_mask)
+            # Fallback: se non c'è plume, spawna vicino alla sorgente
+            print("WARNING: No plume found at spawn frame, spawning near source.")
+            return (
+                self.source_position[0] + self.np_random.uniform(-100, 100),
+                self.source_position[1] + self.np_random.uniform(-100, 100)
+            )
 
         # Converti indici in coordinate
         y_coords = self.field.y_coords[valid_indices[0]]
@@ -319,9 +323,11 @@ class SourceSeekingEnv(gym.Env):
         valid_x = x_coords[distance_mask]
         valid_y = y_coords[distance_mask]
 
+        # Se non ci sono punti nei vincoli di distanza, rilassa il vincolo
         if len(valid_x) == 0:
-            print("WARNING: No edge points satisfy distance constraints, relaxing...")
-            valid_x, valid_y = x_coords, y_coords
+            print(f"WARNING: No plume points in [{self.config.spawn_min_distance}m, {self.config.spawn_max_distance}m], using all plume points.")
+            valid_x = x_coords
+            valid_y = y_coords
 
         # Filtra punti troppo vicini alla terra
         land_safe_mask = np.array([
@@ -332,17 +338,16 @@ class SourceSeekingEnv(gym.Env):
         if np.any(land_safe_mask):
             valid_x = valid_x[land_safe_mask]
             valid_y = valid_y[land_safe_mask]
-        else:
-            print(f"WARNING: No edge points satisfy min_land_distance={self.config.spawn_min_land_distance}m, using all valid edge points.")
 
+        # Fallback finale
         if len(valid_x) == 0:
-             print("WARNING: No valid points found after all filters, spawning near source.")
-             return (
-                 self.source_position[0] + self.np_random.uniform(-50, 50),
-                 self.source_position[1] + self.np_random.uniform(-50, 50)
-             )
+            print(f"WARNING: No valid spawn points after land check, spawning near source.")
+            return (
+                self.source_position[0] + self.np_random.uniform(-100, 100),
+                self.source_position[1] + self.np_random.uniform(-100, 100)
+            )
 
-        # Scegli una cella random tra quelle valide sul bordo
+        # Scegli una cella random tra quelle valide
         idx = self.np_random.integers(len(valid_x))
         x = valid_x[idx]
         y = valid_y[idx]
