@@ -7,7 +7,7 @@ utilizzando Proximal Policy Optimization (PPO).
 import sys
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, Dict, Any, Callable
+from typing import Optional, Dict, Any, Callable, List
 import yaml
 import numpy as np
 import matplotlib
@@ -107,16 +107,17 @@ class SourceSeekingCallback(BaseCallback):
 class CurriculumCallback(BaseCallback):
     """
     Callback per il curriculum learning.
-    Gestisce le fasi di addestramento con sorgenti progressive:
-      Fase 1 (0-1M):   solo S1
-      Fase 2 (1M-2M): S1 + S2
-      Fase 3 (2M-3M): S1 + S2 + S3
+    Gestisce le fasi di addestramento con sorgenti progressive.
+    
+    Supporta sia config YAMLche named sources come 'S1', 'S2'
+    che discovered source IDs come 'SRC000', 'SRC001', ..., 'SRC131'
     """
 
-    def __init__(self, vec_env, config: Dict[str, Any], verbose: int = 0):
+    def __init__(self, vec_env, config: Dict[str, Any], discovered_sources: List[str] = None, verbose: int = 0):
         super().__init__(verbose)
         self.vec_env = vec_env
         self._current_phase = -1
+        self.discovered_sources = discovered_sources or []
 
         # Carica fasi dal config
         curriculum_config = config.get('curriculum', {})
@@ -126,8 +127,12 @@ class CurriculumCallback(BaseCallback):
                 for p in curriculum_config.get('phases', [])
             ]
         else:
-            # Default: tutte le sorgenti da subito
-            self.phases = [(0, 10_000_000, ['S1', 'S2', 'S3'])]
+            # Default: tutte le sorgenti scoperte da subito (o S1/S2/S3 per legacy)
+            if self.discovered_sources:
+                all_sources = self.discovered_sources
+            else:
+                all_sources = ['S1', 'S2', 'S3']  # Legacy fallback
+            self.phases = [(0, 10_000_000, all_sources)]
 
     def _get_source_seeking_envs(self):
         """Estrai le istanze SourceSeekingEnv dal vec env wrappato."""
@@ -406,45 +411,35 @@ def train(
     print(f"\nUsing ALL NC files from: {data_dir}")
     print("  Mode: Random field each episode")
     
-    # Carica wind mapping
-    wind_mapping_path = PROJECT_ROOT / "utils" / "wind_mapping.yaml"
-    if not wind_mapping_path.exists():
-        print(f"WARNING: File di mappatura vento non trovato: {wind_mapping_path}")
-        wind_mapping = {}
-    else:
-        wind_mapping = load_wind_mapping(str(wind_mapping_path))
-        print(f"Loaded wind mapping: {len(wind_mapping)} scenarios")
-    
     # Per il training randomizzato, carichiamo una sample di wind e current data
     # (in generale, ogni episodio potrebbe usare una coppia diversa)
     data_manager = DataManager(
         data_dir=data_dir,
-        preload_all=False
+        preload_all=False,
+        wind_filename="CI_WIND_faseII_V1.txt",  # Nuovo file V1 per 132 sorgenti
+        current_filename="CL02_V1_SRC000_U_V_10mGrid.nc"  # Unico file U_V per tutte le sorgenti
     )
     
-    wind_data = None
-    current_data = None
+    wind_data = data_manager.get_wind_data()
+    current_data = data_manager.get_current_data()
+    discovered_sources = data_manager.get_discovered_sources()
     
-    # Carica un sample di dati (S1_01) come placeholder
-    # Nel reset randomizzato, verranno scelti dinamicamente
-    try:
-        if 'S1_01' in wind_mapping:
-            wind_filename = wind_mapping['S1_01']
-            wind_data = data_manager.load_wind_data(wind_filename)
-            print(f"Loaded wind data from: {wind_filename}")
-        
-        # Current data per S1_01
-        try:
-            current_data = data_manager.load_current_data("CMEMS_S1_01_UV_grid_10m_deltaTres5.nc")
-            print(f"Loaded current data from: CMEMS_S1_01_UV_grid_10m_deltaTres5.nc")
-        except FileNotFoundError:
-            print("WARNING: Current data file not found, will run without current data")
-            current_data = None
-    except (FileNotFoundError, KeyError) as e:
-        print(f"WARNING: Could not load wind/current data: {e}")
-        print("Will run with wind_data=None and current_data=None")
-        wind_data = None
-        current_data = None
+    print(f"\nDiscovered {len(discovered_sources)} sources: {discovered_sources[:10]}... (e altri)")
+    print(f"Wind data: {'LOADED' if wind_data else 'NOT FOUND'} ({wind_data.dt if wind_data else 'N/A'} min intervals)")
+    print(f"Current data: {'LOADED' if current_data else 'NOT FOUND'} ({current_data.n_timesteps if current_data else 'N/A'} timesteps)")
+    
+    if wind_data is None or current_data is None:
+        print("\nWARNING: Wind or current data not loaded. Will run without them.")
+    
+    # Vecchio caricamento legacy (dontused if data_manager è loaded correttamente)
+    # Carica wind mapping SE ESISTE (per backward compatibility)
+    wind_mapping_path = PROJECT_ROOT / "utils" / "wind_mapping.yaml"
+    if not wind_mapping_path.exists():
+        print(f"(No wind mapping file: {wind_mapping_path})")
+        wind_mapping = {}
+    else:
+        wind_mapping = load_wind_mapping(str(wind_mapping_path))
+        print(f"(Wind mapping for legacy scenarios: {len(wind_mapping)} scenarios)")
 
     # Crea ambienti vettorizzati
     print(f"\nCreating {n_envs*2} parallel environments...")
@@ -598,16 +593,18 @@ def train(
     # Curriculum callback
     curriculum_config = config.get('curriculum', {})
     if curriculum_config.get('enabled', False):
-        curriculum_callback = CurriculumCallback(vec_env, config, verbose=1)
+        discovered_sources = data_manager.get_discovered_sources()
+        curriculum_callback = CurriculumCallback(vec_env, config, discovered_sources=discovered_sources, verbose=1)
         callbacks.append(curriculum_callback)
-        # Imposta fase iniziale (solo S1)
-        initial_sources = curriculum_config.get('phases', [{}])[0].get('sources', ['S1'])
+        # Imposta fase iniziale dal config (o prima sorgente scoperta)
+        initial_sources = curriculum_config.get('phases', [{}])[0].get('sources', discovered_sources)
         print(f"\n[Curriculum] Enabled - Initial sources: {initial_sources}")
         # Imposta in tutti gli ambienti
         for env in curriculum_callback._get_source_seeking_envs():
             env.allowed_sources = list(initial_sources)
     else:
-        print("\n[Curriculum] Disabled - using all sources")
+        discovered_sources = data_manager.get_discovered_sources()
+        print(f"\n[Curriculum] Disabled - using all {len(discovered_sources)} discovered sources: {discovered_sources[:5]}... (e altri)")
 
     callback = CallbackList(callbacks)
 

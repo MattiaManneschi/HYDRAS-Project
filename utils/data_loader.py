@@ -650,9 +650,10 @@ class DataManager:
     """
     Classe principale per la gestione dei dati NC (MIKE21).
     Supporta caricamento random da multiple NC files per training robusto.
+    Scopre automaticamente le sorgenti dai file disponibili.
     """
 
-    # Configurazioni delle sorgenti dal report DICEA
+    # Configurazioni delle sorgenti dal report DICEA (legacy)
     SOURCE_CONFIGS = {
         'S1': {'x': 620100, 'y': 4796210},
         'S2': {'x': 619800, 'y': 4795900},
@@ -664,17 +665,26 @@ class DataManager:
         data_dir: Union[str, Path],
         domain_config: Optional[DomainConfig] = None,
         preload_all: bool = False,
-        source_id_filter: Optional[str] = None
+        source_id_filter: Optional[str] = None,
+        wind_filename: str = "CI_WIND_faseII_V1.txt",
+        current_filename: str = "CL02_V1_SRC000_U_V_10mGrid.nc",
+        discover_sources: bool = True
     ):
         """
         Args:
             data_dir: Directory con i file NC (obbligatoria)
             domain_config: Configurazione del dominio (usa default se None)
             preload_all: Se True, precarica tutti i file NC in memoria
-            source_id_filter: Filtra solo file di una sorgente ('S1', 'S2', 'S3'). None = tutti.
+            source_id_filter: Filtra solo file di una sorgente ('SRC000', 'SRC001', ecc). None = tutti.
+            wind_filename: Nome file vento nella cartella data/Vento_V0-V3/ (default: CI_WIND_faseII_V1.txt per 132 sorgenti)
+            current_filename: Nome file corrente nella cartella data/ (default: CL02_V1_SRC000_U_V_10mGrid.nc - unico per tutte le 132 sorgenti)
+            discover_sources: Se True, scopre automaticamente le sorgenti dai file disponibili (default: True)
         """
         self.data_dir = Path(data_dir)
         self.source_id_filter = source_id_filter
+        self.wind_filename = wind_filename
+        self.current_filename = current_filename
+        self.discover_sources_enabled = discover_sources
 
         # Domain config di default basata sul report
         self.domain = domain_config or DomainConfig(
@@ -687,6 +697,11 @@ class DataManager:
         self._nc_loader: Optional[NetCDFLoader] = None
         self._nc_files: List[Path] = []
         self._preloaded_fields: Dict[str, ConcentrationField] = {}
+        
+        # Carica dati di vento e corrente una sola volta
+        self._wind_data: Optional[WindData] = None
+        self._current_data: Optional[CurrentData] = None
+        self._discovered_sources: List[str] = []  # Lista di source_id scoperti
 
         if not self.data_dir.exists():
             raise FileNotFoundError(
@@ -695,13 +710,16 @@ class DataManager:
             )
 
         self._nc_loader = NetCDFLoader(self.data_dir)
-        all_nc_files = list(self.data_dir.glob("*.nc"))
+        all_nc_files = list(self.data_dir.glob("*Conc_10mGrid.nc"))
 
         if not all_nc_files:
             raise FileNotFoundError(
-                f"Nessun file .nc trovato in {self.data_dir}\n"
+                f"Nessun file *Conc_10mGrid.nc trovato in {self.data_dir}\n"
                 f"Scarica i file di simulazione MIKE21 nella cartella 'data/'"
             )
+
+        # Scopri le sorgenti dai file disponibili
+        self._discover_sources(all_nc_files)
 
         # Applica filtro source_id se specificato
         if source_id_filter:
@@ -711,12 +729,77 @@ class DataManager:
 
         if not self._nc_files:
             raise FileNotFoundError(
-                f"Nessun file .nc per filtro '{source_id_filter}' in {self.data_dir}\n"
+                f"Nessun file *Conc_10mGrid.nc per filtro '{source_id_filter}' in {self.data_dir}\n"
                 f"File disponibili: {[f.name for f in all_nc_files]}"
             )
 
+        # Carica dati di vento e corrente
+        self._load_wind_data()
+        self._load_current_data()
+
         if preload_all:
             self._preload_all_files()
+
+    def _discover_sources(self, nc_files: List[Path]):
+        """
+        Scopre automaticamente le sorgenti dai file disponibili.
+        Estrae il pattern SRC### dai nomi file.
+        
+        Args:
+            nc_files: Lista di file .nc da scansionare
+        """
+        sources = set()
+        for f in nc_files:
+            # Estrai SRC### dal nome file (es. 'CL02_V1_SRC000_Conc_10mGrid.nc' -> 'SRC000')
+            parts = f.stem.split('_')
+            for part in parts:
+                if part.startswith('SRC') and part[3:].isdigit():
+                    sources.add(part)
+                    break
+        
+        self._discovered_sources = sorted(sources)
+        print(f"Discovered {len(self._discovered_sources)} sources: {self._discovered_sources[:5]}... (e altri)")
+
+    def _load_wind_data(self):
+        """Carica il file di vento una sola volta."""
+        # Prova prima in data_dir/Vento_V0-V3/
+        wind_path = self.data_dir / "Vento_V0-V3" / self.wind_filename
+        
+        # Se non trovato, prova nella cartella padre (data/)
+        if not wind_path.exists():
+            # Risali un livello dalla data_dir
+            parent_dir = self.data_dir.parent
+            wind_path = parent_dir / "Vento_V0-V3" / self.wind_filename
+        
+        # Se ancora non trovato, prova direttamente in data_dir
+        if not wind_path.exists():
+            wind_path = self.data_dir / self.wind_filename
+        
+        if not wind_path.exists():
+            print(f"WARNING: File di vento non trovato in:")
+            print(f"  - {self.data_dir / 'Vento_V0-V3' / self.wind_filename}")
+            print(f"  - {self.data_dir.parent / 'Vento_V0-V3' / self.wind_filename}")
+            print(f"  - {self.data_dir / self.wind_filename}")
+            return
+        
+        try:
+            self._wind_data = self.load_wind_data(self.wind_filename)
+            print(f"Wind data loaded: {self.wind_filename} ({len(self._wind_data.speed)} timesteps)")
+        except Exception as e:
+            print(f"ERROR loading wind data: {e}")
+
+    def _load_current_data(self):
+        """Carica il file di corrente una sola volta."""
+        current_path = self.data_dir / self.current_filename
+        if not current_path.exists():
+            print(f"WARNING: File di corrente non trovato: {current_path}")
+            return
+        
+        try:
+            self._current_data = self.load_current_data_internal(self.current_filename)
+            print(f"Current data loaded: {self.current_filename} ({self._current_data.n_timesteps} timesteps)")
+        except Exception as e:
+            print(f"ERROR loading current data: {e}")
 
     def _preload_all_files(self):
         """Precarica tutti i file NC in memoria."""
@@ -727,11 +810,13 @@ class DataManager:
                     str(nc_file),
                     concentration_var="Concentration - component 1"
                 )
+                source_id = self._extract_source_id(nc_file.stem)
                 self._preloaded_fields[nc_file.stem] = field
-                print(f"  Loaded: {nc_file.name} (max conc: {field.max_concentration:.2f})")
+                if len(self._preloaded_fields) % 10 == 0:
+                    print(f"  Loaded: {len(self._preloaded_fields)} files (max conc: {field.max_concentration:.2f})")
             except Exception as e:
                 print(f"  Failed to load {nc_file.name}: {e}")
-        print(f"Preloaded {len(self._preloaded_fields)} files")
+        print(f"Preloaded {len(self._preloaded_fields)} files ({len(self._discovered_sources)} sources)")
 
     def get_random_field(self) -> Tuple[ConcentrationField, str]:
         """
@@ -739,16 +824,17 @@ class DataManager:
         Utile per training con variabilità.
 
         Returns:
-            Tuple di (ConcentrationField, source_id)
+            Tuple di (ConcentrationField, source_id) dove source_id è es. 'SRC042'
         """
         if self._preloaded_fields:
             key = np.random.choice(list(self._preloaded_fields.keys()))
             field = self._preloaded_fields[key]
-            source_id = 'S1' if 'S1' in key else ('S2' if 'S2' in key else 'S3')
+            # Estrai source_id dal key
+            source_id = self._extract_source_id(key)
             return field, source_id
 
-        # Filtra SOLO file di concentrazione (non UV/corrente)
-        conc_files = [f for f in self._nc_files if 'conc' in f.name]
+        # Filtra SOLO file di concentrazione
+        conc_files = [f for f in self._nc_files if 'Conc' in f.name]
         if not conc_files:
             raise FileNotFoundError(
                 f"Nessun file di concentrazione trovato in {self.data_dir}\n"
@@ -760,7 +846,7 @@ class DataManager:
             str(nc_file),
             concentration_var="Concentration - component 1"
         )
-        source_id = 'S1' if 'S1' in nc_file.name else ('S2' if 'S2' in nc_file.name else 'S3')
+        source_id = self._extract_source_id(nc_file.stem)
         return field, source_id
 
     def get_random_field_for_source(self, source_id: str) -> Tuple[ConcentrationField, str]:
@@ -769,21 +855,19 @@ class DataManager:
         Usato dal curriculum learning per controllare quali sorgenti sono attive.
 
         Args:
-            source_id: ID della sorgente ('S1', 'S2', 'S3')
+            source_id: ID della sorgente (es. 'SRC000', 'SRC001', ..., 'SRC131')
 
         Returns:
-            Tuple di (ConcentrationField, run_id) dove run_id è es. 'S1_02'
+            Tuple di (ConcentrationField, source_id)
         """
         if self._preloaded_fields:
             source_keys = [k for k in self._preloaded_fields.keys() if source_id in k]
             if source_keys:
                 key = np.random.choice(source_keys)
-                # Estrai run_id dal key (es. 'CMEMS_S1_02_conc_grid_10m.nc' -> 'S1_02')
-                run_id = '_'.join(key.split('_')[1:3])  # Estrai 'S1_02' da 'CMEMS_S1_02_...'
-                return self._preloaded_fields[key], run_id
+                return self._preloaded_fields[key], source_id
 
-        # Filtra per sorgente E per concentrazione (non UV/corrente)
-        source_files = [f for f in self._nc_files if source_id in f.name and 'conc' in f.name]
+        # Filtra per sorgente E per concentrazione
+        source_files = [f for f in self._nc_files if source_id in f.name and 'Conc' in f.name]
         if not source_files:
             raise FileNotFoundError(
                 f"Nessun file concentrazione NC per sorgente {source_id}.\n"
@@ -796,27 +880,42 @@ class DataManager:
             concentration_var="Concentration - component 1"
         )
         
-        # Estrai run_id dal filename (es. 'CMEMS_S1_02_conc_grid_10m.nc' -> 'S1_02')
-        run_id = '_'.join(nc_file.stem.split('_')[1:3])  # stem = 'CMEMS_S1_02_conc_grid_10m'
-        
-        return field, run_id
+        return field, source_id
 
+    def _extract_source_id(self, filename_or_stem: str) -> str:
+        """
+        Estrae il source_id dal nome file o stem.
+        Es. 'CL02_V1_SRC000_Conc_10mGrid' -> 'SRC000'
+        
+        Args:
+            filename_or_stem: Nome file o stem
+        
+        Returns:
+            Source ID (es. 'SRC000')
+        """
+        parts = filename_or_stem.split('_')
+        for part in parts:
+            if part.startswith('SRC') and part[3:].isdigit():
+                return part
+        return 'UNKNOWN'
+    
     def get_concentration_field(
         self,
-        source_id: str = 'S1',
+        source_id: str = 'SRC000',
         run_id: Optional[str] = None,
     ) -> ConcentrationField:
         """
         Ottiene un campo di concentrazione.
 
         Args:
-            source_id: ID della sorgente ('S1', 'S2', 'S3')
-            run_id: ID del run NC (es. 'CMEMS_S1_01')
+            source_id: ID della sorgente (es. 'SRC000', 'SRC001')
+            run_id: ID del run NC (non usato nel nuovo schema, per compatibilità)
 
         Returns:
             ConcentrationField pronto per l'uso
         """
         if run_id:
+            # Legacy: se specificato run_id, prova a usarlo
             return self._nc_loader.load(run_id)
 
         # Prendi un file random per questa sorgente
@@ -831,29 +930,42 @@ class DataManager:
         - ORB: Time, Direction, Speed (dt=15 min)
         
         Args:
-            wind_filename: Nome del file di vento (es. 'CI_WIND_TEST01.txt')
+            wind_filename: Nome del file di vento (es. 'CI_WIND_faseII_V1.txt')
         
         Returns:
             WindData object
         """
-        filepath = self.data_dir / wind_filename
-        if not filepath.exists():
-            raise FileNotFoundError(f"File di vento non trovato: {filepath}")
+        # Prova più percorsi possibili
+        possible_paths = [
+            self.data_dir / "Vento_V0-V3" / wind_filename,
+            self.data_dir.parent / "Vento_V0-V3" / wind_filename,
+            self.data_dir / wind_filename,
+        ]
+        
+        filepath = None
+        for path in possible_paths:
+            if path.exists():
+                filepath = path
+                break
+        
+        if filepath is None:
+            raise FileNotFoundError(f"File di vento non trovato in alcuno di questi percorsi: {possible_paths}")
         
         # Auto-detect formato e dt
         if 'ORB' in wind_filename.upper():
-            # Formato ORB: Time, Direction, Speed, dt=15 min (15 minuti tra timestep)
+            # Formato ORB: Time, Direction, Speed, dt=15 min
             return WindDataLoader.load_from_txt(filepath, speed_col=2, direction_col=1, dt=15.0)
         else:
-            # Formato CI: Time, Speed, Direction, dt=60 min (1 ora tra timestep)
+            # Formato CI: Time, Speed, Direction, dt=60 min
             return WindDataLoader.load_from_txt(filepath, speed_col=1, direction_col=2, dt=60.0)
     
-    def load_current_data(self, current_filename: str) -> CurrentData:
+    def load_current_data_internal(self, current_filename: str) -> CurrentData:
         """
         Carica i dati di corrente da file netCDF.
+        Supporta nomi variabili: 'u'/'v' (CMEMS legacy) oppure 'u_velocity'/'v_velocity' (nuovo formato)
         
         Args:
-            current_filename: Nome del file di corrente (es. 'CMEMS_S1_01_UV_grid_10m_deltaTres5.nc')
+            current_filename: Nome del file di corrente (es. 'CL02_V1_SRC000_U_V_10mGrid.nc')
         
         Returns:
             CurrentData object
@@ -862,47 +974,52 @@ class DataManager:
         if not filepath.exists():
             raise FileNotFoundError(f"File di corrente non trovato: {filepath}")
         
-        return CurrentDataLoader.load_from_nc(filepath, u_var="u_velocity", v_var="v_velocity")
-
-    def get_wind_data_for_run(self, run_id: str, wind_mapping: Dict[str, str]) -> Optional[WindData]:
-        """
-        Carica i dati di vento corretti per un run_id specifico usando la mappatura.
-        
-        Args:
-            run_id: ID del run (es. 'S1_02')
-            wind_mapping: Dict con mappatura run_id -> wind_filename
-        
-        Returns:
-            WindData object o None se non trovato
-        """
-        if run_id not in wind_mapping:
-            print(f"WARNING: run_id '{run_id}' non trovato in wind_mapping")
-            return None
-        
-        wind_filename = wind_mapping[run_id]
+        # Auto-detect variabili
         try:
-            return self.load_wind_data(wind_filename)
-        except FileNotFoundError as e:
-            print(f"WARNING: {e}")
-            return None
+            import netCDF4 as nc
+            with nc.Dataset(filepath, 'r') as ds:
+                if 'u_velocity' in ds.variables and 'v_velocity' in ds.variables:
+                    # Nuovo formato (CL02_V1_*)
+                    u_var, v_var = 'u_velocity', 'v_velocity'
+                else:
+                    # Legacy formato (CMEMS)
+                    u_var, v_var = 'u', 'v'
+        except Exception:
+            # Fallback
+            u_var, v_var = 'u', 'v'
+        
+        return CurrentDataLoader.load_from_nc(filepath, u_var=u_var, v_var=v_var)
     
-    def get_current_data_for_run(self, run_id: str) -> Optional[CurrentData]:
+    def get_wind_data(self) -> Optional[WindData]:
         """
-        Carica i dati di corrente corretti per un run_id specifico.
-        Il file di corrente segue il pattern: CMEMS_{run_id}_UV_grid_10m_deltaTres5.nc
-        
-        Args:
-            run_id: ID del run (es. 'S1_02')
+        Ritorna i dati di vento precaricat (shared per tutte le sorgenti).
         
         Returns:
-            CurrentData object o None se non trovato
+            WindData object o None se non caricato
         """
-        current_filename = f"CMEMS_{run_id}_UV_grid_10m_deltaTres5.nc"
-        try:
-            return self.load_current_data(current_filename)
-        except FileNotFoundError as e:
-            print(f"WARNING: {e}")
-            return None
+        return self._wind_data
+    
+    def get_current_data(self) -> Optional[CurrentData]:
+        """
+        Ritorna i dati di corrente precaricat (shared per tutte le sorgenti).
+        
+        Returns:
+            CurrentData object o None se non caricato
+        """
+        return self._current_data
+    
+    def get_discovered_sources(self) -> List[str]:
+        """
+        Ritorna la lista di source_id scoperti dai file disponibili.
+        
+        Returns:
+            Lista di source_id (es. ['SRC000', 'SRC001', ..., 'SRC131'])
+        """
+        return self._discovered_sources
+    
+    def n_sources(self) -> int:
+        """Ritorna il numero totale di sorgenti scoperte."""
+        return len(self._discovered_sources)
 
 
 if __name__ == "__main__":
