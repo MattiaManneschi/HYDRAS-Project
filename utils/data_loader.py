@@ -668,7 +668,8 @@ class DataManager:
         source_id_filter: Optional[str] = None,
         wind_filename: str = "CI_WIND_faseII_V1.txt",
         current_filename: str = "CL02_V1_SRC000_U_V_10mGrid.nc",
-        discover_sources: bool = True
+        discover_sources: bool = True,
+        sources_csv: str = "Coordinate_Sorgenti_FaseII.csv"
     ):
         """
         Args:
@@ -679,12 +680,16 @@ class DataManager:
             wind_filename: Nome file vento nella cartella data/Vento_V0-V3/ (default: CI_WIND_faseII_V1.txt per 132 sorgenti)
             current_filename: Nome file corrente nella cartella data/ (default: CL02_V1_SRC000_U_V_10mGrid.nc - unico per tutte le 132 sorgenti)
             discover_sources: Se True, scopre automaticamente le sorgenti dai file disponibili (default: True)
+            sources_csv: Nome file CSV con coordinate sorgenti (default: Coordinate_Sorgenti_FaseII.csv)
         """
         self.data_dir = Path(data_dir)
         self.source_id_filter = source_id_filter
         self.wind_filename = wind_filename
         self.current_filename = current_filename
         self.discover_sources_enabled = discover_sources
+        
+        # Carica coordinate sorgenti dal CSV
+        self._source_coordinates: Dict[str, Tuple[float, float]] = {}  # SRC### -> (x, y)
 
         # Domain config di default basata sul report
         self.domain = domain_config or DomainConfig(
@@ -720,6 +725,9 @@ class DataManager:
 
         # Scopri le sorgenti dai file disponibili
         self._discover_sources(all_nc_files)
+
+        # Carica coordinate sorgenti dal CSV
+        self._load_source_coordinates(sources_csv)
 
         # Applica filtro source_id se specificato
         if source_id_filter:
@@ -759,6 +767,52 @@ class DataManager:
         
         self._discovered_sources = sorted(sources)
         print(f"Discovered {len(self._discovered_sources)} sources: {self._discovered_sources[:5]}... (e altri)")
+
+    def _load_source_coordinates(self, csv_filename: str):
+        """
+        Carica le coordinate delle sorgenti dal file CSV.
+        
+        Formato atteso:
+        ID;X;Y
+        1;619710.718;4796350
+        2;619710.718;4796550
+        ...
+        
+        Args:
+            csv_filename: Nome file CSV nella cartella data/
+        """
+        csv_path = Path(self.data_dir).parent / csv_filename
+        if not csv_path.exists():
+            print(f"WARNING: File coordinate sorgenti non trovato: {csv_path}")
+            print("Continuo senza coordinate da CSV (userò quelle estratte dai filename)")
+            return
+        
+        try:
+            with open(csv_path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split(';')
+                    if len(parts) < 3:
+                        continue
+                    try:
+                        source_num = int(parts[0])
+                        x = float(parts[1])
+                        y = float(parts[2])
+                        # Mappa con formato SRC###
+                        source_id = f"SRC{source_num:03d}"
+                        self._source_coordinates[source_id] = (x, y)
+                    except (ValueError, IndexError):
+                        continue
+            
+            if self._source_coordinates:
+                print(f"Loaded coordinates for {len(self._source_coordinates)} sources from {csv_filename}")
+            else:
+                print(f"WARNING: No valid coordinates found in {csv_filename}")
+        except Exception as e:
+            print(f"ERROR loading source coordinates: {e}")
+
 
     def _load_wind_data(self):
         """Carica il file di vento una sola volta."""
@@ -831,6 +885,11 @@ class DataManager:
             field = self._preloaded_fields[key]
             # Estrai source_id dal key
             source_id = self._extract_source_id(key)
+            # Aggiorna coordinate con quelle dal CSV se disponibili
+            coords = self.get_source_coordinates(source_id)
+            if coords and not hasattr(field, '_updated_from_csv'):
+                field.source_position = coords
+                field._updated_from_csv = True
             return field, source_id
 
         # Filtra SOLO file di concentrazione
@@ -847,6 +906,12 @@ class DataManager:
             concentration_var="Concentration - component 1"
         )
         source_id = self._extract_source_id(nc_file.stem)
+        
+        # Aggiorna coordinate con quelle dal CSV se disponibili
+        coords = self.get_source_coordinates(source_id)
+        if coords:
+            field.source_position = coords
+        
         return field, source_id
 
     def get_random_field_for_source(self, source_id: str) -> Tuple[ConcentrationField, str]:
@@ -864,7 +929,13 @@ class DataManager:
             source_keys = [k for k in self._preloaded_fields.keys() if source_id in k]
             if source_keys:
                 key = np.random.choice(source_keys)
-                return self._preloaded_fields[key], source_id
+                field = self._preloaded_fields[key]
+                # Aggiorna coordinate con quelle dal CSV se disponibili
+                coords = self.get_source_coordinates(source_id)
+                if coords and not hasattr(field, '_updated_from_csv'):
+                    field.source_position = coords
+                    field._updated_from_csv = True
+                return field, source_id
 
         # Filtra per sorgente E per concentrazione
         source_files = [f for f in self._nc_files if source_id in f.name and 'Conc' in f.name]
@@ -879,6 +950,11 @@ class DataManager:
             str(nc_file),
             concentration_var="Concentration - component 1"
         )
+        
+        # Aggiorna coordinate con quelle dal CSV se disponibili
+        coords = self.get_source_coordinates(source_id)
+        if coords:
+            field.source_position = coords
         
         return field, source_id
 
@@ -1020,6 +1096,27 @@ class DataManager:
     def n_sources(self) -> int:
         """Ritorna il numero totale di sorgenti scoperte."""
         return len(self._discovered_sources)
+    
+    def get_source_coordinates(self, source_id: str) -> Optional[Tuple[float, float]]:
+        """
+        Ritorna le coordinate (x, y) di una sorgente.
+        
+        Args:
+            source_id: ID della sorgente (es. 'SRC000', 'SRC042')
+        
+        Returns:
+            Tuple (x, y) se trovato, None altrimenti
+        """
+        return self._source_coordinates.get(source_id)
+    
+    def get_all_source_coordinates(self) -> Dict[str, Tuple[float, float]]:
+        """
+        Ritorna il mapping completo di tutte le coordinate.
+        
+        Returns:
+            Dict {SRC###: (x, y), ...}
+        """
+        return self._source_coordinates.copy()
 
 
 if __name__ == "__main__":
