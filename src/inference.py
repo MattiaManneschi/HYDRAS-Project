@@ -361,14 +361,14 @@ def run_inference(
     sources_csv: str = "Coordinate_Sorgenti_FaseII.csv",
 ):
     """
-    Esegue l'inferenza completa su tutti i 132 sorgenti.
+    Esegue l'inferenza completa su 26 sorgenti held-out (SRC107-SRC132, 20% del totale 132) con 2 chunk per fonte.
 
     Args:
         model_path:   Path al modello (.zip)
         config_path:  Path al config YAML
         data_dir:     Directory con i file NC (Output_HD_FaseII_CL2_V1)
         output_dir:   Directory di output per plot e risultati
-        n_episodes:   Episodi per sorgente
+        n_episodes:   Episodi per sorgente e chunk
         deterministic: Policy deterministica o stocastica
         sources_csv:  File CSV con coordinate delle sorgenti
     """
@@ -392,16 +392,17 @@ def run_inference(
     
     # Usa le sorgenti escluse dal curriculum learning (SRC081-SRC132) per valutazione
     # Il curriculum usa SRC001-SRC080 per training
+    # Prendi il 20% dei 132 file (~26 file): SRC107-SRC132
     all_sources = data_manager.get_discovered_sources()
-    inference_sources = [s for s in all_sources if int(s[3:]) > 80]  # SRC081-SRC132
+    inference_sources = [s for s in all_sources if int(s[3:]) > 106]  # SRC107-SRC132 (26 file, ~20%)
     
     print(f"\n{'='*100}")
-    print(f"HYDRAS Inference — {len(inference_sources)} sorgenti (SRC081-SRC132, held-out) × 2 chunk × {n_episodes} episodi")
+    print(f"HYDRAS Inference — {len(inference_sources)} sorgenti (SRC107-SRC132, 20% held-out) × 2 chunk × {n_episodes} episodi")
     print(f"  = {len(inference_sources)*2*n_episodes} episodi totali")
     print(f"Modello: {model_path}")
     print(f"Dati: {data_dir}")
-    print(f"Sorgenti training curriculum: SRC001-SRC080 (80 sorgenti)")
-    print(f"Sorgenti inference (held-out): {len(inference_sources)}: {inference_sources}")
+    print(f"Sorgenti training curriculum: SRC001-SRC106 (106 sorgenti, 80%)")
+    print(f"Sorgenti inference (held-out 20%): {len(inference_sources)}: {inference_sources}")
     print(f"{'='*100}\n")
     
     # Carica dati vento e corrente (condivisi per tutte le sorgenti)
@@ -431,7 +432,7 @@ def run_inference(
             chunk_label = "Q1/4" if chunk_id == 0 else "Q3/4"
             scenario_label = f"{source_id}_{chunk_label}"
             
-            print(f"[{src_idx:3d}/{len(discovered_sources)}] {source_id} — spawn @{chunk_label}", end="  ")
+            print(f"[{src_idx:3d}/{len(inference_sources)}] {source_id} — spawn @{chunk_label}", end="  ")
             episode_results: List[EpisodeResult] = []
 
             for ep in range(n_episodes):
@@ -444,38 +445,38 @@ def run_inference(
                 # Crea env config con chunk_id appropriato
                 env_cfg_ep = make_env_config(config, chunk_id=chunk_id)
 
-                vec_env = build_env(env_cfg_ep, field, vec_norm_path,
-                                   use_masking=MASKABLE_PPO_AVAILABLE,
-                                   data_manager=data_manager,
-                                   wind_data=wind_data,
-                                   current_data=current_data)
+            vec_env = build_env(env_cfg_ep, field, vec_norm_path,
+                               use_masking=MASKABLE_PPO_AVAILABLE,
+                               data_manager=data_manager,
+                               wind_data=wind_data,
+                               current_data=current_data)
 
-                result = run_episode(model, vec_env, deterministic=deterministic)
-                result.scenario = scenario_label
-                result.source_id = source_id
-                result.episode = ep
+            result = run_episode(model, vec_env, deterministic=deterministic)
+            result.scenario = scenario_label
+            result.source_id = source_id
+            result.episode = ep
 
-                # Aggiorna field con quello effettivamente usato dall'env
-                inner = get_inner_env(vec_env)
-                used_field = inner.field
+            # Aggiorna field con quello effettivamente usato dall'env
+            inner = get_inner_env(vec_env)
+            used_field = inner.field
 
-                status = "✓" if result.success else "✗"
-                episode_results.append(result)
-                vec_env.close()
+            status = "✓" if result.success else "✗"
+            episode_results.append(result)
+            vec_env.close()
 
-                # Salva plot traiettoria
-                plot_path = source_dir / f"ep{ep+1:02d}_chunk{chunk_id}_trajectory.png"
-                save_trajectory_plot(result, used_field, plot_path, success_threshold)
+            # Salva plot traiettoria
+            plot_path = source_dir / f"ep{ep+1:02d}_chunk{chunk_id}_trajectory.png"
+            save_trajectory_plot(result, used_field, plot_path, success_threshold)
 
-            if episode_results:
-                # Statistiche sorgente+chunk
-                stats = compute_scenario_stats(episode_results, scenario_label, source_id)
-                all_stats.append(stats)
-                sr = stats.success_rate * 100
-                err = f" {sr:.0f}%" if stats.mean_steps_success is None else f" {sr:.0f}%"
-                print(f"SR={err:>4s}", end="\n")
-            else:
-                print("[FAILED]")
+        if episode_results:
+            # Statistiche sorgente+chunk
+            stats = compute_scenario_stats(episode_results, scenario_label, source_id)
+            all_stats.append(stats)
+            sr = stats.success_rate * 100
+            err = f" {sr:.0f}%" if stats.mean_steps_success is None else f" {sr:.0f}%"
+            print(f"SR={err:>4s}", end="\n")
+        else:
+            print("[FAILED]")
 
     # Riepilogo globale
     if all_stats:
@@ -524,7 +525,7 @@ def main():
         config_path=CONFIG_PATH,
         data_dir=DATA_DIR,
         output_dir=OUTPUT_DIR,
-        n_episodes=3,  # Ridotto da 5 per testing su 132 sorgenti
+        n_episodes=5,  # 5 episodi per file
         deterministic=True,
         sources_csv="Coordinate_Sorgenti_FaseII.csv",  # CSV con coordinate delle sorgenti
     )

@@ -107,16 +107,16 @@ curriculum:
   phases:
     - start: 0
       end: 1000000
-      num_sources: 26  # SRC001-SRC026 (first 26 sources)
-      description: "Phase 1: Initial 26 sources"
+      num_sources: 35  # SRC001-SRC035 (first 1/3 of 106 training sources)
+      description: "Phase 1: Initial 35 sources"
     - start: 1000000
       end: 2000000
-      num_sources: 52  # SRC001-SRC052 (first 52 sources)
-      description: "Phase 2: Extended to 52 sources"
+      num_sources: 70  # SRC001-SRC070 (first 2/3 of 106 training sources)
+      description: "Phase 2: Extended to 70 sources"
     - start: 2000000
       end: 3000000
-      num_sources: 80  # SRC001-SRC080 (first 80 sources)
-      description: "Phase 3: Full 80 sources"
+      num_sources: 106  # SRC001-SRC106 (full 80% training set)
+      description: "Phase 3: Full 106 training sources (80% of 132)"
 
 # Data configuration
 data:

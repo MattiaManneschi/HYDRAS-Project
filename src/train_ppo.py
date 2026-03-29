@@ -109,9 +109,9 @@ class CurriculumCallback(BaseCallback):
     Callback per implementare curriculum learning con progressione di sorgenti.
     
     Progressione:
-    - Fase 1 (0-1M steps): SRC001-SRC026 (26 sorgenti)
-    - Fase 2 (1M-2M steps): SRC001-SRC052 (52 sorgenti)
-    - Fase 3 (2M-3M steps): SRC001-SRC080 (80 sorgenti)
+    - Fase 1 (0-1M steps): SRC001-SRC035 (35 sorgenti, 1/3 dell'80%)
+    - Fase 2 (1M-2M steps): SRC001-SRC070 (70 sorgenti, 2/3 dell'80%)
+    - Fase 3 (2M-3M steps): SRC001-SRC106 (106 sorgenti, 80% del totale 132)
     """
     
     def __init__(
@@ -429,6 +429,8 @@ def train(
     discovered_sources = data_manager.get_discovered_sources()
     
     print(f"\nDiscovered {len(discovered_sources)} sources: {discovered_sources[:10]}... (e altri)")
+    print(f"  Training set (80%): SRC001-SRC106 (106 sources)")
+    print(f"  Inference set (20%): SRC107-SRC132 (26 sources)")
     print(f"Wind data: {'LOADED' if wind_data else 'NOT FOUND'} ({wind_data.dt if wind_data else 'N/A'} min intervals)")
     print(f"Current data: {'LOADED' if current_data else 'NOT FOUND'} ({current_data.n_timesteps if current_data else 'N/A'} timesteps)")
     
