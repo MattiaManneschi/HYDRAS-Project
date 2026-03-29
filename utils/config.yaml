@@ -44,7 +44,7 @@ environment:
     boundary_penalty: -10.0
     land_proximity_threshold: 10.0  # m - distanza dalla terra per penalità progressiva
     land_proximity_penalty_max: -5.0  # penalità massima per vicinanza terra (aumentata)
-    distance_threshold: 50  # m - distanza dalla sorgente per "trovato" (abbassato a 50m per direttive relatore)
+    distance_threshold: 50  # m - distanza dalla sorgente per "trovato"
     distance_reward_multiplier: 1.0  # moltiplicatore per reward distanza
     plume_reward_positive: 1.0  # reward binario dentro il plume (PRIORITARIO)
     plume_reward_negative: -1.0  # penalità fuori dal plume (PRIORITARIO)

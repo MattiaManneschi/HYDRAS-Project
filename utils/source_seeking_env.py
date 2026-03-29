@@ -61,7 +61,7 @@ class SourceSeekingConfig:
     chunk_id: int = 0  # 0 = spawn @1/4, 1 = spawn @3/4 della simulazione (data augmentation)
 
     # Reward
-    source_distance_threshold: float = 50  # m (intorno di successo - abbassato a 50m per direttive relatore)
+    source_distance_threshold: float = 50  # m (intorno di successo)
     source_found_reward: float = 100.0
     step_penalty: float = -0.1
     boundary_penalty: float = -10.0
@@ -325,7 +325,6 @@ class SourceSeekingEnv(gym.Env):
 
         # Se non ci sono punti nei vincoli di distanza, rilassa il vincolo
         if len(valid_x) == 0:
-            print(f"WARNING: No plume points in [{self.config.spawn_min_distance}m, {self.config.spawn_max_distance}m], using all plume points.")
             valid_x = x_coords
             valid_y = y_coords
 

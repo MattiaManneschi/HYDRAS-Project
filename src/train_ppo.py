@@ -278,7 +278,7 @@ def create_env(
         wind_alignment_penalty=env_config.get('reward', {}).get('wind_alignment_penalty', -0.1),
     )
 
-    print(f"  Success radius: {env_kwargs.source_distance_threshold}m (abbassato a 50m per direttive relatore)")
+    print(f"  Success radius: {env_kwargs.source_distance_threshold}m")
 
     # Crea ambiente
     env = SourceSeekingEnv(
