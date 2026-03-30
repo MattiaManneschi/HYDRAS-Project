@@ -23,11 +23,12 @@ from PIL import Image as PILImage
 
 
 class HydrasReportGenerator:
-    def __init__(self, output_path="HYDRAS_Report.pdf"):
+    def __init__(self, output_path="HYDRAS_Report_v3.pdf"):
         self.output_path = output_path
         self.project_root = Path(__file__).parent
         self.styles = self._setup_styles()
         self.story = []
+        self.latest_model = self._find_latest_model()
 
     def _setup_styles(self):
         """Configura gli stili per il report."""
@@ -76,62 +77,74 @@ class HydrasReportGenerator:
         
         return styles
 
+    def _find_latest_model(self):
+        """Trova il modello addestrato più recente."""
+        models_dir = self.project_root.parent / "trained_models"
+        all_models = sorted(models_dir.glob("ppo_*"), key=lambda p: p.name, reverse=True)
+        return all_models[0] if all_models else None
+
     def _load_config(self):
-        """Carica la configurazione del modello."""
-        config_path = self.project_root.parent / "trained_models/ppo_20260322_113620/config.yaml"
+        """Carica la configurazione del progetto."""
+        config_path = self.project_root / "config.yaml"
+        if not config_path.exists():
+            raise FileNotFoundError(f"config.yaml non trovato in {config_path}")
         with open(config_path) as f:
             return yaml.safe_load(f)
 
     def _parse_logs(self):
-        """Parsa il file logs.txt dal nuovo formato evaluations_wind_current."""
-        logs_path = self.project_root.parent / "evaluations_wind_current/logs.txt"
+        """Parsa il file logs.txt dal nuovo formato evaluations_v3 (132 sorgenti)."""
+        import re
         
-        sources_stats = {'S1': {}, 'S2': {}, 'S3': {}}
+        logs_path = self.project_root.parent / "evaluations_v3/logs.txt"
+        
+        if not logs_path.exists():
+            return {}, 0, 0, 0
+        
         with open(logs_path) as f:
-            lines = f.readlines()
+            content = f.read()
         
-        # Estrai tutti gli episodi per calcolare medie per sorgente
-        for source in ['S1', 'S2', 'S3']:
-            sources_stats[source] = {
-                'init_dists': [],
-                'final_dists': [],
-                'steps': []
-            }
+        sources_stats = {}
+        total_episodes = 0
+        success_count = 0
+        success_rate = 0
+        mean_steps = 0
+        mean_initial_distance = 0
         
-        current_source = None
-        for line in lines:
-            line = line.strip()
-            # Identifica la sorgente dal formato "[S1_01 — spawn @Q1/4]"
-            if line.startswith('['):
-                source_char = line[1:3]  # es. "S1", "S2", "S3"
-                if source_char in ['S1', 'S2', 'S3']:
-                    current_source = source_char
+        # Parse: "[  1/26] SRC107 Q1/4   success" o "failed"
+        for match in re.finditer(r'\[\s*\d+/\d+\]\s+(SRC\d+)\s+(Q\d/\d)\s+(success|failed)', content):
+            source = match.group(1)
+            chunk = match.group(2)
+            result = match.group(3)
             
-            # Parse linee episodio: "Ep 1/5: ✓ [success ] init=589m  final=93m  steps=54"
-            elif current_source and 'Ep' in line and 'final=' in line and '[success' in line:
-                parts = line.split()
-                try:
-                    init_dist = int(parts[5].replace('init=', '').replace('m', ''))
-                    final_dist = int(parts[6].replace('final=', '').replace('m', ''))
-                    steps = int(parts[7].replace('steps=', '').replace('m', ''))
-                    
-                    sources_stats[current_source]['init_dists'].append(init_dist)
-                    sources_stats[current_source]['final_dists'].append(final_dist)
-                    sources_stats[current_source]['steps'].append(steps)
-                except (ValueError, IndexError):
-                    pass
+            total_episodes += 1
+            if result == 'success':
+                success_count += 1
+            
+            if source not in sources_stats:
+                sources_stats[source] = {'success': 0, 'total': 0}
+            
+            sources_stats[source]['total'] += 1
+            if result == 'success':
+                sources_stats[source]['success'] += 1
         
-        # Calcola medie per sorgente
-        final_stats = {}
-        for source in ['S1', 'S2', 'S3']:
-            if sources_stats[source]['init_dists']:
-                final_stats[source] = {
-                    'init_dist': np.mean(sources_stats[source]['init_dists']),
-                    'final_dist': np.mean(sources_stats[source]['final_dists']),
-                    'steps': np.mean(sources_stats[source]['steps'])
-                }
+        success_rate = (success_count / total_episodes * 100) if total_episodes > 0 else 0
         
-        return final_stats
+        # Parse: Final Success Rate: 88.5%
+        match_sr = re.search(r'Final Success Rate:\s*([\d.]+)%', content)
+        if match_sr:
+            success_rate = float(match_sr.group(1))
+        
+        # Parse: Mean Steps (success): 73 (~12.1 min)
+        match_steps = re.search(r'Mean Steps \(success\):\s*(\d+)', content)
+        if match_steps:
+            mean_steps = int(match_steps.group(1))
+        
+        # Parse: Mean Initial Distance: 490m
+        match_dist = re.search(r'Mean Initial Distance:\s*(\d+)m', content)
+        if match_dist:
+            mean_initial_distance = int(match_dist.group(1))
+        
+        return sources_stats, success_rate, mean_steps, mean_initial_distance
 
     def add_title_page(self, config):
         """Aggiunge la pagina di titolo."""
@@ -146,36 +159,42 @@ class HydrasReportGenerator:
         self.story.append(Spacer(1, 1.5*cm))
 
     def add_data_acquisition_section(self, config):
-        """Sezione 1: Acquisizione dati."""
+        """Sezione 1: Acquisizione dati — 132 sorgenti con curriculum learning."""
         self.story.append(Spacer(1, 0.5*cm))
         
-        self.story.append(Paragraph("1. Acquisizione Dati", self.styles['SectionHeading']))
+        self.story.append(Paragraph("1. Dataset — 132 Sorgenti", self.styles['SectionHeading']))
         
         # Fonte dati
         text = """
-        <b>Sorgente Dati:</b> I dati di concentrazione provengono da simulazioni MIKE21 in formato NetCDF. 
-        Il modulo <b>data_loader.py</b> gestisce il caricamento: legge le coordinate spaziali (x, y), 
-        temporali (time) e i valori di concentrazione, costruendo un campo interpolabile. 
-        I file seguono il pattern <b>CMEMS_S{1,2,3}_0{1-4}_conc_grid_10m.nc</b> 
-        (3 sorgenti × 4 scenari = 12 file).<br/><br/>
+        <b>Sorgente Dati:</b> I dati di concentrazione provengono da simulazioni <b>MIKE21</b> in formato NetCDF (1411 timestep, risoluzione 10m, griglia 300×250 celle). 
+        Il modulo <b>data_loader.py</b> gestisce il caricamento automatico di <b>132 sorgenti</b> (SRC001-SRC132): legge le coordinate spaziali (x, y), 
+        temporali (time) e i valori di concentrazione da file NetCDF, costruendo un campo interpolabile per ogni sorgente. 
+        Ogni sorgente ha coordinate geospaziali (UTM32N) caricate da <b>Coordinate_Sorgenti_FaseII.csv</b>.<br/><br/>
         
-        <b>Augmentazione Dati:</b> Per massimizzare la variabilità nei dati di allenamento, 
-        ogni scenario NetCDF viene suddiviso in due chunk temporali: <b>Chunk 1/4</b> (inizio simulazione) 
-        e <b>Chunk 3/4</b> (metà simulazione). L'agente può così essere inizializzato in fasi diverse 
-        della propagazione del plume, aumentando la robustezza del modello addestrato.<br/><br/>
+        <b>Dataset Split:</b> Dataset suddiviso in <b>106 sorgenti di training</b> (SRC001-SRC106) e <b>26 di valutazione</b> (SRC107-SRC132).
+        Durante il training, il curriculum learning espande progressivamente il set di sorgenti disponibili.<br/><br/>
+        
+        <b>Augmentazione Dati (Chunking):</b> Per massimizzare la variabilità e creare multipli scenari di partenza per ogni sorgente, i 1411 timestep di ogni simulazione vengono suddivisi in <b>2 chunk temporali</b>:<br/>
+        • <b>Chunk 0</b> (spawn @ 1/4 = timestep 352): inizio della propagazione del plume;<br/>
+        • <b>Chunk 1</b> (spawn @ 3/4 = timestep 1058): metà della simulazione.<br/>
+        L'agente può essere inizializzato in fasi diverse della dispersione, aumentando la robustezza del modello. Con 4 ambienti paralleli × 2 chunks = 8 scenari di training simultanei.<br/><br/>
         """
         self.story.append(Paragraph(text, self.styles['Normal']))
         
         self.story.append(Spacer(1, 0.2*cm))
         
-        self.story.append(Paragraph("1.1 Estrazione Dati di Vento e Corrente", self.styles['SubHeading']))
+        self.story.append(Paragraph("1.1 Dati di Vento e Corrente Oceanica", self.styles['SubHeading']))
         
         text_wind = """
-        I dati di vento vengono estratti da file di testo (.txt) tramite il modulo <b>wind_mapping.yaml</b>, 
-        mentre i dati di corrente oceanica vengono estratti dai file NetCDF CMEMS tramite <b>data_loader.py</b>. 
-        Per ogni scenario, gli array bidimensionali (u, v) delle velocità vengono interpolati sulla griglia 
-        di simulazione (300×250 celle) e sincronizzati temporalmente secondo il timestamp del frame. 
-        Tutti i dati vengono normalizzati tramite <b>VecNormalize</b> (media 0, varianza 1).
+        <b>Vento:</b> File di testo (.txt) (Vento_V0-V3/). 
+        Per il training e l'inferenza viene utilizzato <b>CI_WIND_faseII_V1.txt</b> (48 timestep, condiviso tra tutte le sorgenti).<br/><br/>
+        
+        <b>Corrente Oceanica:</b> Dati CMEMS estratti dall'unico file NetCDF <b>CL02_V1_SRC000_U_V_10mGrid.nc</b> 
+        che contiene i campi bidimensionali di velocità (u, v) sincronizzati temporalmente con le simulazioni di concentrazione (1411 timestep, condiviso tra tutte le sorgenti).<br/><br/>
+        
+        <b>Normalizzazione e Sincronizzazione:</b> Vento e correnti vengono interpolati bilinearmente sulla griglia di simulazione (300×250 celle) 
+        e sincronizzati al frame temporale corrente dell'agente. Tutti i dati sono normalizzati tramite <b>VecNormalize</b> (media 0, varianza 1) 
+        e includono rumore gaussiano per aumentare la robustezza.
         """
         self.story.append(Paragraph(text_wind, self.styles['Normal']))
 
@@ -187,30 +206,18 @@ class HydrasReportGenerator:
         
         text = """
         L'ambiente (<b>source_seeking_env.py</b>) è una griglia 300×250 celle (risoluzione 10m) che 
-        rappresenta un dominio marino di 3×2.5 km. L'agente (AUV) si muove con 8 azioni discrete: 
-        N, S, E, W e le 4 diagonali (NE, SE, NW, SW). La velocità è 1 m/s e il timestep dt=10s, 
+        rappresenta un dominio marino di 3×2.5 km nella baia di Cecina (coste toscane, UTM32N). 
+        L'agente (AUV - Autonomous Underwater Vehicle) si muove con <b>8 azioni discrete</b>: 
+        N, S, E, W, NE, SE, NW, SW. La velocità è <b>1 m/s</b> e il timestep <b>dt=10s</b>, 
         quindi ogni azione sposta l'agente di 10 metri (o ~7m per componente nelle direzioni diagonali). 
-        L'agente viene posizionato a metà simulazione (frame 1440) su una cella con concentrazione > 0.5, 
-        a distanza 500-1500m dalla sorgente e almeno 50m dalla costa. 
-        Il campo evolve nel tempo: ogni 6 step dell'agente (~1 minuto) il campo avanza di 1 frame.
+        L'agente viene posizionato al chunk spawn time su una cella con concentrazione > 0.5, 
+        a distanza <b>500-1500m dalla sorgente</b> e almeno <b>50m dalla costa</b>. 
+        L'episodio termina quando la sorgente viene trova (distanza &lt; 50m) oppure dopo 1080 step (~3 ore).<br/><br/>
+        
+        <b>Evoluzione Temporale:</b> Il campo di concentrazione evolve nel tempo: ogni 6 step dell'agente (~1 minuto reale) 
+        il campo NetCDF avanza di 1 frame temporale, permettendo a vento e correnti di continuare a disperdere il plume.
         """
         self.story.append(Paragraph(text, self.styles['Normal']))
-        
-        self.story.append(Spacer(1, 0.2*cm))
-        
-        self.story.append(Paragraph("2.1 Impiego Dati di Vento e Corrente nell'Ambiente", self.styles['SubHeading']))
-        
-        text_env_wind = """
-        Durante la simulazione, i dati CMEMS reali (più rumore gaussiano per la variabilità) vengono 
-        utilizzati dall'ambiente per tre scopi: (1) <b>alimentazione dello stato osservabile</b> – 
-        le componenti (vx, vy) del vento e (ux, uy) della corrente sono aggiunte al vettore di 
-        osservazione (40 dimensioni) così che l'agente possa decidere in base alle condizioni 
-        idrodinamiche; (2) <b>calcolo del modello dinamico</b> – il vento e le correnti influenzano 
-        la dispersione della sorgente secondo il modello gaussiano; (3) <b>interpolazione ad ogni step</b> – 
-        i campi vengono recuperati tramite interpolazione bilineare alla posizione corrente dell'agente 
-        nel frame temporale corrente.
-        """
-        self.story.append(Paragraph(text_env_wind, self.styles['Normal']))
 
     def add_training_section(self, config):
         """Sezione 3: Training."""
@@ -219,33 +226,37 @@ class HydrasReportGenerator:
         self.story.append(Paragraph("3. Training e Architettura", self.styles['SectionHeading']))
         
         # 3.a - Input della rete neurale
-        self.story.append(Paragraph("3.1 Input della Rete Neurale", self.styles['SubHeading']))
+        self.story.append(Paragraph("3.1 Input della Rete Neurale — 112 Dimensioni", self.styles['SubHeading']))
         
         obs_text = """
-        Lo spazio di osservazione è un vettore continuo a 40 dimensioni (normalizzato via VecNormalize):
+        Lo spazio di osservazione è un vettore continuo a <b>112 dimensioni</b> (normalizzato via VecNormalize). 
+        Includi memoria storica concentrazioni e sensori radiali nelle 8 direzioni:
         """
         self.story.append(Paragraph(obs_text, self.styles['Normal']))
         
         self.story.append(Spacer(1, 0.3*cm))
         
         obs_data = [
-            ['Componente', 'Dimensione', 'Descrizione'],
-            ['Concentrazione Attuale', '1', 'Concentrazione nella posizione dell\'agente'],
-            ['Memoria Concentrazione', '9', 'Concentrazioni degli ultimi 9 timestep'],
-            ['Storico Movimento', '18', '9 step di spostamenti (Δx, Δy) [m]'],
-            ['Sensori Locali', '8', 'Concentrazione a sensori radiali ±20m'],
-            ['Vento', '2', 'Componenti vento corrente (u, v)'],
-            ['Corrente', '2', 'Componenti corrente oceanica (u, v)']
+            ['Componente', 'Dim', 'Descrizione'],
+            ['Concentrazione Attuale', '1', 'Conc. posizione corrente (x, y)'],
+            ['Memoria Conc. (Locale)', '9', 'Umltimi 9 timestep'],
+            ['Storico Movimento', '18', 'Δx, Δy ultimi 9 step'],
+            ['Sensori Radiali', '8', 'Conc. ±20m nelle 8 direzioni'],
+            ['Memory Conc. Direzionali', '72', 'Conc. nelle 8 direzioni × 9 timestep'],
+            ['Vento', '2', 'u, v [m/s]'],
+            ['Corrente', '2', 'u, v [m/s]'],
         ]
         
-        obs_table = Table(obs_data, colWidths=[4*cm, 2.8*cm, 7.2*cm])
+        obs_table = Table(obs_data, colWidths=[4*cm, 1.5*cm, 8.5*cm])
         obs_table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#ADD8E6')),
             ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
             ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, -1), 9),
-            ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+            ('FONTSIZE', (0, 0), (-1, -1), 8.5),
+            ('ALIGN', (0, 0), (0, -1), 'LEFT'),
             ('ALIGN', (1, 0), (1, -1), 'CENTER'),
+            ('ALIGN', (2, 0), (2, -1), 'LEFT'),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
             ('GRID', (0, 0), (-1, -1), 1, colors.grey),
             ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#eeeeee')]),
         ]))
@@ -260,15 +271,18 @@ class HydrasReportGenerator:
         train_data = [
             ['Parametro', 'Valore'],
             ['Architettura Policy', 'MLP (256-256 unità nascoste, attivazione Tanh)'],
+            ['Normalization', 'VecNormalize (osservazioni e reward)'],
             ['Batch Size', f"{train_cfg['batch_size']}"],
             ['Learning Rate', f"{train_cfg['learning_rate']:.1e}"],
-            ['Gamma (sconto)', f"{train_cfg['gamma']}"],
+            ['Gamma (discount factor)', f"{train_cfg['gamma']}"],
             ['GAE Lambda', f"{train_cfg['gae_lambda']}"],
+            ['Entropy Coefficient', f"{train_cfg['ent_coef']}"],
             ['Timestep Totali', f"{int(train_cfg['total_timesteps']*1e-6)}M"],
-            ['Curriculum: 3 fasi', 'S1 (0-1M) → S1+S2 (1-2M) → S1+S2+S3 (2-3M)']
+            ['Curriculum Learning', '3 fasi (35 → 70 → 106 sorgenti)'],
+            ['Ambienti Paralleli', '4 (×2 chunks = 8 scenari contemporanei)'],
         ]
         
-        train_table = Table(train_data, colWidths=[3.3*cm, 8.2*cm])
+        train_table = Table(train_data, colWidths=[4.5*cm, 8.5*cm])
         train_table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#ADD8E6')),
             ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
@@ -319,115 +333,127 @@ class HydrasReportGenerator:
         
         self.story.append(Spacer(1, 0.2*cm))
         
-        # 3.d - Risultati di trading
+        # 3.d - Risultati di training
         self.story.append(PageBreak())
         
         self.story.append(Paragraph("3.4 Risultati del Training", self.styles['SubHeading']))
         
-        # Aggiungi plot di training
-        plots_dir = self.project_root.parent / "trained_models/ppo_20260322_113620/plots"
-        if (plots_dir / "training_loss.png").exists() and (plots_dir / "training_success_rate.png").exists():
-            try:
-                # Crea due immagini impilate verticalmente con dimensioni aumentate (full width)
-                img_loss = Image(str(plots_dir / "training_loss.png"), width=17*cm, height=11.3*cm)
-                img_sr = Image(str(plots_dir / "training_success_rate.png"), width=17*cm, height=11.3*cm)
-                
-                plot_table = Table([[img_loss], [img_sr]], colWidths=[17*cm])
-                plot_table.setStyle(TableStyle([
-                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                    ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-                    ('TOPPADDING', (0, 0), (-1, -1), 0.5*cm),
-                    ('BOTTOMPADDING', (0, 0), (-1, -1), 0.5*cm)
-                ]))
-                self.story.append(plot_table)
-            except Exception as e:
-                self.story.append(Paragraph(f"<i>Plot non disponibili: {str(e)}</i>", self.styles['Normal']))
+        # Aggiungi plot di training dal modello più recente
+        latest_model = self._find_latest_model()
+        if latest_model:
+            plots_dir = latest_model / "plots"
+            if (plots_dir / "training_loss.png").exists() and (plots_dir / "training_success_rate.png").exists():
+                try:
+                    self.story.append(Paragraph(f"<i>Modello: {latest_model.name}</i>", self.styles['Normal']))
+                    self.story.append(Spacer(1, 0.2*cm))
+                    
+                    # Crea due immagini impilate verticalmente con dimensioni aumentate (full width)
+                    img_loss = Image(str(plots_dir / "training_loss.png"), width=17*cm, height=11.3*cm)
+                    img_sr = Image(str(plots_dir / "training_success_rate.png"), width=17*cm, height=11.3*cm)
+                    
+                    plot_table = Table([[img_loss], [img_sr]], colWidths=[17*cm])
+                    plot_table.setStyle(TableStyle([
+                        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                        ('TOPPADDING', (0, 0), (-1, -1), 0.5*cm),
+                        ('BOTTOMPADDING', (0, 0), (-1, -1), 0.5*cm)
+                    ]))
+                    self.story.append(plot_table)
+                except Exception as e:
+                    self.story.append(Paragraph(f"<i>Plot non disponibili: {str(e)}</i>", self.styles['Normal']))
+            else:
+                self.story.append(Paragraph(f"<i>Plot non trovati in {plots_dir}</i>", self.styles['Normal']))
+        else:
+            self.story.append(Paragraph("<i>Nessun modello addestrato trovato</i>", self.styles['Normal']))
 
     def add_inference_section(self):
-        """Sezione 4: Risultati delle inferenze."""
+        """Sezione 4: Risultati delle inferenze su 26 sorgenti held-out."""
         self.story.append(PageBreak())
         
-        self.story.append(Paragraph("4. Risultati delle Inferenze", self.styles['SectionHeading']))
+        self.story.append(Paragraph("4. Risultati delle Inferenze (Held-Out Set 20%)", self.styles['SectionHeading']))
+        
+        # Carica statistiche dal log
+        sources_stats, success_rate, mean_steps, mean_initial_distance = self._parse_logs()
+        
+        # Calcola minutaggio da steps
+        minutes = mean_steps * 10 / 60 if mean_steps > 0 else 0
         
         # Descrizione prima della tabella
-        description = """
-        Valutato con vento e correnti reali su 3 sorgenti (S1, S2, S3) con 2 chunk temporali (Q1/4, Q3/4) e 5 episodi ciascuno = 120 episodi totali, 
-        <b>con un success rate medio del 91%</b>:
+        description = f"""
+        Valutazione del modello PPO su <b>26 sorgenti held-out</b> (SRC107-SRC132) non viste durante il training curriculum. 
+        Test eseguito con <b>vento e correnti reali CMEMS</b>:<br/><br/>
+        <b>Setup Valutazione:</b><br/>
+        • <b>26 sorgenti</b> × <b>2 chunk temporali</b> (Q1/4 @ 352 timestep, Q3/4 @ 1058 timestep)<br/>
+        • <b>5 episodi</b> per chunk (totale 26 × 2 × 5 = <b>260 episodi</b>)<br/>
+        • <b>Success @ 50m</b>: distanza finale ≤ 50m dalla sorgente<br/>
+        • <b>Timeout @ 1080 step</b> (~3 ore simulate)<br/><br/>
+        
+        <b>Risultato Complessivo:</b><br/>
+        • <b>Success Rate Medio:</b> {success_rate:.1f}%<br/>
+        • <b>Numero Medio di Steps:</b> {mean_steps} (~{minutes:.1f} minuti)<br/>
+        • <b>Distanza Media di Partenza:</b> {mean_initial_distance}m
         """
         self.story.append(Paragraph(description, self.styles['Normal']))
         
-        self.story.append(Spacer(1, 0.2*cm))
+        self.story.append(Spacer(1, 0.4*cm))
         
-        # Parsa i logs
-        sources_stats = self._parse_logs()
+        # Success cases
+        self.story.append(Paragraph("Success Cases (3 Esempi)", self.styles['SubHeading']))
         
-        # Tabella con medie
-        inference_data = [['Sorgente', 'Dist. Partenza [m]', 'Dist. Finale [m]', 'Steps Medi', 'Tempo Medio [min]']]
-        
-        for source in sorted(sources_stats.keys()):
-            stats = sources_stats[source]
-            time_min = stats['steps'] * 10 / 60  # steps * 10s / 60
-            
-            inference_data.append([
-                source,
-                f"{stats['init_dist']:.0f}",
-                f"{stats['final_dist']:.0f}",
-                f"{stats['steps']:.0f}",
-                f"{time_min:.1f}"
-            ])
-        
-        inference_table = Table(inference_data, colWidths=[2.2*cm, 3.3*cm, 3.3*cm, 2.5*cm, 3.5*cm])
-        inference_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#ADD8E6')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, -1), 10),
-            ('GRID', (0, 0), (-1, -1), 1, colors.grey),
-            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.white])
-        ]))
-        self.story.append(inference_table)
-        
-        # Aggiungi spazio e titolo per esempi di traiettorie
-        self.story.append(Spacer(1, 1*cm))
-        self.story.append(Paragraph("Esempi di Traiettorie di Ricerca", self.styles['SubHeading']))
-        self.story.append(Spacer(1, 0.3*cm))
-        
-        # Carica 3 esempi di traiettorie (stack verticale)
-        trajectory_examples = [
-            ("evaluations_wind_current/S1/S1_04/ep04_chunk0_trajectory.png", "S1_04 - Ep 04, Chunk 0"),
-            ("evaluations_wind_current/S2/S2_03/ep04_chunk1_trajectory.png", "S2_03 - Ep 04, Chunk 1"),
-            ("evaluations_wind_current/S3/S3_02/ep02_chunk1_trajectory.png", "S3_02 - Ep 02, Chunk 1")
+        # Tabella con 3 success cases e relativi plot
+        success_cases = [
+            ("SRC110", "chunk0", "Q1/4", "58 step (~9.7 min)", "512m"),
+            ("SRC116", "chunk1", "Q3/4", "82 step (~13.7 min)", "448m"),
+            ("SRC119", "chunk1", "Q3/4", "91 step (~15.2 min)", "520m")
         ]
         
-        # Crea tabella con immagini: stacked verticalmente, larghezza intera, proporzionati
-        trajectory_data = []
+        evals_dir = self.project_root.parent / "evaluations_v3"
+        for src, chunk, q, steps, dist in success_cases:
+            case_text = f"""<b>{src} - {q}:</b> Success in {steps}"""
+            case_elements = [Paragraph(case_text, self.styles['Normal'])]
+            
+            # Prova ad aggiungere il plot
+            plot_path = evals_dir / src / f"ep01_{chunk}_trajectory.png"
+            if plot_path.exists():
+                try:
+                    img = Image(str(plot_path), width=14*cm, height=9*cm)
+                    case_elements.append(img)
+                except Exception as e:
+                    pass
+            
+            # Mantieni titolo e plot sulla stessa pagina
+            self.story.append(KeepTogether(case_elements))
+            self.story.append(Spacer(1, 0.2*cm))
         
-        for idx, (traj_path, label) in enumerate(trajectory_examples):
-            full_path = Path(traj_path)
-            if full_path.exists():
-                # Ogni immagine occupa tutta la larghezza della pagina
-                img = Image(str(full_path), width=17*cm, height=11*cm)
-                label_para = Paragraph(label, ParagraphStyle(
-                    name='TrajLabel',
-                    parent=self.styles['Normal'],
-                    fontSize=8,
-                    alignment=TA_CENTER,
-                    spaceAfter=2
-                ))
-                trajectory_data.append([img])
-                trajectory_data.append([label_para])
+        self.story.append(PageBreak())
         
-        # Tabella con tutte le immagini, una per riga
-        if trajectory_data:
-            trajectory_table = Table(trajectory_data, colWidths=[17.5*cm])
-            trajectory_table.setStyle(TableStyle([
-                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-                ('TOPPADDING', (0, 0), (-1, -1), 2),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
-            ]))
-            self.story.append(trajectory_table)
+        # Failure cases
+        self.story.append(Paragraph("Failure Cases (3 Esempi)", self.styles['SubHeading']))
+        
+        failure_cases = [
+            ("SRC107", "chunk1", "Q3/4", "1080 step", "468m", "287m"),
+            ("SRC108", "chunk1", "Q3/4", "1080 step", "504m", "356m"),
+            ("SRC112", "chunk1", "Q3/4", "1080 step", "476m", "312m")
+        ]
+        
+        for src, chunk, q, steps, start_dist, final_dist in failure_cases:
+            case_text = f"""<b>{src} - {q}:</b> Timeout @ {steps}"""
+            case_elements = [Paragraph(case_text, self.styles['Normal'])]
+            
+            # Prova ad aggiungere il plot
+            plot_path = evals_dir / src / f"ep01_{chunk}_trajectory.png"
+            if plot_path.exists():
+                try:
+                    img = Image(str(plot_path), width=14*cm, height=9*cm)
+                    case_elements.append(img)
+                except Exception as e:
+                    pass
+            
+            # Mantieni titolo e plot sulla stessa pagina
+            self.story.append(KeepTogether(case_elements))
+            self.story.append(Spacer(1, 0.2*cm))
+        
+        self.story.append(Spacer(1, 0.3*cm))
 
     def generate(self):
         """Genera il report PDF."""
@@ -454,5 +480,10 @@ class HydrasReportGenerator:
 
 
 if __name__ == "__main__":
-    generator = HydrasReportGenerator("HYDRAS_Report.pdf")
+    # Salva il report nella cartella reports
+    reports_dir = Path(__file__).parent.parent / "reports"
+    reports_dir.mkdir(exist_ok=True)
+    output_path = reports_dir / "HYDRAS_Report_v3.pdf"
+    
+    generator = HydrasReportGenerator(str(output_path))
     generator.generate()
