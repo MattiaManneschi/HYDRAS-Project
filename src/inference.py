@@ -393,6 +393,11 @@ def run_inference(
         sources_csv=sources_csv
     )
     
+    # INFERENCE: Mantieni TUTTE le versioni (V0, V1, V2, V3) per il 20% held-out
+    # Il modello non ha mai visto V1 durante training, quindi lo testa qui per generalizzazione
+    print(f"\nInference data: {len(data_manager._nc_files)} files (tutte le versioni)")
+    print(f"  Versioni: V0 + V1 + V2 + V3 (modello non ha visto V1 in training!)")
+    
     # Usa le sorgenti escluse dal curriculum learning (SRC081-SRC132) per valutazione
     # Il curriculum usa SRC001-SRC080 per training
     # Prendi il 20% dei 132 file (~26 file): SRC107-SRC132
@@ -507,10 +512,10 @@ def run_inference(
 def main():
     PROJECT_ROOT = Path(__file__).resolve().parent.parent  # Root del progetto (parent di src/)
 
-    # Nuova struttura dati: 132 sorgenti in Output_HD_FaseII_CL2_V1
-    DATA_DIR    = str(PROJECT_ROOT / "data" / "Output_HD_FaseII_CL2_V1")
+    # Carica da tutte le versioni (V0, V2, V3 - escludendo V1 per consistency con training)
+    DATA_DIR    = str(PROJECT_ROOT / "data")
     CONFIG_PATH = str(PROJECT_ROOT / "utils" / "config.yaml")
-    OUTPUT_DIR  = str(PROJECT_ROOT / "evaluations_v3")  # Valutazione su 132 sorgenti
+    OUTPUT_DIR  = str(PROJECT_ROOT / "evaluations_v4")  # Valutazione su 132 sorgenti
 
     # Seleziona l'ultimo modello addestrato (directory più recente per nome)
     trained_dir = PROJECT_ROOT / "trained_models"

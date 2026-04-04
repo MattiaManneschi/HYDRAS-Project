@@ -424,6 +424,10 @@ def train(
         current_filename="CL02_V1_SRC000_U_V_10mGrid.nc"  # Unico file U_V per tutte le sorgenti
     )
     
+    # ESCUDI V1 DAL TRAINING: mantieni solo V0, V2, V3
+    data_manager._nc_files = [f for f in data_manager._nc_files if '_V1_' not in f.name]
+    print(f"  Training data (excluding V1): {len(data_manager._nc_files)} files")
+    
     wind_data = data_manager.get_wind_data()
     current_data = data_manager.get_current_data()
     discovered_sources = data_manager.get_discovered_sources()
@@ -679,7 +683,7 @@ def train(
 
 
 def main():
-    """Avvia il training con configurazione di default."""
+    """Avvia il training con configurazione di default o fine-tuning da modello esistente."""
     import os
     os.chdir(PROJECT_ROOT)  # Assicura CWD = root del progetto
 
@@ -693,12 +697,35 @@ def main():
             f"Scarica i file .nc di simulazione MIKE21 nella cartella 'data/'"
         )
 
+    # Cerca il modello più recente per fine-tuning
+    resume_from = None
+    trained_dir = Path(output_dir)
+    
+    if trained_dir.exists():
+        run_dirs = sorted([d for d in trained_dir.iterdir() if d.is_dir() and d.name.startswith("ppo_")])
+        
+        if run_dirs:
+            latest_run = run_dirs[-1]
+            
+            # Prova a trovare best_model, poi final_model
+            model_candidates = [
+                latest_run / "models" / "best" / "best_model.zip",
+                latest_run / "models" / "final_model.zip",
+            ]
+            
+            for model_path in model_candidates:
+                if model_path.exists():
+                    resume_from = str(model_path)
+                    print(f"Found latest model for fine-tuning: {resume_from}\n")
+                    break
+    
     train(
         config_path=config_path,
         output_dir=output_dir,
         n_envs=4,
         seed=42,
         data_dir=data_dir,
+        resume_from=resume_from,
     )
 
 
