@@ -1,7 +1,7 @@
 """
 HYDRAS Source Seeking - Gymnasium Environment
-Ambiente per l'addestramento di agenti RL per la localizzazione
-di sorgenti di inquinante in ambiente marino.
+Ambiente Gymnasium completo per l'addestramento di agenti RL
+nella localizzazione di sorgenti di inquinante in ambienti marini.
 """
 
 import numpy as np

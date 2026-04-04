@@ -1,7 +1,7 @@
 """
 HYDRAS Source Seeking - Data Loader
-Gestisce il caricamento dei dati NetCDF dalle simulazioni MIKE21
-e fornisce un generatore di dati sintetici per testing.
+Gestisce il caricamento dei dati NetCDF dalle simulazioni MIKE21,
+supporta multi-versione (V0-V3) e fornisce setup per training robusto.
 """
 
 import numpy as np
