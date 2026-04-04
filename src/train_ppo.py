@@ -81,8 +81,8 @@ class SourceSeekingCallback(BaseCallback):
             elif 'distance_to_source' in info:  # Episode ended without success
                 self.success_rate.append(0.0)
 
-        # Log ogni 1000 steps
-        if self.num_timesteps % 1000 == 0 and len(self.success_rate) > 0:
+        # Log ogni 1000 steps (almeno 20 episodi per stabilità statistica)
+        if self.num_timesteps % 1000 == 0 and len(self.success_rate) >= 20:
             recent_success = np.mean(self.success_rate[-100:]) if len(self.success_rate) >= 100 else np.mean(self.success_rate)
             self.logger.record('custom/success_rate', recent_success)
             self._sr_steps.append(self.num_timesteps)
