@@ -689,7 +689,7 @@ def main():
 
     config_path = str(PROJECT_ROOT / "utils" / "config.yaml")
     output_dir = str(PROJECT_ROOT / "trained_models")
-    data_dir = str(PROJECT_ROOT / "data" / "Output_HD_FaseII_CL2_V1")
+    data_dir = str(PROJECT_ROOT / "data")  # Carica da tutte le versioni (V0, V2, V3 tramite filtro)
 
     if not Path(data_dir).exists():
         raise FileNotFoundError(

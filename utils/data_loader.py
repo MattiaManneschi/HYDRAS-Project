@@ -704,6 +704,10 @@ class DataManager:
 
         self._nc_loader = NetCDFLoader(self.data_dir)
         all_nc_files = list(self.data_dir.glob("*Conc_10mGrid.nc"))
+        
+        # Se nessun file trovato direttamente, cerca ricorsivamente nelle sottocartelle
+        if not all_nc_files:
+            all_nc_files = list(self.data_dir.glob("**/Output_HD_FaseII_CL2_V*/*Conc_10mGrid.nc"))
 
         if not all_nc_files:
             raise FileNotFoundError(
@@ -769,9 +773,17 @@ class DataManager:
         Args:
             csv_filename: Nome file CSV nella cartella data/
         """
-        csv_path = Path(self.data_dir).parent / csv_filename
-        if not csv_path.exists():
-            print(f"WARNING: File coordinate sorgenti non trovato: {csv_path}")
+        csv_candidates = [
+            self.data_dir / csv_filename,
+            Path(self.data_dir).parent / csv_filename,
+        ]
+        csv_path = None
+        for candidate in csv_candidates:
+            if candidate.exists():
+                csv_path = candidate
+                break
+        if csv_path is None:
+            print(f"WARNING: File coordinate sorgenti non trovato")
             print("Continuo senza coordinate da CSV (userò quelle estratte dai filename)")
             return
         
@@ -834,12 +846,23 @@ class DataManager:
         """Carica il file di corrente una sola volta."""
         current_path = self.data_dir / self.current_filename
         if not current_path.exists():
-            print(f"WARNING: File di corrente non trovato: {current_path}")
-            return
+            uv_files = list(self.data_dir.glob("**/Output_HD_FaseII_CL2_V*/*SRC000_U_V_10mGrid.nc"))
+            if uv_files:
+                current_path = uv_files[0]
+            else:
+                print(f"WARNING: File di corrente non trovato nella ricerca ricorsiva")
+                return
         
         try:
-            self._current_data = self.load_current_data_internal(self.current_filename)
-            print(f"Current data loaded: {self.current_filename} ({self._current_data.n_timesteps} timesteps)")
+            # Carica direttamente dal percorso completo trovato
+            import netCDF4 as nc
+            with nc.Dataset(current_path, 'r') as ds:
+                if 'u_velocity' in ds.variables and 'v_velocity' in ds.variables:
+                    u_var, v_var = 'u_velocity', 'v_velocity'
+                else:
+                    u_var, v_var = 'u', 'v'
+            self._current_data = CurrentDataLoader.load_from_nc(current_path, u_var=u_var, v_var=v_var)
+            print(f"Current data loaded: {current_path.name} ({self._current_data.n_timesteps} timesteps)")
         except Exception as e:
             print(f"ERROR loading current data: {e}")
 
