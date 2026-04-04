@@ -134,8 +134,11 @@ class CurriculumCallback(BaseCallback):
         
         print(f"[CurriculumCallback] Initialized with {len(self.phases)} phases")
         for i, phase in enumerate(self.phases):
+            num_sources = phase['num_sources']
+            estimated_files_per_source = 3  # V0, V2, V3
+            estimated_files = num_sources * estimated_files_per_source
             print(f"  Phase {i}: [{phase['start']:,} - {phase['end']:,} steps] "
-                  f"-> {phase['num_sources']} sources")
+                  f"-> {num_sources} sources × {estimated_files_per_source} versions ≈ {estimated_files} files")
 
     def _get_sources_for_step(self, step: int) -> List[str]:
         """Ritorna la lista di sorgenti alla quale agent deve avere accesso al passo dato."""
@@ -567,6 +570,10 @@ def train(
         )
         callbacks.append(curriculum_callback)
         print("\n[Curriculum Learning] ENABLED")
+        print(f"  Total training files available: {len(data_manager._nc_files)} (V0+V2+V3)")
+        print(f"  - Phase 0: SRC001-SRC035 ≈ 105 files")
+        print(f"  - Phase 1: SRC001-SRC070 ≈ 210 files")
+        print(f"  - Phase 2: SRC001-SRC106 ≈ 318 files (all 80% training sources)")
     else:
         print("\n[Curriculum Learning] DISABLED")
 
