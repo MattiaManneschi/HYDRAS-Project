@@ -108,10 +108,10 @@ class CurriculumCallback(BaseCallback):
     """
     Callback per implementare curriculum learning con progressione di sorgenti.
     
-    Progressione:
-    - Fase 1 (0-1M steps): SRC001-SRC035 (35 sorgenti, 1/3 dell'80%)
-    - Fase 2 (1M-2M steps): SRC001-SRC070 (70 sorgenti, 2/3 dell'80%)
-    - Fase 3 (2M-3M steps): SRC001-SRC106 (106 sorgenti, 80% del totale 132)
+    Progressione su 5M timesteps ai tutte e 4 le versioni (V0, V1, V2, V3):
+    - Fase 1 (0-1.5M steps): SRC001-SRC035 × 4 versions (35 sorgenti, 1/3 dell'80%)
+    - Fase 2 (1.5M-3.5M steps): SRC001-SRC070 × 4 versions (70 sorgenti, 2/3 dell'80%)
+    - Fase 3 (3.5M-5M steps): SRC001-SRC106 × 4 versions (106 sorgenti, 80% del totale 132)
     """
     
     def __init__(
@@ -427,17 +427,16 @@ def train(
         current_filename="CL02_V1_SRC000_U_V_10mGrid.nc"  # Unico file U_V per tutte le sorgenti
     )
     
-    # ESCUDI V1 DAL TRAINING: mantieni solo V0, V2, V3
-    data_manager._nc_files = [f for f in data_manager._nc_files if '_V1_' not in f.name]
-    print(f"  Training data (excluding V1): {len(data_manager._nc_files)} files")
+    # INCLUDE ALL VERSIONS: V0, V1, V2, V3 (80% training set = SRC001-SRC106)
+    print(f"  Training data (all versions V0+V1+V2+V3): {len(data_manager._nc_files)} files")
     
     wind_data = data_manager.get_wind_data()
     current_data = data_manager.get_current_data()
     discovered_sources = data_manager.get_discovered_sources()
     
     print(f"\nDiscovered {len(discovered_sources)} sources: {discovered_sources[:10]}... (e altri)")
-    print(f"  Training set (80%): SRC001-SRC106 (106 sources)")
-    print(f"  Inference set (20%): SRC107-SRC132 (26 sources)")
+    print(f"  Training set (80%): SRC001-SRC106 (106 sources × 4 versions V0+V1+V2+V3)")
+    print(f"  Inference set (20%): SRC107-SRC132 (26 sources × 4 versions)")
     print(f"Wind data: {'LOADED' if wind_data else 'NOT FOUND'} ({wind_data.dt if wind_data else 'N/A'} min intervals)")
     print(f"Current data: {'LOADED' if current_data else 'NOT FOUND'} ({current_data.n_timesteps if current_data else 'N/A'} timesteps)")
     
@@ -451,7 +450,7 @@ def train(
     print(f"\nCreating {n_envs*2} parallel environments...")
     print(f"  (2 chunks per file: spawn @1/4 e @3/4 della simulazione)")
 
-    timesteps = total_timesteps or training_config.get('total_timesteps', 900000)
+    timesteps = total_timesteps or training_config.get('total_timesteps', 5000000)
 
     # Crea 2 environments per ogni "file" (rank):
     # - chunk_id=0: spawn @1/4 della simulazione
@@ -570,10 +569,10 @@ def train(
         )
         callbacks.append(curriculum_callback)
         print("\n[Curriculum Learning] ENABLED")
-        print(f"  Total training files available: {len(data_manager._nc_files)} (V0+V2+V3)")
-        print(f"  - Phase 0: SRC001-SRC035 ≈ 105 files")
-        print(f"  - Phase 1: SRC001-SRC070 ≈ 210 files")
-        print(f"  - Phase 2: SRC001-SRC106 ≈ 318 files (all 80% training sources)")
+        print(f"  Total training files available: {len(data_manager._nc_files)} (V0+V1+V2+V3 all versions)")
+        print(f"  Phase 1 (0-1.5M steps): SRC001-SRC035 × 4 versions ≈ 140 files")
+        print(f"  Phase 2 (1.5M-3.5M steps): SRC001-SRC070 × 4 versions ≈ 280 files")
+        print(f"  Phase 3 (3.5M-5M steps): SRC001-SRC106 × 4 versions ≈ 424 files (all 80% training sources)")
     else:
         print("\n[Curriculum Learning] DISABLED")
 
@@ -704,27 +703,9 @@ def main():
             f"Scarica i file .nc di simulazione MIKE21 nella cartella 'data/'"
         )
 
-    # Cerca il modello più recente per fine-tuning
+    # Train from scratch (no resume)
     resume_from = None
-    trained_dir = Path(output_dir)
-    
-    if trained_dir.exists():
-        run_dirs = sorted([d for d in trained_dir.iterdir() if d.is_dir() and d.name.startswith("ppo_")])
-        
-        if run_dirs:
-            latest_run = run_dirs[-1]
-            
-            # Prova a trovare best_model, poi final_model
-            model_candidates = [
-                latest_run / "models" / "best" / "best_model.zip",
-                latest_run / "models" / "final_model.zip",
-            ]
-            
-            for model_path in model_candidates:
-                if model_path.exists():
-                    resume_from = str(model_path)
-                    print(f"Found latest model for fine-tuning: {resume_from}\n")
-                    break
+    print(f"Training from scratch on all 80% training set (V0+V1+V2+V3)\n")
     
     train(
         config_path=config_path,
