@@ -450,7 +450,7 @@ def train(
     print(f"\nCreating {n_envs*2} parallel environments...")
     print(f"  (2 chunks per file: spawn @1/4 e @3/4 della simulazione)")
 
-    timesteps = total_timesteps or training_config.get('total_timesteps', 5000000)
+    timesteps = total_timesteps or training_config.get('total_timesteps', 4000000)
 
     # Crea 2 environments per ogni "file" (rank):
     # - chunk_id=0: spawn @1/4 della simulazione

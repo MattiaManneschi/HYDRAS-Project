@@ -362,9 +362,10 @@ def run_inference(
     n_episodes: int = 5,
     deterministic: bool = True,
     sources_csv: str = "Coordinate_Sorgenti_FaseII.csv",
+    chunk_ids: List[int] = None,
 ):
     """
-    Esegue l'inferenza completa su 26 sorgenti held-out (SRC107-SRC132, 20% del totale 132) con 2 chunk per fonte.
+    Esegue l'inferenza completa su 26 sorgenti held-out (SRC107-SRC132, 20% del totale 132) con chunk multipli per fonte.
 
     Args:
         model_path:   Path al modello (.zip)
@@ -374,7 +375,11 @@ def run_inference(
         n_episodes:   Episodi per sorgente e chunk
         deterministic: Policy deterministica o stocastica
         sources_csv:  File CSV con coordinate delle sorgenti
+        chunk_ids:    Lista di chunk_id da testare (default [0, 1] = Q1/4 e Q1/2)
+                     0 = spawn @1/4, 1 = spawn @1/2, 2 = spawn @3/4
     """
+    if chunk_ids is None:
+        chunk_ids = [0, 1]  # Default: Q1/4 e Q1/2
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -393,24 +398,24 @@ def run_inference(
         sources_csv=sources_csv
     )
     
-    # INFERENCE: Mantieni TUTTE le versioni (V0, V1, V2, V3) per il 20% held-out
-    # Il modello non ha mai visto V1 durante training, quindi lo testa qui per generalizzazione
-    print(f"\nInference data: {len(data_manager._nc_files)} files (tutte le versioni)")
-    print(f"  Versioni: V0 + V1 + V2 + V3 (modello non ha visto V1 in training!)")
+    print(f"\nInference data: {len(data_manager._nc_files)} files (tutte le versioni V0+V1+V2+V3)")
     
-    # Usa le sorgenti escluse dal curriculum learning (SRC081-SRC132) per valutazione
-    # Il curriculum usa SRC001-SRC080 per training
-    # Prendi il 20% dei 132 file (~26 file): SRC107-SRC132
+    # Usa le sorgenti escluse dal training (SRC107-SRC132) per valutazione
     all_sources = data_manager.get_discovered_sources()
     inference_sources = [s for s in all_sources if int(s[3:]) > 106]  # SRC107-SRC132 (26 file, ~20%)
     
+    # Mappa chunk_id a label
+    chunk_labels = {0: "Q1/4", 1: "Q1/2", 2: "Q3/4"}
+    chunk_descriptions = ", ".join([f"{chunk_labels[cid]} (chunk_id={cid})" for cid in chunk_ids])
+    
     print(f"\n{'='*100}")
-    print(f"HYDRAS Inference — {len(inference_sources)} sorgenti (SRC107-SRC132, 20% held-out) × 2 chunk × {n_episodes} episodi")
-    print(f"  = {len(inference_sources)*2*n_episodes} episodi totali")
+    print(f"HYDRAS Inference — {len(inference_sources)} sorgenti × 4 scenari vento × {len(chunk_ids)} chunk × {n_episodes} episodi")
+    print(f"  = {len(inference_sources)*4*len(chunk_ids)*n_episodes} episodi totali")
+    print(f"Chunk testati: {chunk_descriptions}")
     print(f"Modello: {model_path}")
     print(f"Dati: {data_dir}")
-    print(f"Sorgenti training curriculum: SRC001-SRC106 (106 sorgenti, 80%)")
-    print(f"Sorgenti inference (held-out 20%): {len(inference_sources)}: {inference_sources}")
+    print(f"Sorgenti training: SRC001-SRC106 (80%)")
+    print(f"Sorgenti inference (20%): SRC107-SRC132 ({len(inference_sources)} sorgenti)")
     print(f"{'='*100}\n")
     
     # Carica dati vento e corrente (condivisi per tutte le sorgenti)
@@ -427,84 +432,133 @@ def run_inference(
     else:
         print(f"Current data: {current_data.n_timesteps} timesteps")
     
+    # Get dt from config
+    dt_seconds = config.get('environment', {}).get('dt', 10)
+    
     all_stats: List[ScenarioStats] = []
+    version_stats: Dict[str, List[float]] = {'V0': [], 'V1': [], 'V2': [], 'V3': []}
 
     for src_idx, source_id in enumerate(inference_sources, 1):
-        if src_idx % 10 == 0:
+        if src_idx % 5 == 0:
             print(f"\n[Progress: {src_idx}/{len(inference_sources)} sources]\n")
             
         source_dir = output_path / source_id
         source_dir.mkdir(parents=True, exist_ok=True)
         
-        for chunk_id in [0, 1]:  # chunk_id=0 → spawn @1/4, chunk_id=1 → spawn @3/4
-            chunk_label = "Q1/4" if chunk_id == 0 else "Q3/4"
-            scenario_label = f"{source_id}_{chunk_label}"
+        # Itera su tutte le 4 versioni
+        for version in ['V0', 'V1', 'V2', 'V3']:
+            # Filtra file per questa sorgente e versione
+            version_files = [f for f in data_manager._nc_files 
+                           if version in f.name and source_id in f.name]
+            if not version_files:
+                continue  # Sorgente non disponibile in questa versione
             
-            episode_results: List[EpisodeResult] = []
+            version_file = version_files[0]  # Una sola per versione+sorgente
+            version_dir = source_dir / version
+            version_dir.mkdir(parents=True, exist_ok=True)
+            
+            for chunk_id in chunk_ids:  # Itera su chunk_ids specificati
+                chunk_label = chunk_labels[chunk_id]
+                scenario_label = f"{version}_{source_id}_{chunk_label}"
+                
+                episode_results: List[EpisodeResult] = []
 
-            for ep in range(n_episodes):
-                # Carica campo fresco per questa sorgente ad ogni episodio
-                field, loaded_src_id = data_manager.get_random_field_for_source(source_id)
-                if field is None:
-                    print(f"\n  [SKIP] Could not load field for {source_id}")
-                    break
+                for ep in range(n_episodes):
+                    # Carica campo da file specifico
+                    try:
+                        field = data_manager._nc_loader.load(
+                            str(version_file),
+                            concentration_var="Concentration - component 1"
+                        )
+                        if field is None:
+                            print(f"\n  [SKIP] Could not load field for {version}_{source_id}")
+                            break
+                        
+                        # Imposta source_position dalle coordinate CSV
+                        coords = data_manager.get_source_coordinates(source_id)
+                        if coords:
+                            field.source_position = coords
+                        
+                    except Exception as e:
+                        print(f"\n  [SKIP] Error loading field for {version}_{source_id}: {e}")
+                        break
 
-                # Crea env config con chunk_id appropriato
-                env_cfg_ep = make_env_config(config, chunk_id=chunk_id)
+                    # Crea env config con chunk_id appropriato
+                    env_cfg_ep = make_env_config(config, chunk_id=chunk_id)
 
-                vec_env = build_env(env_cfg_ep, field, vec_norm_path,
-                                   use_masking=MASKABLE_PPO_AVAILABLE,
-                                   data_manager=data_manager,
-                                   wind_data=wind_data,
-                                   current_data=current_data)
+                    vec_env = build_env(env_cfg_ep, field, vec_norm_path,
+                                       use_masking=MASKABLE_PPO_AVAILABLE,
+                                       data_manager=data_manager,
+                                       wind_data=wind_data,
+                                       current_data=current_data)
 
-                result = run_episode(model, vec_env, deterministic=deterministic)
-                result.scenario = scenario_label
-                result.source_id = source_id
-                result.episode = ep
+                    result = run_episode(model, vec_env, deterministic=deterministic)
+                    result.scenario = scenario_label
+                    result.source_id = source_id
+                    result.episode = ep
 
-                # Aggiorna field con quello effettivamente usato dall'env
-                inner = get_inner_env(vec_env)
-                used_field = inner.field
+                    episode_results.append(result)
+                    vec_env.close()
 
-                episode_results.append(result)
-                vec_env.close()
+                    # Salva plot traiettoria
+                    plot_path = version_dir / f"ep{ep+1:02d}_chunk{chunk_id}_trajectory.png"
+                    save_trajectory_plot(result, field, plot_path, success_threshold)
+                    
+                    # Log episodio
+                    init_dist = f"{result.initial_distance:.0f}m"
+                    if result.success:
+                        time_mins = (result.steps * dt_seconds) / 60
+                        print(f"  {version}_{source_id}_{chunk_label} Ep{ep+1}: spawn_dist={init_dist:>5s} → SUCCESS in {result.steps:3d} steps ({time_mins:5.1f}m)")
+                    else:
+                        print(f"  {version}_{source_id}_{chunk_label} Ep{ep+1}: spawn_dist={init_dist:>5s} → {result.termination.upper()}")
 
-                # Salva plot traiettoria
-                plot_path = source_dir / f"ep{ep+1:02d}_chunk{chunk_id}_trajectory.png"
-                save_trajectory_plot(result, used_field, plot_path, success_threshold)
-
-            if episode_results:
-                # Statistiche sorgente+chunk
-                stats = compute_scenario_stats(episode_results, scenario_label, source_id)
-                all_stats.append(stats)
-                status = "success" if stats.success_rate >= 0.5 else "failed"
-                print(f"[{src_idx:3d}/{len(inference_sources)}] {source_id:6s} {chunk_label:5s}  {status}")
+                if episode_results:
+                    # Statistiche scenario
+                    stats = compute_scenario_stats(episode_results, scenario_label, source_id)
+                    all_stats.append(stats)
+                    
+                    # Accumula SR per versione
+                    version_stats[version].append(stats.success_rate)
 
     # Riepilogo globale
     if all_stats:
+        # Mappa chunk_id a label
+        chunk_labels_map = {0: "Q1/4", 1: "Q1/2", 2: "Q3/4"}
+        
+        # Aggregazione per chunk
+        chunk_stats = {}
+        for chunk_id in chunk_ids:
+            chunk_label = chunk_labels_map[chunk_id]
+            chunk_scenarios = [s for s in all_stats if chunk_label in s.scenario]
+            if chunk_scenarios:
+                chunk_sr = np.mean([s.success_rate for s in chunk_scenarios])
+                chunk_stats[chunk_label] = (chunk_sr, len(chunk_scenarios))
+        
+        print(f"\n{'='*80}")
+        print(f"RESULTS BY CHUNK (Time Instant)")
+        print(f"{'='*80}")
+        for chunk_label, (chunk_sr, n_scenarios) in chunk_stats.items():
+            print(f"{chunk_label}: {chunk_sr*100:6.1f}% ({n_scenarios} scenarios)")
+        
+        print(f"\n{'='*80}")
+        print(f"RESULTS BY WIND SCENARIO (across all chunks)")
+        print(f"{'='*80}")
+        
+        for version in ['V0', 'V1', 'V2', 'V3']:
+            sr_list = version_stats[version]
+            if sr_list:
+                version_sr = np.mean(sr_list)
+                print(f"{version}: {version_sr*100:6.1f}% ({len(sr_list)} scenarios)")
+            else:
+                print(f"{version}: (no data)")
+        
+        # Global SR
         global_sr = np.mean([s.success_rate for s in all_stats])
         
-        # Calcola media degli steps sui successi
-        all_successful_steps = []
-        all_initial_distances = []
-        for stat in all_stats:
-            if stat.mean_steps_success is not None:
-                all_successful_steps.append(stat.mean_steps_success)
-            all_initial_distances.append(stat.mean_initial_dist)
-        
-        dt_seconds = config.get('environment', {}).get('dt', 10)
-        
-        print(f"\n{'='*60}")
-        print(f"Final Success Rate: {global_sr*100:.1f}%")
-        if all_successful_steps:
-            avg_steps = np.mean(all_successful_steps)
-            avg_time_minutes = (avg_steps * dt_seconds) / 60
-            print(f"Mean Steps (success): {avg_steps:.0f} (~{avg_time_minutes:.1f} min)")
-        if all_initial_distances:
-            avg_initial_dist = np.mean(all_initial_distances)
-            print(f"Mean Initial Distance: {avg_initial_dist:.0f}m")
-        print(f"{'='*60}\n")
+        print(f"\n{'='*80}")
+        print(f"Global Success Rate: {global_sr*100:.1f}%")
+        print(f"Total scenarios: {len(all_stats)}")
+        print(f"{'='*80}\n")
 
     return all_stats
 
@@ -547,6 +601,9 @@ def main():
         n_episodes=5,  # 5 episodi per file
         deterministic=True,
         sources_csv="Coordinate_Sorgenti_FaseII.csv",  # CSV con coordinate delle sorgenti
+        chunk_ids=[0, 1],  # Test Q1/4 (chunk_id=0) and Q1/2 (chunk_id=1)
+                          # Change to [0, 2] to test Q1/4 and Q3/4
+                          # Change to [0] to test only Q1/4
     )
 
 
