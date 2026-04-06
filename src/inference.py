@@ -197,7 +197,8 @@ def build_env(env_cfg, field, vec_norm_path, use_masking,
               data_manager: Optional[DataManager] = None,
               wind_data = None,
               current_data = None,
-              wind_mapping: Optional[Dict[str, str]] = None):
+              wind_mapping: Optional[Dict[str, str]] = None,
+              current_mapping: Optional[Dict[str, str]] = None):
     """Costruisce e wrappa l'environment per l'inferenza.
     
     Args:
@@ -206,6 +207,8 @@ def build_env(env_cfg, field, vec_norm_path, use_masking,
         current_data: Dati di corrente (caricati da DataManager)
         wind_mapping: Mapping versione -> wind file (es. {'_V0': '...', '_V1': '...', ...})
                      Se passato, l'env caricherà il vento dinamicamente per versione.
+        current_mapping: Mapping versione -> current file (es. {'_V0': '...', '_V1': '...', ...})
+                        Se passato, l'env caricherà la corrente dinamicamente per versione.
     """
     raw_env = SourceSeekingEnv(
         config=env_cfg,
@@ -214,6 +217,7 @@ def build_env(env_cfg, field, vec_norm_path, use_masking,
         current_data=current_data,
         data_manager=data_manager,
         wind_mapping=wind_mapping,
+        current_mapping=current_mapping,
     )
 
     if use_masking and MASKABLE_PPO_AVAILABLE and ActionMasker is not None:
@@ -432,6 +436,16 @@ def run_inference(
     }
     print(f"Wind mapping (versions V0-V3): {len(wind_mapping)} file")
     
+    # Current mapping per caricamento dinamico corrente per versione
+    # (come nel training, per coerenza tra Conc_Vx e Current_Vx)
+    current_mapping = {
+        "_V0": "CL02_V0_SRC000_U_V_10mGrid.nc",
+        "_V1": "CL02_V1_SRC000_U_V_10mGrid.nc",
+        "_V2": "CL02_V2_SRC000_U_V_10mGrid.nc",
+        "_V3": "CL02_V3_SRC000_U_V_10mGrid.nc",
+    }
+    print(f"Current mapping (versions V0-V3): {len(current_mapping)} file")
+    
     # NON precarichiamo vento/corrente - l'environment li caricherà dinamicamente
     # durante reset() in base alla versione del file NC
     wind_data = None
@@ -499,7 +513,8 @@ def run_inference(
                                        data_manager=data_manager,
                                        wind_data=wind_data,
                                        current_data=current_data,
-                                       wind_mapping=wind_mapping)
+                                       wind_mapping=wind_mapping,
+                                       current_mapping=current_mapping)
 
                     result = run_episode(model, vec_env, deterministic=deterministic)
                     result.scenario = scenario_label

@@ -126,6 +126,7 @@ class SourceSeekingEnv(gym.Env):
         randomize_field: bool = False,
         data_manager: Optional['DataManager'] = None,
         wind_mapping: Optional[Dict[str, str]] = None,
+        current_mapping: Optional[Dict[str, str]] = None,
         **kwargs
     ):
         """
@@ -140,6 +141,7 @@ class SourceSeekingEnv(gym.Env):
             randomize_field: Se True, sceglie un NC random ad ogni reset
             data_manager: DataManager per caricamenti dinamici (opzionale)
             wind_mapping: Dict con mappatura run_id -> wind_filename (opzionale)
+            current_mapping: Dict con mappatura run_id -> current_filename (opzionale)
             **kwargs: Parametri aggiuntivi per la configurazione
         """
         super().__init__()
@@ -150,8 +152,9 @@ class SourceSeekingEnv(gym.Env):
         self.randomize_field = randomize_field
         self._current_run_id = None  # Salvato dopo reset() con concentrazione random
         
-        # Wind mapping per caricamenti dinamici
+        # Wind e current mapping per caricamenti dinamici
         self.wind_mapping = wind_mapping or {}
+        self.current_mapping = current_mapping or {}
         
         # Setup dominio
         self.domain = DomainConfig(
@@ -789,7 +792,11 @@ class SourceSeekingEnv(gym.Env):
             self.wind_data = self._data_manager.get_wind_data_for_run(
                 self._current_run_id, self.wind_mapping
             )
-            self.current_data = self._data_manager.get_current_data_for_run(self._current_run_id)
+        # Carica corrente dinamicamente se current_mapping è disponibile
+        if self._current_run_id and self._data_manager and self.current_mapping:
+            self.current_data = self._data_manager.get_current_data_for_run(
+                self._current_run_id, self.current_mapping
+            )
 
         # Determina spawn_start_frame: usa chunk_id
         # chunk_id=0: spawn a 1/4 della simulazione (inizio plume)

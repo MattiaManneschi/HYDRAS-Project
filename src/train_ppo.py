@@ -225,7 +225,8 @@ def create_env(
     randomize_field: bool = False,
     chunk_id: int = 0,
     data_manager: Optional[DataManager] = None,
-    wind_mapping: Optional[Dict[str, str]] = None
+    wind_mapping: Optional[Dict[str, str]] = None,
+    current_mapping: Optional[Dict[str, str]] = None
 ) -> gym.Env:
     """
     Crea un'istanza dell'ambiente con i wrapper appropriati.
@@ -234,6 +235,7 @@ def create_env(
         chunk_id: 0 = spawn @1/4, 2 = spawn @3/4 della simulazione
         data_manager: DataManager per caricamenti dinamici (opzionale)
         wind_mapping: Dict con mappatura run_id -> wind_filename (opzionale)
+        current_mapping: Dict con mappatura run_id -> current_filename (opzionale)
     """
     # Estrai configurazioni
     env_config = config.get('environment', {})
@@ -292,7 +294,8 @@ def create_env(
         data_dir=data_dir,
         randomize_field=randomize_field,
         data_manager=data_manager,
-        wind_mapping=wind_mapping
+        wind_mapping=wind_mapping,
+        current_mapping=current_mapping
     )
 
     # Wrap con Monitor per logging
@@ -324,7 +327,8 @@ def make_env_fn(
     randomize_field: bool = False,
     use_action_masking: bool = True,
     data_manager: Optional[DataManager] = None,
-    wind_mapping: Optional[Dict[str, str]] = None
+    wind_mapping: Optional[Dict[str, str]] = None,
+    current_mapping: Optional[Dict[str, str]] = None
 ) -> Callable[[], gym.Env]:
     """Factory function per la creazione di ambienti paralleli.
     
@@ -334,6 +338,7 @@ def make_env_fn(
         chunk_id: 0 = spawn @1/4, 2 = spawn @3/4 della simulazione
         data_manager: DataManager per caricamenti dinamici
         wind_mapping: Dict con mappatura run_id -> wind_filename
+        current_mapping: Dict con mappatura run_id -> current_filename
     """
     def _init() -> gym.Env:
         env = create_env(
@@ -345,7 +350,8 @@ def make_env_fn(
             randomize_field, 
             chunk_id=chunk_id,
             data_manager=data_manager,
-            wind_mapping=wind_mapping
+            wind_mapping=wind_mapping,
+            current_mapping=current_mapping
         )
         env.reset(seed=seed + rank)
         
@@ -456,6 +462,16 @@ def train(
     }
     print(f"  Wind mapping: V0/V1/V2/V3 dinamici (corregge BUG #2)")
     print(f"    - Concentrazione Vx + Wind Vx caricati coerentemente")
+    
+    # Current mapping per caricamento dinamico corrente per versione (BUG #8 FIX)
+    current_mapping = {
+        "_V0": "CL02_V0_SRC000_U_V_10mGrid.nc",
+        "_V1": "CL02_V1_SRC000_U_V_10mGrid.nc",
+        "_V2": "CL02_V2_SRC000_U_V_10mGrid.nc",
+        "_V3": "CL02_V3_SRC000_U_V_10mGrid.nc",
+    }
+    print(f"  Current mapping: V0/V1/V2/V3 dinamici (corregge BUG #8)")
+    print(f"    - Concentrazione Vx + Current Vx caricati coerentemente")
 
     # Crea ambienti vettorizzati
     print(f"\nCreating {n_envs*2} parallel environments...")
@@ -472,7 +488,8 @@ def train(
             config, concentration_field, wind_data, current_data, i, chunk_id, 
             seed, data_dir, randomize_field,
             data_manager=data_manager,
-            wind_mapping=wind_mapping
+            wind_mapping=wind_mapping,
+            current_mapping=current_mapping
         )
         for i in range(n_envs) for chunk_id in [0, 2]
     ]
@@ -495,7 +512,8 @@ def train(
             config, concentration_field, wind_data, current_data, 0, 0, 
             seed + 1000, data_dir, False,
             data_manager=data_manager,
-            wind_mapping=wind_mapping
+            wind_mapping=wind_mapping,
+            current_mapping=current_mapping
         )
     ])
     if config.get('environment', {}).get('normalize_obs', True):

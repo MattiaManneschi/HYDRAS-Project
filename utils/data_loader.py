@@ -1143,19 +1143,35 @@ class DataManager:
         # Default al wind_data già caricato
         return self._wind_data
     
-    def get_current_data_for_run(self, run_id: str) -> Optional[CurrentData]:
+    def get_current_data_for_run(self, run_id: str, current_mapping: Optional[Dict[str, str]] = None) -> Optional[CurrentData]:
         """
-        Ritorna i dati di corrente per uno specifico run_id.
-        In teoria dovremmo caricare corrente per versione diversa, ma tutti 
-        usano lo stesso file SRC000_U_V. Se necessario, questa logica
-        può essere estesa con un mapping simile a wind_mapping.
+        Ritorna i dati di corrente per uno specifico run_id, usando il current_mapping.
+        Il run_id contiene la versione (es. 'SRC000_V1'), che viene usata per
+        selezionare il file di corrente corretto dal mapping.
         
         Args:
             run_id: ID del run (es. 'SRC000_V1')
+            current_mapping: Dict con mapping versione -> current_filename (es. {'_V0': '...', ...})
         
         Returns:
-            CurrentData object
+            CurrentData object caricato dal file corretto
         """
+        if not current_mapping:
+            # Se current_mapping è vuoto, ritorna il default
+            return self._current_data
+        
+        # Estrai versione da run_id
+        version = 'V1'  # default
+        if '_' in run_id:
+            version = run_id.split('_')[1]  # es. 'SRC000_V1' -> 'V1'
+        
+        # Guarda nel mapping per trovare il file di corrente corretto
+        current_key = f"_{version}"  # es. '_V1'
+        if current_key in current_mapping:
+            current_filename = current_mapping[current_key]
+            return self.load_current_data(current_filename)
+        
+        # Default al current_data già caricato
         return self._current_data
     
     def get_current_data(self) -> Optional[CurrentData]:
