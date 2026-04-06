@@ -92,7 +92,7 @@ training:
     activation_fn: "tanh"
 
   # Training loop
-  total_timesteps: 4000000  # 4M totale su V0+V1+V2+V3 (80% training set)
+  total_timesteps: 6000000  # 6M totale su V0+V1+V2+V3 (80% training set)
   eval_freq: 10000
   n_eval_episodes: 10
   save_freq: 50000

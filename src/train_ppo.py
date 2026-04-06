@@ -462,7 +462,7 @@ def train(
     print(f"  (2 chunks per file: spawn @1/4 e @3/4 della simulazione)")
     print(f"  Chunk confg: [0, 2] = Q1/4 + Q3/4 (skippa Q1/2 per problemi di generalizzazione)")
 
-    timesteps = total_timesteps or training_config.get('total_timesteps', 4000000)
+    timesteps = total_timesteps or training_config.get('total_timesteps', 6000000)
 
     # Crea 2 environments per ogni "file" (rank):
     # - chunk_id=0: spawn @1/4 della simulazione
