@@ -231,7 +231,7 @@ def create_env(
     Crea un'istanza dell'ambiente con i wrapper appropriati.
     
     Args:
-        chunk_id: 0 = spawn @1/4, 1 = spawn @3/4 della simulazione
+        chunk_id: 0 = spawn @1/4, 1 = spawn @1/2 della simulazione
         data_manager: DataManager per caricamenti dinamici (opzionale)
         wind_mapping: Dict con mappatura run_id -> wind_filename (opzionale)
     """
@@ -331,7 +331,7 @@ def make_env_fn(
     Args:
         wind_data: Dati di vento (condivisi tra ambienti)
         current_data: Dati di corrente (condivisi tra ambienti)
-        chunk_id: 0 = spawn @1/4, 1 = spawn @3/4 della simulazione
+        chunk_id: 0 = spawn @1/4, 1 = spawn @1/2 della simulazione
         data_manager: DataManager per caricamenti dinamici
         wind_mapping: Dict con mappatura run_id -> wind_filename
     """
@@ -448,13 +448,13 @@ def train(
 
     # Crea ambienti vettorizzati
     print(f"\nCreating {n_envs*2} parallel environments...")
-    print(f"  (2 chunks per file: spawn @1/4 e @3/4 della simulazione)")
+    print(f"  (2 chunks per file: spawn @1/4 e @1/2 della simulazione)")
 
     timesteps = total_timesteps or training_config.get('total_timesteps', 4000000)
 
     # Crea 2 environments per ogni "file" (rank):
     # - chunk_id=0: spawn @1/4 della simulazione
-    # - chunk_id=1: spawn @3/4 della simulazione
+    # - chunk_id=1: spawn @1/2 della simulazione
     env_fns = [
         make_env_fn(
             config, concentration_field, wind_data, current_data, i, chunk_id, 
