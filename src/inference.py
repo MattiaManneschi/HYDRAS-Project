@@ -376,7 +376,7 @@ def run_inference(
         deterministic: Policy deterministica o stocastica
         sources_csv:  File CSV con coordinate delle sorgenti
         chunk_ids:    Lista di chunk_id da testare (default [0, 1] = Q1/4 e Q1/2)
-                     0 = spawn @1/4, 1 = spawn @1/2, 2 = spawn @3/4
+                     0 = spawn @1/4, 1 = spawn @1/2
     """
     if chunk_ids is None:
         chunk_ids = [0, 1]  # Default: Q1/4 e Q1/2
@@ -405,7 +405,7 @@ def run_inference(
     inference_sources = [s for s in all_sources if int(s[3:]) > 106]  # SRC107-SRC132 (26 file, ~20%)
     
     # Mappa chunk_id a label
-    chunk_labels = {0: "Q1/4", 1: "Q1/2", 2: "Q3/4"}
+    chunk_labels = {0: "Q1/4", 1: "Q1/2"}
     chunk_descriptions = ", ".join([f"{chunk_labels[cid]} (chunk_id={cid})" for cid in chunk_ids])
     
     print(f"\n{'='*100}")
@@ -523,7 +523,7 @@ def run_inference(
     # Riepilogo globale
     if all_stats:
         # Mappa chunk_id a label
-        chunk_labels_map = {0: "Q1/4", 1: "Q1/2", 2: "Q3/4"}
+        chunk_labels_map = {0: "Q1/4", 1: "Q1/2"}
         
         # Aggregazione per chunk
         chunk_stats = {}
@@ -598,12 +598,10 @@ def main():
         config_path=CONFIG_PATH,
         data_dir=DATA_DIR,
         output_dir=OUTPUT_DIR,
-        n_episodes=5,  # 5 episodi per file
+        n_episodes=5,
         deterministic=True,
-        sources_csv="Coordinate_Sorgenti_FaseII.csv",  # CSV con coordinate delle sorgenti
-        chunk_ids=[0, 1],  # Test Q1/4 (chunk_id=0) and Q1/2 (chunk_id=1)
-                          # Change to [0, 2] to test Q1/4 and Q3/4
-                          # Change to [0] to test only Q1/4
+        sources_csv="Coordinate_Sorgenti_FaseII.csv",
+        chunk_ids=[0, 1],  # Q1/4 (chunk_id=0) and Q1/2 (chunk_id=1)
     )
 
 
