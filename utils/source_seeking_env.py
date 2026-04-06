@@ -58,7 +58,7 @@ class SourceSeekingConfig:
     spawn_max_distance: float = 1500.0  # m distanza massima dalla sorgente
     spawn_start_frame: int = 352  # frame di partenza (25% della simulazione, Chunk 0) - sovrascitto da chunk_id
     spawn_conc_threshold: float = 0.5  # soglia minima concentrazione per spawn
-    chunk_id: int = 0  # 0 = spawn @1/4, 1 = spawn @3/4 della simulazione (data augmentation)
+    chunk_id: int = 0  # 0 = spawn @1/4, 1 = spawn @1/2, 2 = spawn @3/4 della simulazione (data augmentation)
 
     # Reward
     source_distance_threshold: float = 50  # m (intorno di successo)
@@ -323,10 +323,28 @@ class SourceSeekingEnv(gym.Env):
         valid_x = x_coords[distance_mask]
         valid_y = y_coords[distance_mask]
 
-        # Se non ci sono punti nei vincoli di distanza, rilassa il vincolo
+        # Se non ci sono punti nei vincoli ristretti, rilassa solo max_distance ma mantieni min_distance
         if len(valid_x) == 0:
-            valid_x = x_coords
-            valid_y = y_coords
+            # Rilassa solo il limite massimo di distanza, ma mantieni il minimo
+            relaxed_mask = distances >= self.config.spawn_min_distance
+            valid_x = x_coords[relaxed_mask]
+            valid_y = y_coords[relaxed_mask]
+        
+        # Se ancora non ci sono punti, rilassa ulteriormente (ma mantieni almeno 50% min_distance)
+        if len(valid_x) == 0:
+            min_dist_relaxed = self.config.spawn_min_distance * 0.5
+            relaxed_mask = distances >= min_dist_relaxed
+            valid_x = x_coords[relaxed_mask]
+            valid_y = y_coords[relaxed_mask]
+        
+        # Se ancora non ci sono punti validi, fallback finale (spawn casuale mai più vicino di 100m)
+        if len(valid_x) == 0:
+            angle = self.np_random.uniform(0, 2*np.pi)
+            distance = self.np_random.uniform(100, 500)  # Almeno 100m
+            return (
+                self.source_position[0] + distance * np.cos(angle),
+                self.source_position[1] + distance * np.sin(angle)
+            )
 
         # Filtra punti troppo vicini alla terra
         land_safe_mask = np.array([
@@ -338,12 +356,14 @@ class SourceSeekingEnv(gym.Env):
             valid_x = valid_x[land_safe_mask]
             valid_y = valid_y[land_safe_mask]
 
-        # Fallback finale
+        # Fallback finale: se dopo filtro terra non ci sono punti
         if len(valid_x) == 0:
-            print(f"WARNING: No valid spawn points after land check, spawning near source.")
+            print(f"WARNING: No valid spawn points after land check, using random spawn at 150-500m")
+            angle = self.np_random.uniform(0, 2*np.pi)
+            distance = self.np_random.uniform(150, 500)
             return (
-                self.source_position[0] + self.np_random.uniform(-100, 100),
-                self.source_position[1] + self.np_random.uniform(-100, 100)
+                self.source_position[0] + distance * np.cos(angle),
+                self.source_position[1] + distance * np.sin(angle)
             )
 
         # Scegli una cella random tra quelle valide
@@ -765,14 +785,17 @@ class SourceSeekingEnv(gym.Env):
                     f"Controlla DataManager.SOURCE_CONFIGS e nome file NC."
                 )
 
-        # Determina spawn_start_frame: usa chunk_id (0 = 1/4, 1 = 3/4)
+        # Determina spawn_start_frame: usa chunk_id (0 = 1/4, 1 = 1/2, 2 = 3/4)
         spawn_frame = self.config.spawn_start_frame
-        if self.field.n_timesteps > 1 and self.config.chunk_id in [0, 1]:
+        if self.field.n_timesteps > 1 and self.config.chunk_id in [0, 1, 2]:
             # chunk_id=0: spawn a 1/4 della simulazione
-            # chunk_id=1: spawn a 3/4 della simulazione
+            # chunk_id=1: spawn a 1/2 della simulazione
+            # chunk_id=2: spawn a 3/4 della simulazione
             if self.config.chunk_id == 0:
                 spawn_frame = self.field.n_timesteps // 4
-            else:  # chunk_id == 1
+            elif self.config.chunk_id == 1:
+                spawn_frame = self.field.n_timesteps // 2
+            else:  # chunk_id == 2
                 spawn_frame = (self.field.n_timesteps * 3) // 4
 
         # Imposta timestep al frame calcolato
@@ -822,8 +845,15 @@ class SourceSeekingEnv(gym.Env):
 
         # Sincronizza vento e corrente al timestep di start usando tempo reale
         if self.field.n_timesteps > 1:
-            # Calcola tempo reale in minuti: timestep * dt (assumendo dt=1 min per concentrazione)
-            time_minutes = self._start_time_idx * 1.0  # dt concentrazione = 1 min
+            # Calcola dt della concentrazione dai time_coords del file NetCDF (non hardcodare!)
+            if (hasattr(self.field, 'time_coords') and self.field.time_coords is not None 
+                and len(self.field.time_coords) > 1):
+                dt_conc = self.field.time_coords[1] - self.field.time_coords[0]  # in minuti
+            else:
+                dt_conc = 2.0  # Default: 2 minuti dal file NetCDF
+            
+            # Calcola tempo reale in minuti: timestep * dt
+            time_minutes = self._start_time_idx * dt_conc
             
             if self.wind_data is not None:
                 self.wind_data.set_time_from_minutes(time_minutes)
@@ -884,8 +914,15 @@ class SourceSeekingEnv(gym.Env):
             self.field.set_time(int(time_idx))
             
             # Sincronizza vento e corrente al stesso timestep usando tempo reale
-            # Tempo reale in minuti = (start_time_idx + time_offset_minutes) * 1.0 (dt conc = 1 min)
-            time_minutes = time_idx * 1.0  # dt concentrazione = 1 min (keep float for wind/current sync)
+            # Calcola dt della concentrazione dai time_coords (non hardcodare!)
+            if (hasattr(self.field, 'time_coords') and self.field.time_coords is not None 
+                and len(self.field.time_coords) > 1):
+                dt_conc = self.field.time_coords[1] - self.field.time_coords[0]  # in minuti
+            else:
+                dt_conc = 2.0  # Default: 2 minuti dal file NetCDF
+            
+            # Tempo reale in minuti = time_idx * dt_conc (keep float for wind/current sync)
+            time_minutes = time_idx * dt_conc
             
             if self.wind_data is not None:
                 self.wind_data.set_time_from_minutes(time_minutes)
