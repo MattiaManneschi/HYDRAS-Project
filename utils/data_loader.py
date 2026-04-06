@@ -51,7 +51,8 @@ class ConcentrationField:
         y_coords: np.ndarray,
         time_coords: Optional[np.ndarray] = None,
         source_position: Optional[Tuple[float, float]] = None,
-        land_mask: Optional[np.ndarray] = None
+        land_mask: Optional[np.ndarray] = None,
+        run_id: Optional[str] = None
     ):
         """
         Args:
@@ -61,6 +62,7 @@ class ConcentrationField:
             time_coords: Coordinate temporali (opzionale)
             source_position: Posizione della sorgente (x, y)
             land_mask: Maschera booleana [y, x] — True dove c'è terra
+            run_id: Run ID con versione (es. 'SRC000_V1') - usato per caricamento dinamico vento
         """
         self.data = data
         self.x_coords = x_coords
@@ -68,6 +70,7 @@ class ConcentrationField:
         self.time_coords = time_coords
         self.source_position = source_position
         self.land_mask = land_mask  # None = nessuna terra (sintetico)
+        self.run_id = run_id  # Opzionale, usato durante inference per wind_mapping
         
         self._is_time_varying = data.ndim == 3
         self._current_time_idx = 0
@@ -934,7 +937,7 @@ class DataManager:
             source_id: ID della sorgente (es. 'SRC000', 'SRC001', ..., 'SRC131')
 
         Returns:
-            Tuple di (ConcentrationField, source_id)
+            Tuple di (ConcentrationField, run_id) dove run_id include versione (es. 'SRC000_V1')
         """
         if self._preloaded_fields:
             source_keys = [k for k in self._preloaded_fields.keys() if source_id in k]
@@ -946,7 +949,10 @@ class DataManager:
                 if coords and not hasattr(field, '_updated_from_csv'):
                     field.source_position = coords
                     field._updated_from_csv = True
-                return field, source_id
+                # Ritorna run_id con versione estratta da key
+                version = self._extract_version(key)
+                run_id = f"{source_id}_{version}"
+                return field, run_id
 
         # Filtra per sorgente E per concentrazione
         source_files = [f for f in self._nc_files if source_id in f.name and 'Conc' in f.name]
@@ -967,7 +973,10 @@ class DataManager:
         if coords:
             field.source_position = coords
         
-        return field, source_id
+        # Ritorna run_id con versione estratta dal filename
+        version = self._extract_version(nc_file.stem)
+        run_id = f"{source_id}_{version}"
+        return field, run_id
 
     def _extract_source_id(self, filename_or_stem: str) -> str:
         """
@@ -985,6 +994,23 @@ class DataManager:
             if part.startswith('SRC') and part[3:].isdigit():
                 return part
         return 'UNKNOWN'
+    
+    def _extract_version(self, filename_or_stem: str) -> str:
+        """
+        Estrae il numero di versione dal nome file o stem.
+        Es. 'CL02_V1_SRC000_Conc_10mGrid' -> 'V1'
+        
+        Args:
+            filename_or_stem: Nome file o stem
+        
+        Returns:
+            Versione (es. 'V0', 'V1', 'V2', 'V3')
+        """
+        parts = filename_or_stem.split('_')
+        for part in parts:
+            if part in ['V0', 'V1', 'V2', 'V3']:
+                return part
+        return 'V1'  # Default a V1 per compatibilità
     
     def get_concentration_field(
         self,
@@ -1085,6 +1111,52 @@ class DataManager:
             WindData object o None se non caricato
         """
         return self._wind_data
+    
+    def get_wind_data_for_run(self, run_id: str, wind_mapping: Dict[str, str]) -> Optional[WindData]:
+        """
+        Ritorna i dati di vento per uno specifico run_id, usando il wind_mapping.
+        Il run_id contiene la versione (es. 'SRC000_V1'), che viene usata per
+        selezionare il file di vento corretto dal mapping.
+        
+        Args:
+            run_id: ID del run (es. 'SRC000_V1')
+            wind_mapping: Dict con mapping versione -> wind_filename (es. {'_V0': 'CI_WIND_faseII_V0.txt', ...})
+        
+        Returns:
+            WindData object caricato dal file corretto
+        """
+        if not wind_mapping:
+            # Se wind_mapping è vuoto, ritorna il default
+            return self._wind_data
+        
+        # Estrai versione da run_id
+        version = 'V1'  # default
+        if '_' in run_id:
+            version = run_id.split('_')[1]  # es. 'SRC000_V1' -> 'V1'
+        
+        # Guarda nel mapping per trovare il file di vento corretto
+        wind_key = f"_{version}"  # es. '_V1'
+        if wind_key in wind_mapping:
+            wind_filename = wind_mapping[wind_key]
+            return self.load_wind_data(wind_filename)
+        
+        # Default al wind_data già caricato
+        return self._wind_data
+    
+    def get_current_data_for_run(self, run_id: str) -> Optional[CurrentData]:
+        """
+        Ritorna i dati di corrente per uno specifico run_id.
+        In teoria dovremmo caricare corrente per versione diversa, ma tutti 
+        usano lo stesso file SRC000_U_V. Se necessario, questa logica
+        può essere estesa con un mapping simile a wind_mapping.
+        
+        Args:
+            run_id: ID del run (es. 'SRC000_V1')
+        
+        Returns:
+            CurrentData object
+        """
+        return self._current_data
     
     def get_current_data(self) -> Optional[CurrentData]:
         """

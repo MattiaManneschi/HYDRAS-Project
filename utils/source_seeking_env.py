@@ -759,22 +759,16 @@ class SourceSeekingEnv(gym.Env):
         """
         super().reset(seed=seed)
 
-        # Curriculum: scegli sorgente random tra quelle consentite, poi scenario random
+        # Curriculum/Inference: scegli sorgente random (training) o usa field fornito (inference)
         if self.randomize_field and self._data_manager:
+            # TRAINING MODE: randomizza sorgente e carica field random
             # Fallback per allowed_sources vuota (es. al startup, prima che CurriculumCallback imposti i limiti)
             available_sources = self.allowed_sources if self.allowed_sources else [f"SRC{i:03d}" for i in range(1, 81)]
             
             source = self.np_random.choice(available_sources)
             self.field, self._current_run_id = self._data_manager.get_random_field_for_source(source)
-            # Estrai source_id dal run_id (es. 'SRC042_chunk0' -> 'SRC042')
+            # Estrai source_id dal run_id (es. 'SRC042_V1' -> 'SRC042')
             self.source_id = self._current_run_id.split('_')[0]
-            
-            # Carica i dati di vento e corrente corretti per questo run_id
-            if self._data_manager and self.wind_mapping:
-                self.wind_data = self._data_manager.get_wind_data_for_run(
-                    self._current_run_id, self.wind_mapping
-                )
-                self.current_data = self._data_manager.get_current_data_for_run(self._current_run_id)
             
             # Aggiorna posizione sorgente (sempre da coordinate hardcodate)
             if self.field.source_position is not None:
@@ -784,19 +778,31 @@ class SourceSeekingEnv(gym.Env):
                     f"Campo per {source} non ha source_position. "
                     f"Controlla DataManager.SOURCE_CONFIGS e nome file NC."
                 )
+        elif self.field and hasattr(self.field, 'run_id') and self.field.run_id:
+            # INFERENCE MODE: il field è già fornito con run_id settato
+            self._current_run_id = self.field.run_id
+            self.source_id = self._current_run_id.split('_')[0] if '_' in self._current_run_id else self._current_run_id
+        
+        # Carica dati di vento e corrente corretti per questo run_id
+        # (fatto qui FUORI dal blocco randomize_field per funzionare sia in training che inference)
+        if self._current_run_id and self._data_manager and self.wind_mapping:
+            self.wind_data = self._data_manager.get_wind_data_for_run(
+                self._current_run_id, self.wind_mapping
+            )
+            self.current_data = self._data_manager.get_current_data_for_run(self._current_run_id)
 
-        # Determina spawn_start_frame: usa chunk_id (0 = 1/4, 1 = 1/2, 2 = 3/4)
+        # Determina spawn_start_frame: usa chunk_id
+        # chunk_id=0: spawn a 1/4 della simulazione (inizio plume)
+        # chunk_id=2: spawn a 3/4 della simulazione (plume tardi/disperso)
+        # (chunk_id=1 @1/2 non è usato nel training standard per problemi di generalizzazione)
         spawn_frame = self.config.spawn_start_frame
         if self.field.n_timesteps > 1 and self.config.chunk_id in [0, 1, 2]:
-            # chunk_id=0: spawn a 1/4 della simulazione
-            # chunk_id=1: spawn a 1/2 della simulazione
-            # chunk_id=2: spawn a 3/4 della simulazione
             if self.config.chunk_id == 0:
-                spawn_frame = self.field.n_timesteps // 4
+                spawn_frame = self.field.n_timesteps // 4      # Q1/4
             elif self.config.chunk_id == 1:
-                spawn_frame = self.field.n_timesteps // 2
+                spawn_frame = self.field.n_timesteps // 2      # Q1/2
             else:  # chunk_id == 2
-                spawn_frame = (self.field.n_timesteps * 3) // 4
+                spawn_frame = (self.field.n_timesteps * 3) // 4  # Q3/4
 
         # Imposta timestep al frame calcolato
         if self.field.n_timesteps > 1:

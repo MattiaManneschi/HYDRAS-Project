@@ -196,13 +196,16 @@ def mask_fn(env) -> np.ndarray:
 def build_env(env_cfg, field, vec_norm_path, use_masking,
               data_manager: Optional[DataManager] = None,
               wind_data = None,
-              current_data = None):
+              current_data = None,
+              wind_mapping: Optional[Dict[str, str]] = None):
     """Costruisce e wrappa l'environment per l'inferenza.
     
     Args:
         data_manager: DataManager per accesso ai dati
         wind_data: Dati di vento (caricati da DataManager)
         current_data: Dati di corrente (caricati da DataManager)
+        wind_mapping: Mapping versione -> wind file (es. {'_V0': '...', '_V1': '...', ...})
+                     Se passato, l'env caricherà il vento dinamicamente per versione.
     """
     raw_env = SourceSeekingEnv(
         config=env_cfg,
@@ -210,6 +213,7 @@ def build_env(env_cfg, field, vec_norm_path, use_masking,
         wind_data=wind_data,
         current_data=current_data,
         data_manager=data_manager,
+        wind_mapping=wind_mapping,
     )
 
     if use_masking and MASKABLE_PPO_AVAILABLE and ActionMasker is not None:
@@ -375,11 +379,11 @@ def run_inference(
         n_episodes:   Episodi per sorgente e chunk
         deterministic: Policy deterministica o stocastica
         sources_csv:  File CSV con coordinate delle sorgenti
-        chunk_ids:    Lista di chunk_id da testare (default [0, 1] = Q1/4 e Q1/2)
-                     0 = spawn @1/4, 1 = spawn @1/2
+        chunk_ids:    Lista di chunk_id da testare (default [0, 2] = Q1/4 e Q3/4)
+                     0 = spawn @1/4, 2 = spawn @3/4
     """
     if chunk_ids is None:
-        chunk_ids = [0, 1]  # Default: Q1/4 e Q1/2
+        chunk_ids = [0, 2]  # Default: Q1/4 e Q3/4 (skippa Q1/2 che generalizza male)
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -405,7 +409,7 @@ def run_inference(
     inference_sources = [s for s in all_sources if int(s[3:]) > 106]  # SRC107-SRC132 (26 file, ~20%)
     
     # Mappa chunk_id a label
-    chunk_labels = {0: "Q1/4", 1: "Q1/2"}
+    chunk_labels = {0: "Q1/4", 1: "Q1/2", 2: "Q3/4"}
     chunk_descriptions = ", ".join([f"{chunk_labels[cid]} (chunk_id={cid})" for cid in chunk_ids])
     
     print(f"\n{'='*100}")
@@ -418,19 +422,20 @@ def run_inference(
     print(f"Sorgenti inference (20%): SRC107-SRC132 ({len(inference_sources)} sorgenti)")
     print(f"{'='*100}\n")
     
-    # Carica dati vento e corrente (condivisi per tutte le sorgenti)
-    wind_data = data_manager.get_wind_data()
-    current_data = data_manager.get_current_data()
+    # Wind mapping per caricamento dinamico vento per versione
+    # (come nel training, per coerenza tra Conc_Vx e Wind_Vx)
+    wind_mapping = {
+        "_V0": "CI_WIND_faseII_V0.txt",
+        "_V1": "CI_WIND_faseII_V1.txt",
+        "_V2": "CI_WIND_faseII_V2.txt",
+        "_V3": "CI_WIND_faseII_V3.txt",
+    }
+    print(f"Wind mapping (versions V0-V3): {len(wind_mapping)} file")
     
-    if wind_data is None:
-        print("WARNING: Wind data not loaded")
-    else:
-        print(f"Wind data: {len(wind_data.speed)} timesteps")
-    
-    if current_data is None:
-        print("WARNING: Current data not loaded")
-    else:
-        print(f"Current data: {current_data.n_timesteps} timesteps")
+    # NON precarichiamo vento/corrente - l'environment li caricherà dinamicamente
+    # durante reset() in base alla versione del file NC
+    wind_data = None
+    current_data = None
     
     # Get dt from config
     dt_seconds = config.get('environment', {}).get('dt', 10)
@@ -479,6 +484,9 @@ def run_inference(
                         if coords:
                             field.source_position = coords
                         
+                        # Imposta run_id con versione per caricamento dinamico vento durante reset()
+                        field.run_id = f"{source_id}_{version}"
+                        
                     except Exception as e:
                         print(f"\n  [SKIP] Error loading field for {version}_{source_id}: {e}")
                         break
@@ -490,7 +498,8 @@ def run_inference(
                                        use_masking=MASKABLE_PPO_AVAILABLE,
                                        data_manager=data_manager,
                                        wind_data=wind_data,
-                                       current_data=current_data)
+                                       current_data=current_data,
+                                       wind_mapping=wind_mapping)
 
                     result = run_episode(model, vec_env, deterministic=deterministic)
                     result.scenario = scenario_label
@@ -523,7 +532,7 @@ def run_inference(
     # Riepilogo globale
     if all_stats:
         # Mappa chunk_id a label
-        chunk_labels_map = {0: "Q1/4", 1: "Q1/2"}
+        chunk_labels_map = {0: "Q1/4", 1: "Q1/2", 2: "Q3/4"}
         
         # Aggregazione per chunk
         chunk_stats = {}
@@ -601,7 +610,7 @@ def main():
         n_episodes=5,
         deterministic=True,
         sources_csv="Coordinate_Sorgenti_FaseII.csv",
-        chunk_ids=[0, 1],  # Q1/4 (chunk_id=0) and Q1/2 (chunk_id=1)
+        chunk_ids=[0, 2],  # Q1/4 (chunk_id=0) and Q3/4 (chunk_id=2) - skippa Q1/2
     )
 
 

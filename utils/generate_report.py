@@ -92,10 +92,10 @@ class HydrasReportGenerator:
             return yaml.safe_load(f)
 
     def _parse_logs(self):
-        """Parsa il file logs.txt dal nuovo formato evaluations_v3 (132 sorgenti)."""
+        """Parsa il file logs.txt dal nuovo formato evaluations_v4 (132 sorgenti)."""
         import re
         
-        logs_path = self.project_root.parent / "evaluations_v3/logs.txt"
+        logs_path = self.project_root.parent / "evaluations_v4/logs.txt"
         
         if not logs_path.exists():
             return {}, 0, 0, 0
@@ -403,11 +403,11 @@ class HydrasReportGenerator:
         # Tabella con 3 success cases e relativi plot
         success_cases = [
             ("SRC110", "chunk0", "Q1/4", "58 step (~9.7 min)", "512m"),
-            ("SRC116", "chunk1", "Q3/4", "82 step (~13.7 min)", "448m"),
-            ("SRC119", "chunk1", "Q3/4", "91 step (~15.2 min)", "520m")
+            ("SRC116", "chunk2", "Q3/4", "82 step (~13.7 min)", "448m"),  # chunk2 (Q3/4), not chunk1
+            ("SRC119", "chunk2", "Q3/4", "91 step (~15.2 min)", "520m")   # chunk2 (Q3/4), not chunk1
         ]
         
-        evals_dir = self.project_root.parent / "evaluations_v3"
+        evals_dir = self.project_root.parent / "evaluations_v4"
         for src, chunk, q, steps, dist in success_cases:
             case_text = f"""<b>{src} - {q}:</b> Success in {steps}"""
             case_elements = [Paragraph(case_text, self.styles['Normal'])]

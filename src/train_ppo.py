@@ -135,7 +135,7 @@ class CurriculumCallback(BaseCallback):
         print(f"[CurriculumCallback] Initialized with {len(self.phases)} phases")
         for i, phase in enumerate(self.phases):
             num_sources = phase['num_sources']
-            estimated_files_per_source = 3  # V0, V2, V3
+            estimated_files_per_source = 4  # V0, V1, V2, V3 (4 versioni!)
             estimated_files = num_sources * estimated_files_per_source
             print(f"  Phase {i}: [{phase['start']:,} - {phase['end']:,} steps] "
                   f"-> {num_sources} sources × {estimated_files_per_source} versions ≈ {estimated_files} files")
@@ -231,7 +231,7 @@ def create_env(
     Crea un'istanza dell'ambiente con i wrapper appropriati.
     
     Args:
-        chunk_id: 0 = spawn @1/4, 1 = spawn @1/2 della simulazione
+        chunk_id: 0 = spawn @1/4, 2 = spawn @3/4 della simulazione
         data_manager: DataManager per caricamenti dinamici (opzionale)
         wind_mapping: Dict con mappatura run_id -> wind_filename (opzionale)
     """
@@ -263,7 +263,7 @@ def create_env(
         land_proximity_penalty_max=env_config.get('reward', {}).get('land_proximity_penalty_max', -5.0),
         n_discrete_actions=agent_config.get('n_discrete_actions', 8),
         # Spawn constraints
-        spawn_min_distance=env_config.get('spawn', {}).get('min_distance', 200),
+        spawn_min_distance=env_config.get('spawn', {}).get('min_distance', 500),
         spawn_max_distance=env_config.get('spawn', {}).get('max_distance', 1500),
         spawn_min_land_distance=env_config.get('spawn', {}).get('min_land_distance', 50.0),
         spawn_start_frame=env_config.get('spawn', {}).get('start_frame', 1440),
@@ -331,7 +331,7 @@ def make_env_fn(
     Args:
         wind_data: Dati di vento (condivisi tra ambienti)
         current_data: Dati di corrente (condivisi tra ambienti)
-        chunk_id: 0 = spawn @1/4, 1 = spawn @1/2 della simulazione
+        chunk_id: 0 = spawn @1/4, 2 = spawn @3/4 della simulazione
         data_manager: DataManager per caricamenti dinamici
         wind_mapping: Dict con mappatura run_id -> wind_filename
     """
@@ -420,10 +420,12 @@ def train(
     
     # Per il training randomizzato, carichiamo una sample di wind e current data
     # (in generale, ogni episodio potrebbe usare una coppia diversa)
+    # Nota: I file specifici qui sono solo default; vengono dinamicamente caricati per versione
+    # tramite wind_mapping (BUG #2 FIX)
     data_manager = DataManager(
         data_dir=data_dir,
         preload_all=False,
-        wind_filename="CI_WIND_faseII_V1.txt",  # Nuovo file V1 per 132 sorgenti
+        wind_filename="CI_WIND_faseII_V1.txt",  # Default (overridden da wind_mapping per ogni versione)
         current_filename="CL02_V1_SRC000_U_V_10mGrid.nc"  # Unico file U_V per tutte le sorgenti
     )
     
@@ -443,18 +445,28 @@ def train(
     if wind_data is None or current_data is None:
         print("\nWARNING: Wind or current data not loaded. Will run without them.")
     
-    # Wind mapping initialization (empty - legacy support removed)
-    wind_mapping = {}
+    # Wind mapping: mappa versione -> wind_filename per caricamento dinamico
+    # Questo permette di usare il vento corretto per ogni versione durante il training
+    # (BUG #2 FIX: precedentemente il training usava sempre V1)
+    wind_mapping = {
+        "_V0": "CI_WIND_faseII_V0.txt",
+        "_V1": "CI_WIND_faseII_V1.txt",
+        "_V2": "CI_WIND_faseII_V2.txt",
+        "_V3": "CI_WIND_faseII_V3.txt",
+    }
+    print(f"  Wind mapping: V0/V1/V2/V3 dinamici (corregge BUG #2)")
+    print(f"    - Concentrazione Vx + Wind Vx caricati coerentemente")
 
     # Crea ambienti vettorizzati
     print(f"\nCreating {n_envs*2} parallel environments...")
-    print(f"  (2 chunks per file: spawn @1/4 e @1/2 della simulazione)")
+    print(f"  (2 chunks per file: spawn @1/4 e @3/4 della simulazione)")
+    print(f"  Chunk confg: [0, 2] = Q1/4 + Q3/4 (skippa Q1/2 per problemi di generalizzazione)")
 
     timesteps = total_timesteps or training_config.get('total_timesteps', 4000000)
 
     # Crea 2 environments per ogni "file" (rank):
     # - chunk_id=0: spawn @1/4 della simulazione
-    # - chunk_id=1: spawn @1/2 della simulazione
+    # - chunk_id=2: spawn @3/4 della simulazione (skippa Q1/2 che generalizza male)
     env_fns = [
         make_env_fn(
             config, concentration_field, wind_data, current_data, i, chunk_id, 
@@ -462,7 +474,7 @@ def train(
             data_manager=data_manager,
             wind_mapping=wind_mapping
         )
-        for i in range(n_envs) for chunk_id in [0, 1]
+        for i in range(n_envs) for chunk_id in [0, 2]
     ]
 
     # DummyVecEnv sempre (necessario per accesso diretto agli env)
@@ -568,13 +580,6 @@ def train(
             verbose=1
         )
         callbacks.append(curriculum_callback)
-        print("\n[Curriculum Learning] ENABLED")
-        print(f"  Total training files available: {len(data_manager._nc_files)} (V0+V1+V2+V3 all versions)")
-        print(f"  Phase 1 (0-1.5M steps): SRC001-SRC035 × 4 versions ≈ 140 files")
-        print(f"  Phase 2 (1.5M-3.5M steps): SRC001-SRC070 × 4 versions ≈ 280 files")
-        print(f"  Phase 3 (3.5M-5M steps): SRC001-SRC106 × 4 versions ≈ 424 files (all 80% training sources)")
-    else:
-        print("\n[Curriculum Learning] DISABLED")
 
     # Evaluation callback
     eval_freq = training_config.get('eval_freq', 10000) // n_envs
