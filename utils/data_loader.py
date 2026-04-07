@@ -698,6 +698,10 @@ class DataManager:
         self._wind_data: Optional[WindData] = None
         self._current_data: Optional[CurrentData] = None
         self._discovered_sources: List[str] = []  # Lista di source_id scoperti
+        
+        # CACHE: per wind e current data (memorizza ultimi file caricati)
+        self._cached_wind_data: Dict[str, WindData] = {}  # filename -> WindData
+        self._cached_current_data: Dict[str, CurrentData] = {}  # filename -> CurrentData
 
         if not self.data_dir.exists():
             raise FileNotFoundError(
@@ -739,6 +743,10 @@ class DataManager:
         # Carica dati di vento e corrente
         self._load_wind_data()
         self._load_current_data()
+
+        # PRECARICA i 4 versioni di wind e current nel cache per evitare I/O su primo episodio
+        # (migliora latenza iniziale del primo episodio di ogni versione)
+        self._preload_all_versions_cache()
 
         if preload_all:
             self._preload_all_files()
@@ -885,6 +893,43 @@ class DataManager:
             except Exception as e:
                 print(f"  Failed to load {nc_file.name}: {e}")
         print(f"Preloaded {len(self._preloaded_fields)} files ({len(self._discovered_sources)} sources)")
+
+    def _preload_all_versions_cache(self):
+        """
+        Precarica i 4 file di wind e corrente nel cache.
+        
+        SCOPO: Quando training inizia, le 4 versioni (V0/V1/V2/V3) vengono
+        caricate DINAMICAMENTE durante ogni episodio. Precaricarle qui evita
+        I/O latency sul primo episodio di ogni versione.
+        
+        IMPATTO: ~100MB RAM aggiuntivo (tutte 4 versioni wind+current in mem)
+                 Elimina lag nel primo episodio di V0/V1/V2/V3
+        """
+        # Hardcoded wind+current files per le 4 versioni
+        versions_config = {
+            "V0": ("CI_WIND_faseII_V0.txt", "CL02_V0_SRC000_U_V_10mGrid.nc"),
+            "V1": ("CI_WIND_faseII_V1.txt", "CL02_V1_SRC000_U_V_10mGrid.nc"),
+            "V2": ("CI_WIND_faseII_V2.txt", "CL02_V2_SRC000_U_V_10mGrid.nc"),
+            "V3": ("CI_WIND_faseII_V3.txt", "CL02_V3_SRC000_U_V_10mGrid.nc"),
+        }
+        
+        for version, (wind_file, current_file) in versions_config.items():
+            try:
+                # Carica wind
+                if wind_file not in self._cached_wind_data:
+                    wind_data = self.load_wind_data(wind_file)
+                    self._cached_wind_data[wind_file] = wind_data
+                    print(f"  Cached wind: {wind_file}")
+                
+                # Carica current
+                if current_file not in self._cached_current_data:
+                    current_data = self.load_current_data_internal(current_file)
+                    self._cached_current_data[current_file] = current_data
+                    print(f"  Cached current: {current_file}")
+            except Exception as e:
+                print(f"  Warning: Failed to preload {version}: {e}")
+        
+        print(f"✓ Cache initialized with {len(self._cached_wind_data)} wind + {len(self._cached_current_data)} current files")
 
     def get_random_field(self) -> Tuple[ConcentrationField, str]:
         """
@@ -1083,9 +1128,23 @@ class DataManager:
         Returns:
             CurrentData object
         """
-        filepath = self.data_dir / current_filename
-        if not filepath.exists():
-            raise FileNotFoundError(f"File di corrente non trovato: {filepath}")
+        # Prova più percorsi possibili (come wind_data)
+        possible_paths = [
+            self.data_dir / "Output_HD_FaseII_CL2_V0" / current_filename,
+            self.data_dir / "Output_HD_FaseII_CL2_V1" / current_filename,
+            self.data_dir / "Output_HD_FaseII_CL2_V2" / current_filename,
+            self.data_dir / "Output_HD_FaseII_CL2_V3" / current_filename,
+            self.data_dir / current_filename,  # Fallback: try directly in data_dir
+        ]
+        
+        filepath = None
+        for path in possible_paths:
+            if path.exists():
+                filepath = path
+                break
+        
+        if filepath is None:
+            raise FileNotFoundError(f"File di corrente non trovato in alcuno di questi percorsi: {possible_paths}")
         
         # Auto-detect variabili
         try:
@@ -1118,12 +1177,14 @@ class DataManager:
         Il run_id contiene la versione (es. 'SRC000_V1'), che viene usata per
         selezionare il file di vento corretto dal mapping.
         
+        Usa cache: carica da disco solo la PRIMA volta, poi ritorna in memoria.
+        
         Args:
             run_id: ID del run (es. 'SRC000_V1')
             wind_mapping: Dict con mapping versione -> wind_filename (es. {'_V0': 'CI_WIND_faseII_V0.txt', ...})
         
         Returns:
-            WindData object caricato dal file corretto
+            WindData object caricato dal file corretto (cached)
         """
         if not wind_mapping:
             # Se wind_mapping è vuoto, ritorna il default
@@ -1138,7 +1199,15 @@ class DataManager:
         wind_key = f"_{version}"  # es. '_V1'
         if wind_key in wind_mapping:
             wind_filename = wind_mapping[wind_key]
-            return self.load_wind_data(wind_filename)
+            
+            # CHECK CACHE: se già caricato, ritorna da memoria
+            if wind_filename in self._cached_wind_data:
+                return self._cached_wind_data[wind_filename]
+            
+            # CARICA DA DISCO e CACHEIZA per episodi futuri
+            wind_data = self.load_wind_data(wind_filename)
+            self._cached_wind_data[wind_filename] = wind_data
+            return wind_data
         
         # Default al wind_data già caricato
         return self._wind_data
@@ -1149,12 +1218,14 @@ class DataManager:
         Il run_id contiene la versione (es. 'SRC000_V1'), che viene usata per
         selezionare il file di corrente corretto dal mapping.
         
+        Usa cache: carica da disco solo la PRIMA volta, poi ritorna in memoria.
+        
         Args:
             run_id: ID del run (es. 'SRC000_V1')
             current_mapping: Dict con mapping versione -> current_filename (es. {'_V0': '...', ...})
         
         Returns:
-            CurrentData object caricato dal file corretto
+            CurrentData object caricato dal file corretto (cached)
         """
         if not current_mapping:
             # Se current_mapping è vuoto, ritorna il default
@@ -1169,7 +1240,15 @@ class DataManager:
         current_key = f"_{version}"  # es. '_V1'
         if current_key in current_mapping:
             current_filename = current_mapping[current_key]
-            return self.load_current_data(current_filename)
+            
+            # CHECK CACHE: se già caricato, ritorna da memoria
+            if current_filename in self._cached_current_data:
+                return self._cached_current_data[current_filename]
+            
+            # CARICA DA DISCO e CACHEIZA per episodi futuri
+            current_data = self.load_current_data_internal(current_filename)
+            self._cached_current_data[current_filename] = current_data
+            return current_data
         
         # Default al current_data già caricato
         return self._current_data

@@ -481,30 +481,31 @@ def run_inference(
                 scenario_label = f"{version}_{source_id}_{chunk_label}"
                 
                 episode_results: List[EpisodeResult] = []
+                
+                # CARICA IL FIELD UNA SOLA VOLTA per tutti gli episodi di questo scenario
+                field = None
+                try:
+                    field = data_manager._nc_loader.load(
+                        str(version_file),
+                        concentration_var="Concentration - component 1"
+                    )
+                    if field is None:
+                        print(f"\n  [SKIP] Could not load field for {version}_{source_id}")
+                        continue
+                    
+                    # Imposta source_position dalle coordinate CSV
+                    coords = data_manager.get_source_coordinates(source_id)
+                    if coords:
+                        field.source_position = coords
+                    
+                    # Imposta run_id con versione per caricamento dinamico vento durante reset()
+                    field.run_id = f"{source_id}_{version}"
+                    
+                except Exception as e:
+                    print(f"\n  [SKIP] Error loading field for {version}_{source_id}: {e}")
+                    continue
 
                 for ep in range(n_episodes):
-                    # Carica campo da file specifico
-                    try:
-                        field = data_manager._nc_loader.load(
-                            str(version_file),
-                            concentration_var="Concentration - component 1"
-                        )
-                        if field is None:
-                            print(f"\n  [SKIP] Could not load field for {version}_{source_id}")
-                            break
-                        
-                        # Imposta source_position dalle coordinate CSV
-                        coords = data_manager.get_source_coordinates(source_id)
-                        if coords:
-                            field.source_position = coords
-                        
-                        # Imposta run_id con versione per caricamento dinamico vento durante reset()
-                        field.run_id = f"{source_id}_{version}"
-                        
-                    except Exception as e:
-                        print(f"\n  [SKIP] Error loading field for {version}_{source_id}: {e}")
-                        break
-
                     # Crea env config con chunk_id appropriato
                     env_cfg_ep = make_env_config(config, chunk_id=chunk_id)
 
