@@ -308,7 +308,7 @@ class SourceSeekingEnv(gym.Env):
         if len(valid_indices[0]) == 0:
             # Se non c'è plume esitente, lancia eccezione (non deve succedere in inference)
             raise ValueError(
-                f"No plume found at spawn frame {start_frame} with threshold {self.config.spawn_conc_threshold}. "
+                f"No plume found at spawn frame {spawn_frame} with threshold {self.config.spawn_conc_threshold}. "
                 f"Lower spawn_conc_threshold in config.yaml"
             )
 
