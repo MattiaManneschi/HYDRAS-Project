@@ -111,6 +111,8 @@ class EpisodeResult:
     final_distance: float  # m
     steps: int
     trajectory: np.ndarray
+    start_frame: int = 0   # Frame iniziale (dipende da chunk_id)
+    end_frame: int = 0     # Frame finale (al quale plottare)
 
 
 @dataclass
@@ -246,6 +248,9 @@ def run_episode(model, vec_env, deterministic=True) -> EpisodeResult:
     obs = vec_env.reset()
     inner = get_inner_env(vec_env)
 
+    # Leggi il frame iniziale dall'environment (salvato durante reset)
+    start_frame = inner.info_reset.get('start_time_idx', 0) if hasattr(inner, 'info_reset') else 0
+
     # Salva posizione iniziale e calcola distanza dalla sorgente
     spawn_pos = inner.state.position.copy()
     source_pos = inner.source_position
@@ -278,9 +283,12 @@ def run_episode(model, vec_env, deterministic=True) -> EpisodeResult:
     else:
         termination = 'timeout'
 
-    # Usa i valori dall'info dict (inner.* sono già resettati da DummyVecEnv)
+    # Usa i valori dall'info dict
     final_dist = last_info.get('distance_to_source', 0.0)
     n_steps = last_info.get('steps', len(trajectory) - 1)
+    
+    # Leggi il frame finale dall'info dict dell'ultimo step (prima del reset automatico)
+    end_frame = last_info.get('end_time_idx', start_frame)
 
     return EpisodeResult(
         scenario="",           # impostato dal chiamante
@@ -291,7 +299,9 @@ def run_episode(model, vec_env, deterministic=True) -> EpisodeResult:
         initial_distance=initial_dist,
         final_distance=final_dist,
         steps=n_steps,
-        trajectory=np.array(trajectory)
+        trajectory=np.array(trajectory),
+        start_frame=start_frame,
+        end_frame=end_frame
     )
 
 
@@ -345,12 +355,22 @@ def print_source_summary(all_stats: List[ScenarioStats], source_id: str):
 # ─── Plotting ────────────────────────────────────────────────────────────────
 
 def save_trajectory_plot(result: EpisodeResult, field, output_path: Path, threshold: float = 100):
-    """Salva il plot della traiettoria per un singolo episodio."""
+    """Salva il plot della traiettoria per un singolo episodio.
+    
+    Mostra il campo di concentrazione al frame finale dell'episodio.
+    """
     fig, ax = plt.subplots(figsize=(12, 10))
+
+    # Usa il frame finale salvato dall'episodio
+    display_frame = result.end_frame
+    
+    # Aggiorna il field al frame appropriato
+    if hasattr(field, 'set_time'):
+        field.set_time(display_frame)
 
     status = "SUCCESS ✓" if result.success else f"FAILED [{result.termination}]"
     title = (f"{result.scenario} — Ep {result.episode+1} — {status}\n"
-             f"dist={result.final_distance:.0f}m  steps={result.steps}")
+             f"dist={result.final_distance:.0f}m  steps={result.steps}  (frame={display_frame})")
 
     plot_trajectory(result.trajectory, field, ax=ax, title=title,
                     show_arrows=True, arrow_freq=15)
@@ -413,7 +433,7 @@ def run_inference(
     inference_sources = [s for s in all_sources if int(s[3:]) > 106]  # SRC107-SRC132 (26 file, ~20%)
     
     # Mappa chunk_id a label
-    chunk_labels = {0: "Q1/4", 1: "Q1/2", 2: "Q3/4"}
+    chunk_labels = {0: "Q1/4", 2: "Q3/4"}
     chunk_descriptions = ", ".join([f"{chunk_labels[cid]} (chunk_id={cid})" for cid in chunk_ids])
     
     print(f"\n{'='*100}")
@@ -548,7 +568,7 @@ def run_inference(
     # Riepilogo globale
     if all_stats:
         # Mappa chunk_id a label
-        chunk_labels_map = {0: "Q1/4", 1: "Q1/2", 2: "Q3/4"}
+        chunk_labels_map = {0: "Q1/4", 2: "Q3/4"}
         
         # Aggregazione per chunk
         chunk_stats = {}
@@ -579,9 +599,11 @@ def run_inference(
         
         # Global SR
         global_sr = np.mean([s.success_rate for s in all_stats])
+        mean_initial_dist = np.mean([s.mean_initial_dist for s in all_stats])
         
         print(f"\n{'='*80}")
         print(f"Global Success Rate: {global_sr*100:.1f}%")
+        print(f"Mean initial distance: {mean_initial_dist:.0f}m")
         print(f"Total scenarios: {len(all_stats)}")
         print(f"{'='*80}\n")
 

@@ -110,6 +110,11 @@ class ConcentrationField:
             return
         self._current_time_idx = int(np.clip(time_idx, 0, len(self.time_coords) - 1))
     
+    @property
+    def current_timestep(self) -> int:
+        """Ritorna il timestep corrente."""
+        return self._current_time_idx
+    
     def get_concentration(self, x: float, y: float) -> float:
         """Ottiene la concentrazione interpolata in un punto.
         
