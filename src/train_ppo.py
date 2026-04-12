@@ -476,13 +476,13 @@ def train(
     # Crea ambienti vettorizzati
     print(f"\nCreating {n_envs*2} parallel environments...")
     print(f"  (2 chunks per file: spawn @1/4 e @3/4 della simulazione)")
-    print(f"  Chunk confg: [0, 2] = Q1/4 + Q3/4 (skippa Q1/2 per problemi di generalizzazione)")
+    print(f"  Chunk config: [0, 2] = Q1/4 + Q3/4")
 
     timesteps = total_timesteps or training_config.get('total_timesteps', 6000000)
 
     # Crea 2 environments per ogni "file" (rank):
-    # - chunk_id=0: spawn @1/4 della simulazione
-    # - chunk_id=2: spawn @3/4 della simulazione (skippa Q1/2 che generalizza male)
+    # - chunk_id=0: spawn @1/4 della simulazione (plume concentrato)
+    # - chunk_id=2: spawn @3/4 della simulazione (plume disperso)
     env_fns = [
         make_env_fn(
             config, concentration_field, wind_data, current_data, i, chunk_id, 
