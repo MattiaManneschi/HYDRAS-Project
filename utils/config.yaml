@@ -40,19 +40,19 @@ environment:
   # Reward shaping
   reward:
     source_reached_bonus: 100.0
-    step_penalty: -0.1
+    step_penalty: -0.05  # Ridotto da -0.1 per incoraggiare esplorazione
     boundary_penalty: -10.0
     land_proximity_threshold: 10.0  # m - distanza dalla terra per penalità progressiva
     land_proximity_penalty_max: -5.0  # penalità massima per vicinanza terra (aumentata)
     distance_threshold: 50  # m - distanza dalla sorgente per "trovato"
-    distance_reward_multiplier: 1.0  # moltiplicatore per reward distanza
+    distance_reward_multiplier: 1.5  # Moltiplicatore per reward distanza (prioritario ma non dominante)
     plume_reward_positive: 1.0  # reward binario dentro il plume (PRIORITARIO)
     plume_reward_negative: -1.0  # penalità fuori dal plume (PRIORITARIO)
-    plume_threshold: 0.1  # soglia concentrazione per "dentro il plume"
+    plume_threshold: 0.05  # Compromesso tra plume disperso Q3/4 e rumore
     concentration_gradient_reward_positive: 0.05
     concentration_gradient_reward_negative: -0.05
-    wind_alignment_reward: 0.05  # reward if moving upwind (against wind) - RIDOTTO per prioritizzare plume
-    wind_alignment_penalty: -0.05  # penalty if moving downwind (with wind) - RIDOTTO per prioritizzare plume
+    wind_alignment_reward: 0.05  # RIMOSSO da reward function - vento già in input NN
+    wind_alignment_penalty: -0.05  # RIMOSSO da reward function - vento già in input NN
 
   # Spawn constraints
   spawn:
@@ -60,7 +60,7 @@ environment:
     max_distance: 1500  # m - distanza massima dalla sorgente
     min_land_distance: 50  # m - distanza minima dalla terra per spawn
     start_frame: 352  # frame di partenza (25% della simulazione, Chunk 0) - sovrascitto da chunk_id
-    conc_threshold: 0.5  # soglia minima concentrazione
+    conc_threshold: 0.1  # soglia minima concentrazione (ridotta da 0.5 per coprire più area del plume)
 
   # Normalization
   normalize_obs: true
@@ -79,7 +79,7 @@ training:
   gamma: 0.99
   gae_lambda: 0.95
   clip_range: 0.2
-  ent_coef: 0.05  # AUMENTATO: più esplorazione casuale
+  ent_coef: 0.1  # Aumentato da 0.05: exploration moderato per adattarsi a direzioni diverse Q1/4 vs Q3/4
   vf_coef: 0.3
   max_grad_norm: 0.5
 
