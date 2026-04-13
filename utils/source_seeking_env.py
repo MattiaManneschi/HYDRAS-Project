@@ -801,28 +801,31 @@ class SourceSeekingEnv(gym.Env):
         # Reset memoria concentrazioni direzionali passate (9 timestep x 8 direzioni)
         self._directional_conc_memory = [[0.0] * 8 for _ in range(self.config.memory_length)]
 
-        # Sincronizza vento e corrente al timestep di start usando tempo reale
+        # Sincronizza vento e corrente al timestep di start usando PERCENTUALE
+        # (invece di minuti reali, che hanno dt diversi per conc/vento/corrente)
         if self.field.n_timesteps > 1:
-            # Calcola dt della concentrazione dai time_coords del file NetCDF (non hardcodare!)
-            if (hasattr(self.field, 'time_coords') and self.field.time_coords is not None 
-                and len(self.field.time_coords) > 1):
-                dt_conc = self.field.time_coords[1] - self.field.time_coords[0]  # in minuti
-            else:
-                dt_conc = 2.0  # Default: 2 minuti dal file NetCDF
+            # Calcola la percentuale di progressione della concentrazione
+            progress = self._start_time_idx / self.field.n_timesteps
             
-            # Salva dt_conc per uso nello step() - CRITICO per sincronizzazione vento/corrente
-            self._dt_conc = dt_conc
+            print(f"[DEBUG RESET] progress={progress:.3f}, _start_time_idx={self._start_time_idx}, field.n_timesteps={self.field.n_timesteps}")
             
-            # Calcola tempo reale in minuti: timestep * dt
-            time_minutes = self._start_time_idx * dt_conc
-            
-            # Salva come offset base per lo step - CRITICO per sincronizzazione corretta
-            self._start_time_minutes = time_minutes
-            
+            # Sincronizza vento alla stessa percentuale
             if self.wind_data is not None:
-                self.wind_data.set_time_from_minutes(time_minutes)
+                wind_frame = progress * (len(self.wind_data.time_coords) - 1)
+                print(f"[DEBUG RESET] Setting wind to frame {wind_frame:.2f} / {len(self.wind_data.time_coords)-1}")
+                self.wind_data.set_time(wind_frame)
+                print(f"[DEBUG RESET] Wind _current_time_idx after set_time: {self.wind_data._current_time_idx}")
+            else:
+                print(f"[DEBUG RESET] wind_data is NONE!")
+            
+            # Sincronizza corrente alla stessa percentuale
             if self.current_data is not None:
-                self.current_data.set_time_from_minutes(time_minutes)
+                current_frame = progress * (len(self.current_data.time_coords) - 1)
+                print(f"[DEBUG RESET] Setting current to frame {current_frame:.2f} / {len(self.current_data.time_coords)-1}")
+                self.current_data.set_time(current_frame)
+                print(f"[DEBUG RESET] Current _current_time_idx after set_time: {self.current_data._current_time_idx}")
+            else:
+                print(f"[DEBUG RESET] current_data is NONE!")
 
         observation = self._get_observation()
         info = {
@@ -873,17 +876,11 @@ class SourceSeekingEnv(gym.Env):
 
         # Avanza il tempo del campo se time-varying (partendo dal frame di start)
         if self.field.n_timesteps > 1:
-            # CORRETTO: Calcola tempo reale (non frame mescolati con minuti!)
-            # time_offset è in MINUTI (self.steps * dt / 60)
-            time_offset_minutes = self.steps * self.config.dt / 60.0
-            
-            # Tempo reale totale = tempo di start + offset
-            # _start_time_minutes è in MINUTI (calcolato nel reset come frame * dt_conc)
-            time_minutes = self._start_time_minutes + time_offset_minutes
-            
-            # Ricava indice frame dalla simulazione di concentrazione
-            dt_conc = getattr(self, '_dt_conc', 2.0)
-            time_idx = int(time_minutes / dt_conc)
+            # Calcola il frame di concentrazione a partire dal tempo simulato
+            # time_offset è il numero di step × dt (in secondi) convertito a frame
+            # Assumiamo dt_conc = 2 minuti (standard per i file NC)
+            time_offset_frames = (self.steps * self.config.dt / 60.0) / 2.0  # 2 min per frame
+            time_idx = int(self._start_time_idx + time_offset_frames)
             
             # Clamp index to valid range
             time_idx = max(0, min(time_idx, self.field.n_timesteps - 1))
@@ -891,11 +888,17 @@ class SourceSeekingEnv(gym.Env):
             # Concentration field uses integer index
             self.field.set_time(time_idx)
             
-            # Sincronizza vento e corrente al TEMPO REALE (non al frame mescolato)
+            # Sincronizza vento e corrente usando la STESSA PERCENTUALE di progressione
+            # Questo funziona indipendentemente dai diversi dt (conc=2min, wind=60min, etc.)
+            progress = time_idx / self.field.n_timesteps
+            
             if self.wind_data is not None:
-                self.wind_data.set_time_from_minutes(time_minutes)
+                wind_frame = progress * (len(self.wind_data.time_coords) - 1)
+                self.wind_data.set_time(wind_frame)
+            
             if self.current_data is not None:
-                self.current_data.set_time_from_minutes(time_minutes)
+                current_frame = progress * (len(self.current_data.time_coords) - 1)
+                self.current_data.set_time(current_frame)
 
         # Calcola reward
         reward, reward_info = self._compute_reward(action)
