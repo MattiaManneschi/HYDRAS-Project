@@ -279,8 +279,8 @@ def create_env(
         concentration_gradient_reward_positive=env_config.get('reward', {}).get('concentration_gradient_reward_positive', 0.05),
         concentration_gradient_reward_negative=env_config.get('reward', {}).get('concentration_gradient_reward_negative', -0.05),
         # Wind alignment reward
-        wind_alignment_reward=env_config.get('reward', {}).get('wind_alignment_reward', 0.1),
-        wind_alignment_penalty=env_config.get('reward', {}).get('wind_alignment_penalty', -0.1),
+        wind_alignment_reward=env_config.get('reward', {}).get('wind_alignment_reward', 0.05),
+        wind_alignment_penalty=env_config.get('reward', {}).get('wind_alignment_penalty', -0.05),
     )
 
     print(f"  Success radius: {env_kwargs.source_distance_threshold}m")

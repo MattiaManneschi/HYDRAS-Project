@@ -73,8 +73,8 @@ class SourceSeekingConfig:
     concentration_gradient_reward_negative: float = -0.05  # penalty per diminuzione concentrazione
     
     # Wind alignment reward (seguire il vento controcorrente verso sorgente)
-    wind_alignment_reward: float = 0.1  # reward se movimento è controcorrente al vento
-    wind_alignment_penalty: float = -0.1  # penalty se movimento è a favore del vento
+    wind_alignment_reward: float = 0.05  # reward se movimento è controcorrente al vento
+    wind_alignment_penalty: float = -0.05  # penalty se movimento è a favore del vento
 
     # Land avoidance
     land_proximity_threshold: float = 10.0  # m - distanza dalla terra per penalità progressiva
@@ -205,12 +205,6 @@ class SourceSeekingEnv(gym.Env):
 
         # Memory buffer per spostamenti passati (Δx, Δy)
         self._displacement_memory: List[Tuple[float, float]] = [(0.0, 0.0)] * self.config.memory_length
-
-        # Memory buffer per vento passato (u, v)
-        self._wind_memory: List[Tuple[float, float]] = [(0.0, 0.0)] * self.config.memory_length
-
-        # Memory buffer per corrente passata (u, v)
-        self._current_memory: List[Tuple[float, float]] = [(0.0, 0.0)] * self.config.memory_length
 
         # Memory buffer per concentrazioni direzionali passate (9 timestep x 8 direzioni)
         # Ogni elemento è una lista di 8 float (uno per direzione)
@@ -722,8 +716,8 @@ class SourceSeekingEnv(gym.Env):
         # Curriculum/Inference: scegli sorgente random (training) o usa field fornito (inference)
         if self.randomize_field and self._data_manager:
             # TRAINING MODE: randomizza sorgente e carica field random
-            # Fallback per allowed_sources vuota (es. al startup, prima che CurriculumCallback imposti i limiti)
-            available_sources = self.allowed_sources if self.allowed_sources else [f"SRC{i:03d}" for i in range(1, 81)]
+            # Le sorgenti sono sempre disponibili da CurriculumCallback
+            available_sources = self.allowed_sources
             
             source = self.np_random.choice(available_sources)
             self.field, self._current_run_id = self._data_manager.get_random_field_for_source(source)
@@ -801,12 +795,6 @@ class SourceSeekingEnv(gym.Env):
         # Reset memoria spostamenti passati (9 coppie Δx, Δy)
         self._displacement_memory = [(0.0, 0.0)] * self.config.memory_length
 
-        # Reset memoria vento passato (9 coppie u, v)
-        self._wind_memory = [(0.0, 0.0)] * self.config.memory_length
-
-        # Reset memoria corrente passata (9 coppie u, v)
-        self._current_memory = [(0.0, 0.0)] * self.config.memory_length
-
         # Reset memoria concentrazioni direzionali passate (9 timestep x 8 direzioni)
         self._directional_conc_memory = [[0.0] * 8 for _ in range(self.config.memory_length)]
 
@@ -819,8 +807,14 @@ class SourceSeekingEnv(gym.Env):
             else:
                 dt_conc = 2.0  # Default: 2 minuti dal file NetCDF
             
+            # Salva dt_conc per uso nello step() - CRITICO per sincronizzazione vento/corrente
+            self._dt_conc = dt_conc
+            
             # Calcola tempo reale in minuti: timestep * dt
             time_minutes = self._start_time_idx * dt_conc
+            
+            # Salva come offset base per lo step - CRITICO per sincronizzazione corretta
+            self._start_time_minutes = time_minutes
             
             if self.wind_data is not None:
                 self.wind_data.set_time_from_minutes(time_minutes)
@@ -876,25 +870,25 @@ class SourceSeekingEnv(gym.Env):
 
         # Avanza il tempo del campo se time-varying (partendo dal frame di start)
         if self.field.n_timesteps > 1:
-            # Time offset in minutes (preserva precisione frazionaria per interpolazione)
-            time_offset_minutes = self.steps * self.config.dt / 60.0  # NO int() - preserve float!
-            time_idx = self._start_time_idx + time_offset_minutes
+            # CORRETTO: Calcola tempo reale (non frame mescolati con minuti!)
+            # time_offset è in MINUTI (self.steps * dt / 60)
+            time_offset_minutes = self.steps * self.config.dt / 60.0
+            
+            # Tempo reale totale = tempo di start + offset
+            # _start_time_minutes è in MINUTI (calcolato nel reset come frame * dt_conc)
+            time_minutes = self._start_time_minutes + time_offset_minutes
+            
+            # Ricava indice frame dalla simulazione di concentrazione
+            dt_conc = getattr(self, '_dt_conc', 2.0)
+            time_idx = int(time_minutes / dt_conc)
+            
             # Clamp index to valid range
             time_idx = max(0, min(time_idx, self.field.n_timesteps - 1))
-            # Concentration field uses integer index (truncate for concentration data)
-            self.field.set_time(int(time_idx))
             
-            # Sincronizza vento e corrente al stesso timestep usando tempo reale
-            # Calcola dt della concentrazione dai time_coords (non hardcodare!)
-            if (hasattr(self.field, 'time_coords') and self.field.time_coords is not None 
-                and len(self.field.time_coords) > 1):
-                dt_conc = self.field.time_coords[1] - self.field.time_coords[0]  # in minuti
-            else:
-                dt_conc = 2.0  # Default: 2 minuti dal file NetCDF
+            # Concentration field uses integer index
+            self.field.set_time(time_idx)
             
-            # Tempo reale in minuti = time_idx * dt_conc (keep float for wind/current sync)
-            time_minutes = time_idx * dt_conc
-            
+            # Sincronizza vento e corrente al TEMPO REALE (non al frame mescolato)
             if self.wind_data is not None:
                 self.wind_data.set_time_from_minutes(time_minutes)
             if self.current_data is not None:
