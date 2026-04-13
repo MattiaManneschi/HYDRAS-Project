@@ -807,25 +807,15 @@ class SourceSeekingEnv(gym.Env):
             # Calcola la percentuale di progressione della concentrazione
             progress = self._start_time_idx / self.field.n_timesteps
             
-            print(f"[DEBUG RESET] progress={progress:.3f}, _start_time_idx={self._start_time_idx}, field.n_timesteps={self.field.n_timesteps}")
-            
             # Sincronizza vento alla stessa percentuale
             if self.wind_data is not None:
                 wind_frame = progress * (len(self.wind_data.time_coords) - 1)
-                print(f"[DEBUG RESET] Setting wind to frame {wind_frame:.2f} / {len(self.wind_data.time_coords)-1}")
                 self.wind_data.set_time(wind_frame)
-                print(f"[DEBUG RESET] Wind _current_time_idx after set_time: {self.wind_data._current_time_idx}")
-            else:
-                print(f"[DEBUG RESET] wind_data is NONE!")
             
             # Sincronizza corrente alla stessa percentuale
             if self.current_data is not None:
                 current_frame = progress * (len(self.current_data.time_coords) - 1)
-                print(f"[DEBUG RESET] Setting current to frame {current_frame:.2f} / {len(self.current_data.time_coords)-1}")
                 self.current_data.set_time(current_frame)
-                print(f"[DEBUG RESET] Current _current_time_idx after set_time: {self.current_data._current_time_idx}")
-            else:
-                print(f"[DEBUG RESET] current_data is NONE!")
 
         observation = self._get_observation()
         info = {
