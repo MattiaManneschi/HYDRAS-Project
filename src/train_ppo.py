@@ -328,7 +328,8 @@ def make_env_fn(
     use_action_masking: bool = True,
     data_manager: Optional[DataManager] = None,
     wind_mapping: Optional[Dict[str, str]] = None,
-    current_mapping: Optional[Dict[str, str]] = None
+    current_mapping: Optional[Dict[str, str]] = None,
+    allowed_sources: Optional[List[str]] = None
 ) -> Callable[[], gym.Env]:
     """Factory function per la creazione di ambienti paralleli.
     
@@ -339,6 +340,7 @@ def make_env_fn(
         data_manager: DataManager per caricamenti dinamici
         wind_mapping: Dict con mappatura run_id -> wind_filename
         current_mapping: Dict con mappatura run_id -> current_filename
+        allowed_sources: Lista di sorgenti disponibili (impostata prima del reset)
     """
     def _init() -> gym.Env:
         env = create_env(
@@ -353,6 +355,11 @@ def make_env_fn(
             wind_mapping=wind_mapping,
             current_mapping=current_mapping
         )
+        
+        # Imposta allowed_sources PRIMA del reset per evitare errori
+        if allowed_sources is not None:
+            env.allowed_sources = allowed_sources
+        
         env.reset(seed=seed + rank)
         
         # Applica action masking se disponibile
@@ -489,7 +496,8 @@ def train(
             seed, data_dir, randomize_field,
             data_manager=data_manager,
             wind_mapping=wind_mapping,
-            current_mapping=current_mapping
+            current_mapping=current_mapping,
+            allowed_sources=discovered_sources  # Passa le sorgenti disponibili
         )
         for i in range(n_envs) for chunk_id in [0, 2]
     ]
@@ -513,7 +521,8 @@ def train(
             seed + 1000, data_dir, False,
             data_manager=data_manager,
             wind_mapping=wind_mapping,
-            current_mapping=current_mapping
+            current_mapping=current_mapping,
+            allowed_sources=discovered_sources  # Passa le sorgenti disponibili anche all'eval
         )
     ])
     if config.get('environment', {}).get('normalize_obs', True):
