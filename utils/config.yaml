@@ -92,7 +92,7 @@ training:
     activation_fn: "tanh"
 
   # Training loop
-  total_timesteps: 4000000  # 4M timesteps per training
+  total_timesteps: 6000000  # 6M timesteps per training
   eval_freq: 10000
   n_eval_episodes: 10
   save_freq: 50000
@@ -106,17 +106,17 @@ curriculum:
   enabled: true
   phases:
     - start: 0
-      end: 1200000
+      end: 1800000
       num_sources: 35  # SRC001-SRC035 (first 1/3 of 106 training sources × V0+V1+V2+V3)
-      description: "Phase 1: Initial 35 sources with all 4 versions (1.2M steps)"
-    - start: 1200000
-      end: 2800000
+      description: "Phase 1: Initial 35 sources with all 4 versions (1.8M steps)"
+    - start: 1800000
+      end: 4200000
       num_sources: 70  # SRC001-SRC070 (first 2/3 of 106 training sources × V0+V1+V2+V3)
-      description: "Phase 2: Extended to 70 sources with all 4 versions (1.6M steps)"
-    - start: 2800000
-      end: 4000000
+      description: "Phase 2: Extended to 70 sources with all 4 versions (2.4M steps)"
+    - start: 4200000
+      end: 6000000
       num_sources: 106  # SRC001-SRC106 (full 80% training set × V0+V1+V2+V3)
-      description: "Phase 3: Full 106 training sources with all 4 versions (1.2M steps)"
+      description: "Phase 3: Full 106 training sources with all 4 versions (1.8M steps)"
 
 # Data configuration
 data:

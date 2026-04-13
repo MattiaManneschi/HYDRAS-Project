@@ -716,8 +716,11 @@ class SourceSeekingEnv(gym.Env):
         # Curriculum/Inference: scegli sorgente random (training) o usa field fornito (inference)
         if self.randomize_field and self._data_manager:
             # TRAINING MODE: randomizza sorgente e carica field random
-            # Le sorgenti sono sempre disponibili da CurriculumCallback
-            available_sources = self.allowed_sources
+            # Se allowed_sources non yet populated da curriculum, usa sorgenti reali dal DataManager
+            available_sources = self.allowed_sources if self.allowed_sources else self._data_manager.get_discovered_sources()
+            
+            if not available_sources:
+                raise ValueError("Nessuna sorgente disponibile da allowed_sources o DataManager")
             
             source = self.np_random.choice(available_sources)
             self.field, self._current_run_id = self._data_manager.get_random_field_for_source(source)

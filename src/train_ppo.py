@@ -108,10 +108,10 @@ class CurriculumCallback(BaseCallback):
     """
     Callback per implementare curriculum learning con progressione di sorgenti.
     
-    Progressione su 5M timesteps ai tutte e 4 le versioni (V0, V1, V2, V3):
-    - Fase 1 (0-1.5M steps): SRC001-SRC035 × 4 versions (35 sorgenti, 1/3 dell'80%)
-    - Fase 2 (1.5M-3.5M steps): SRC001-SRC070 × 4 versions (70 sorgenti, 2/3 dell'80%)
-    - Fase 3 (3.5M-5M steps): SRC001-SRC106 × 4 versions (106 sorgenti, 80% del totale 132)
+    Progressione su 6M timesteps ai tutte e 4 le versioni (V0, V1, V2, V3):
+    - Fase 1 (0-1.8M steps): SRC001-SRC035 × 4 versions (35 sorgenti, 1/3 dell'80%)
+    - Fase 2 (1.8M-4.2M steps): SRC001-SRC070 × 4 versions (70 sorgenti, 2/3 dell'80%)
+    - Fase 3 (4.2M-6M steps): SRC001-SRC106 × 4 versions (106 sorgenti, 80% del totale 132)
     """
     
     def __init__(
