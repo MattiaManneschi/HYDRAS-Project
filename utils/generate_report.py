@@ -514,13 +514,117 @@ class HydrasReportGenerator:
         
         # Note sui fallimenti
         note = """
-        <b>Analisi dei Fallimenti:</b> La quasi totalità dei fallimenti si concentra nel frame temporale tardivo (Q3/4, 
-        simulazione quasi terminata) e negli scenari con <b>vento V1</b> e <b>V2</b>. 
-        Dato il successo del 100% negli scenari V0 e V3, questo fenomeno è probabilmente causato dall'eccessiva 
-        dispersione del plume dovuta alla <b>combinazione delle correnti oceaniche e del vento forte (8-10 m/s)</b> 
-        che soffia da <b>NW per V1</b> e da <b>SW per V2</b> (in particolare per le sorgenti più vicine alla costa).
+        <b>Analisi dei Fallimenti:</b> Durante il training l'agente ha imparato che se procede verso <b>SE</b> ha grosse 
+        probabilità di trovare la sorgente. Tuttavia, questo porta dei problemi negli scenari V1 e V2 a fine simulazione (Q3/4) perché: <br/>
+        1) <b>Scenari V1:</b> Il plume va in direzione opposta tra inizio e fine simulazione (prima verso NW e poi verso SE); <br/>
+        2) <b>Scenari V2:</b> Il plume a volte si diffonde a macchia d'olio e diventa troppo disperso per permettere all'agente di trovare la sorgente.
         """
         self.story.append(Paragraph(note, self.styles['Normal']))
+        
+        # Aggiungi spazio prima dei plot di fallimento
+        self.story.append(Spacer(1, 0.5*cm))
+        
+        # Plot dei fallimenti caratteristici
+        self.story.append(Paragraph("<b>Esempi Caratteristici di Fallimento:</b>", self.styles['SubHeading']))
+        self.story.append(Spacer(1, 0.3*cm))
+        
+        # Scenario V1
+        self.story.append(Paragraph("<b>Scenario V1: Cambio di Direzione del Plume</b>", self.styles['SubHeading']))
+        self.story.append(Spacer(1, 0.3*cm))
+        
+        # SRC131 V1 - Chunk 0 e Chunk 2 side by side (gli scenari V1)
+        try:
+            img_path_c0 = self.project_root.parent / "evaluations_v4/SRC131/V1/ep01_chunk0_trajectory.png"
+            img_path_c2 = self.project_root.parent / "evaluations_v4/SRC131/V1/ep01_chunk2_trajectory.png"
+            
+            if img_path_c0.exists() and img_path_c2.exists():
+                # Crea le immagini più grandi per layout side-by-side
+                img_c0 = Image(str(img_path_c0), width=8.5*cm, height=7*cm)
+                img_c2 = Image(str(img_path_c2), width=8.5*cm, height=7*cm)
+                
+                # Crea didascalie
+                caption_c0 = Paragraph(
+                    "<i><b>Chunk 0</b> (inizio simulazione):<br/>Plume verso NW</i>",
+                    self.styles['Normal']
+                )
+                caption_c2 = Paragraph(
+                    "<i><b>Chunk 2</b> (fine simulazione):<br/>Plume ruota verso SE</i>",
+                    self.styles['Normal']
+                )
+                
+                # Tabella side-by-side
+                table_data = [
+                    [img_c0, img_c2],
+                    [caption_c0, caption_c2]
+                ]
+                
+                table = Table(table_data, colWidths=[9.5*cm, 9.5*cm])
+                table.setStyle(TableStyle([
+                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                    ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                    ('LEFTPADDING', (0, 0), (-1, -1), 5),
+                    ('RIGHTPADDING', (0, 0), (-1, -1), 5),
+                ]))
+                
+                self.story.append(table)
+                self.story.append(Spacer(1, 0.4*cm))
+        except Exception as e:
+            print(f"Errore nel caricamento immagini SRC131 V1: {e}")
+        
+        # SRC112 V1 - Chunk 0 e Chunk 2 side by side (altro esempio di fallimento V1)
+        try:
+            img_path_c0 = self.project_root.parent / "evaluations_v4/SRC112/V1/ep01_chunk0_trajectory.png"
+            img_path_c2 = self.project_root.parent / "evaluations_v4/SRC112/V1/ep01_chunk2_trajectory.png"
+            
+            if img_path_c0.exists() and img_path_c2.exists():
+                # Crea le immagini più grandi per layout side-by-side
+                img_c0 = Image(str(img_path_c0), width=8.5*cm, height=7*cm)
+                img_c2 = Image(str(img_path_c2), width=8.5*cm, height=7*cm)
+                
+                # Crea didascalie
+                caption_c0 = Paragraph(
+                    "<i><b>Chunk 0</b> (inizio simulazione):<br/>Posizionamento iniziale</i>",
+                    self.styles['Normal']
+                )
+                caption_c2 = Paragraph(
+                    "<i><b>Chunk 2</b> (fine simulazione):<br/>Fallimento a trovare la sorgente</i>",
+                    self.styles['Normal']
+                )
+                
+                # Tabella side-by-side
+                table_data = [
+                    [img_c0, img_c2],
+                    [caption_c0, caption_c2]
+                ]
+                
+                table = Table(table_data, colWidths=[9.5*cm, 9.5*cm])
+                table.setStyle(TableStyle([
+                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                    ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                    ('LEFTPADDING', (0, 0), (-1, -1), 5),
+                    ('RIGHTPADDING', (0, 0), (-1, -1), 5),
+                ]))
+                
+                self.story.append(table)
+                self.story.append(Spacer(1, 0.4*cm))
+        except Exception as e:
+            print(f"Errore nel caricamento immagini SRC112 V1: {e}")
+        
+        # Spazio tra V1 e V2
+        self.story.append(Spacer(1, 0.8*cm))
+        
+        # Scenario V2
+        self.story.append(Paragraph("<b>Scenario V2: Dispersione Eccessiva del Plume</b>", self.styles['SubHeading']))
+        self.story.append(Spacer(1, 0.3*cm))
+        
+        # SRC118 V2 - Chunk 2 (Q3/4)
+        try:
+            img_path = self.project_root.parent / "evaluations_v4/SRC118/V2/ep01_chunk2_trajectory.png"
+            if img_path.exists():
+                img = Image(str(img_path), width=14*cm, height=11*cm)
+                self.story.append(img)
+        except Exception as e:
+            print(f"Errore nel caricamento immagine SRC118 V2 Chunk2: {e}")
 
     def generate(self):
         """Genera il report PDF."""
