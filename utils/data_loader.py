@@ -151,7 +151,9 @@ class ConcentrationField:
                c10 * (1 - xf) * yf +
                c11 * xf * yf)
         
-        return float(val)
+        # BUG #7 FIX: Safety NaN handling - normalizzazione non aumenta concentrazione
+        val = float(np.nan_to_num(val, nan=0.0, posinf=0.0, neginf=0.0))
+        return max(0.0, val)  # Concentrazione mai negativa
 
     def is_land(self, x: float, y: float) -> bool:
         """Verifica se la posizione (x, y) è sulla terra."""
@@ -384,13 +386,18 @@ class WindData:
             Tuple (u, v) in m/s
         """
         if time_idx is not None:
-            idx = max(0, min(time_idx, len(self.time_coords) - 1))
+            idx = max(0.0, min(float(time_idx), float(len(self.time_coords) - 1)))
         else:
             idx = self._current_time_idx
         
-        # Interpolazione lineare
+        # BUG #6 FIX: Interpolazione lineare con clipping e safety NaN
         speed_val = float(self._speed_interp([[idx]])[0])
         direction_deg = float(self._direction_interp([[idx]])[0])
+        
+        # Safety: clip NaN/inf a valori fisici ragionevoli
+        speed_val = np.clip(speed_val, 0.0, 50.0)  # m/s: max 50 m/s è ragionevole
+        direction_deg = np.clip(direction_deg, 0.0, 360.0)  # gradi: 0-360
+        direction_deg = float(np.nan_to_num(direction_deg, nan=0.0))
         
         # Converti da gradi (da Nord, senso orario) a radianti
         direction_rad = np.radians(direction_deg)

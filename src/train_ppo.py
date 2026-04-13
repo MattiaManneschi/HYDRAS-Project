@@ -600,6 +600,7 @@ def train(
     callbacks = []
 
     # Curriculum Learning callback (applica fasi progressive di sorgenti)
+    # BUG #9 FIX: Solo aggiungere callback se curriculum è abilitato
     if config.get('curriculum', {}).get('enabled', False):
         curriculum_callback = CurriculumCallback(
             vec_env=vec_env,
@@ -622,11 +623,12 @@ def train(
     callbacks.append(eval_callback)
 
     # Sync normalization callback (sincronizza stats prima di ogni eval)
+    # BUG #14 FIX: Usa stessi step di EvalCallback (eval_freq), non moltiplicato
     if config.get('environment', {}).get('normalize_obs', True):
         sync_callback = SyncNormCallback(
             train_env=vec_env,
             eval_env=eval_env,
-            eval_freq=eval_freq * n_envs,  # Converti in timesteps totali
+            eval_freq=eval_freq,  # Stessi step di EvalCallback
             verbose=0
         )
         callbacks.append(sync_callback)

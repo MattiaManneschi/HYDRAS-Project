@@ -9,7 +9,6 @@ import gymnasium as gym
 from gymnasium import spaces
 from typing import Optional, Tuple, Dict, Any, List
 from dataclasses import dataclass
-from scipy.ndimage import binary_erosion
 
 from .data_loader import (
     ConcentrationField, DataManager, DomainConfig, WindData, CurrentData
@@ -471,15 +470,17 @@ class SourceSeekingEnv(gym.Env):
         return conc_sensors
 
     # Mappa azioni discrete: 8 direzioni (4 cardinali + 4 diagonali)
+    # Usa cos(45°) = sin(45°) = 1/√2 ≈ 0.7071 per normalizzazione corretta
+    _DIAG = 1.0 / np.sqrt(2.0)
     _ACTION_MAP = {
-        0: (0.0,   1.0),    # Nord  (+y)
-        1: (0.0,  -1.0),    # Sud   (-y)
-        2: (1.0,   0.0),    # Est   (+x)
-        3: (-1.0,  0.0),    # Ovest (-x)
-        4: (0.707,  0.707), # NordEst
-        5: (0.707, -0.707), # SudEst
-        6: (-0.707, 0.707), # NordOvest
-        7: (-0.707,-0.707), # SudOvest
+        0: (0.0,   1.0),       # Nord  (+y)
+        1: (0.0,  -1.0),       # Sud   (-y)
+        2: (1.0,   0.0),       # Est   (+x)
+        3: (-1.0,  0.0),       # Ovest (-x)
+        4: (_DIAG,  _DIAG),     # NordEst
+        5: (_DIAG, -_DIAG),     # SudEst
+        6: (-_DIAG, _DIAG),     # NordOvest
+        7: (-_DIAG,-_DIAG),     # SudOvest
     }
 
     def _apply_action(self, action):
@@ -514,6 +515,18 @@ class SourceSeekingEnv(gym.Env):
     def _check_on_land(self) -> bool:
         """Verifica se l'agente è sulla terra (usa land_mask del campo)."""
         return getattr(self, '_on_land', False)
+
+    def _is_time_varying(self) -> bool:
+        """
+        BUG #13 FIX: Verifica se il field e i dati di vento/corrente sono time-varying.
+        Utile per decidere se avanzare i timestep durante l'episodio.
+        """
+        has_time_varying_field = self.field.n_timesteps > 1
+        has_wind = self.wind_data is not None and len(self.wind_data.time_coords) > 1
+        has_current = self.current_data is not None and self.current_data.n_timesteps > 1
+        
+        # Se il field ha tempo, almeno uno tra wind/corrente deve averlo (fallback OK se None)
+        return has_time_varying_field and (has_wind or has_current or (self.wind_data is None and self.current_data is None))
 
     def _check_source_reached(self) -> bool:
         """Verifica se l'agente ha raggiunto la sorgente."""
@@ -557,10 +570,8 @@ class SourceSeekingEnv(gym.Env):
             if self.field.is_land(new_x, new_y):
                 masks[action_idx] = False
         
-        # Se tutte le azioni sono mascherate, permetti tutte (fallback)
-        if not masks.any():
-            return np.ones(self.config.n_discrete_actions, dtype=bool)
-        
+        # Se tutte le azioni sono mascherate, ritorna la maschera comunque
+        # (BUG #11 FIX: Non disabilitare la sicurezza con fallback pericoloso)
         return masks
 
     def _min_distance_to_land(self, x: float, y: float) -> float:
@@ -777,6 +788,7 @@ class SourceSeekingEnv(gym.Env):
 
         # Inizializza stato agente
         self.state = AgentState(x=spawn_pos[0], y=spawn_pos[1])
+        self._on_land = False  # BUG #5 FIX: Inizializza flag terra
         self.steps = 0
 
         # Inizializza valori per il reward
@@ -801,21 +813,20 @@ class SourceSeekingEnv(gym.Env):
         # Reset memoria concentrazioni direzionali passate (9 timestep x 8 direzioni)
         self._directional_conc_memory = [[0.0] * 8 for _ in range(self.config.memory_length)]
 
-        # Sincronizza vento e corrente al timestep di start usando PERCENTUALE
-        # (invece di minuti reali, che hanno dt diversi per conc/vento/corrente)
+        # Sincronizza vento e corrente al timestep di start usando TEMPO REALE (minuti)
+        # dt_conc = 2 min/frame, dt_wind = 60 min/frame, dt_current = 2 min/frame
+        # set_time_from_minutes() converte automaticamente: time_idx = time_minutes / dt
         if self.field.n_timesteps > 1:
-            # Calcola la percentuale di progressione della concentrazione
-            progress = self._start_time_idx / self.field.n_timesteps
+            # Calcola tempo reale dalla concentrazione (dt_conc = 2 minuti per frame)
+            time_minutes = self._start_time_idx * 2.0
             
-            # Sincronizza vento alla stessa percentuale
+            # Sincronizza vento (dt=60 min)
             if self.wind_data is not None:
-                wind_frame = progress * (len(self.wind_data.time_coords) - 1)
-                self.wind_data.set_time(wind_frame)
+                self.wind_data.set_time_from_minutes(time_minutes)
             
-            # Sincronizza corrente alla stessa percentuale
+            # Sincronizza corrente (dt=2 min, come conc)
             if self.current_data is not None:
-                current_frame = progress * (len(self.current_data.time_coords) - 1)
-                self.current_data.set_time(current_frame)
+                self.current_data.set_time_from_minutes(time_minutes)
 
         observation = self._get_observation()
         info = {
@@ -867,28 +878,24 @@ class SourceSeekingEnv(gym.Env):
         # Avanza il tempo del campo se time-varying (partendo dal frame di start)
         if self.field.n_timesteps > 1:
             # Calcola il frame di concentrazione a partire dal tempo simulato
-            # time_offset è il numero di step × dt (in secondi) convertito a frame
-            # Assumiamo dt_conc = 2 minuti (standard per i file NC)
-            time_offset_frames = (self.steps * self.config.dt / 60.0) / 2.0  # 2 min per frame
+            # time_offset è il numero di step × dt (in secondi) convertito a minuti
+            # dt_conc = 2 minuti per frame
+            time_offset_minutes = (self.steps * self.config.dt / 60.0)  # secondi → minuti
+            time_minutes = self._start_time_idx * 2.0 + time_offset_minutes
+            
+            # Concentrazione: usa frame integer
+            time_offset_frames = time_offset_minutes / 2.0  # dt_conc = 2 min per frame
             time_idx = int(self._start_time_idx + time_offset_frames)
-            
-            # Clamp index to valid range
             time_idx = max(0, min(time_idx, self.field.n_timesteps - 1))
-            
-            # Concentration field uses integer index
             self.field.set_time(time_idx)
             
-            # Sincronizza vento e corrente usando la STESSA PERCENTUALE di progressione
-            # Questo funziona indipendentemente dai diversi dt (conc=2min, wind=60min, etc.)
-            progress = time_idx / self.field.n_timesteps
-            
+            # Vento e corrente: sincronizza con tempo reale in minuti
+            # set_time_from_minutes() clipa automaticamente agli estremi
             if self.wind_data is not None:
-                wind_frame = progress * (len(self.wind_data.time_coords) - 1)
-                self.wind_data.set_time(wind_frame)
+                self.wind_data.set_time_from_minutes(time_minutes)
             
             if self.current_data is not None:
-                current_frame = progress * (len(self.current_data.time_coords) - 1)
-                self.current_data.set_time(current_frame)
+                self.current_data.set_time_from_minutes(time_minutes)
 
         # Calcola reward
         reward, reward_info = self._compute_reward(action)

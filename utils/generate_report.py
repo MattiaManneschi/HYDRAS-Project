@@ -209,6 +209,8 @@ class HydrasReportGenerator:
         
         self.story.append(Paragraph("2. Dataset — 132 Sorgenti × 4 Scenari Vento", self.styles['SectionHeading']))
         
+        self.story.append(Paragraph("2.1 Acquisizione e Gestione Dati", self.styles['SubHeading']))
+        
         # Fonte dati
         text = """
         <b>Sorgente Dati:</b> I dati di concentrazione provengono da simulazioni <b>MIKE21</b> in formato NetCDF (1411 timestep, risoluzione 10m, griglia 300×250 celle). 
@@ -230,35 +232,12 @@ class HydrasReportGenerator:
         
         self.story.append(Spacer(1, 0.2*cm))
         
-        self.story.append(Paragraph("2.1 Dati di Vento e Corrente Oceanica", self.styles['SubHeading']))
-        
-        text_wind = """
-        <b>Vento:</b> File di testo (.txt) (Vento_V0-V3/). 
-        Per il training e l'inferenza viene utilizzato <b>CI_WIND_faseII_V1.txt</b> (48 timestep, condiviso tra tutte le sorgenti).<br/><br/>
-        
-        <b>Corrente Oceanica:</b> Dati CMEMS estratti dall'unico file NetCDF <b>CL02_V1_SRC000_U_V_10mGrid.nc</b> 
-        che contiene i campi bidimensionali di velocità (u, v) sincronizzati temporalmente con le simulazioni di concentrazione (1411 timestep, condiviso tra tutte le sorgenti).<br/><br/>
-        
-        <b>Normalizzazione e Sincronizzazione:</b> Vento e correnti vengono interpolati bilinearmente sulla griglia di simulazione (300×250 celle) 
-        e sincronizzati al frame temporale corrente dell'agente. Tutti i dati sono normalizzati tramite <b>VecNormalize</b> (media 0, varianza 1) 
-        e includono rumore gaussiano per aumentare la robustezza.
-        """
-        self.story.append(Paragraph(text_wind, self.styles['Normal']))
-        
-        self.story.append(Spacer(1, 0.2*cm))
-        
         self.story.append(Paragraph("2.2 I Quattro Scenari Vento (V0, V1, V2, V3)", self.styles['SubHeading']))
         
         wind_scenarios = """
         Il progetto utilizza <b>4 versioni diverse di vento</b> (CI_WIND_faseII_V0.txt, V1.txt, V2.txt, V3.txt), 
         generati da simulazioni meteorologiche con parametri e risoluzioni differenti. Questo aumenta vastamente 
-        la diversità dei dati di training, permettendo al modello di generalizzare su condizioni vento realistiche:<br/><br/>
-        
-        • <b>V0 (Baseline):</b> Scenario pulito con vento omogeneo e prevedibile<br/>
-        • <b>V1 (Difficile):</b> Plume altamente disperso da vento variabile, maggiore complessità<br/>
-        • <b>V2 (Complesso):</b> Combinazione intermedia di variabilità vento e dispersione<br/>
-        • <b>V3 (Ideale):</b> Condizioni ottimali con plume concentrato e stabile<br/><br/>
-        
+        la diversità dei dati di training, permettendo al modello di generalizzare su condizioni vento realistiche. 
         Ogni scenario ha il proprio file di vento (48 timestep) e le correnti oceaniche corrispondenti 
         (estratti da CL02_V0/V1/V2/V3_SRC000_U_V_10mGrid.nc). Durante il training, il curriculum learning 
         espone il modello a tutti e 4 gli scenari progressivamente, creando una policy robust a diverse condizioni meteorologiche.
