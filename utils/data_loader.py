@@ -5,6 +5,7 @@ supporta multi-versione (V0-V3) e fornisce setup per training robusto.
 """
 
 import numpy as np
+import warnings
 from pathlib import Path
 from typing import Optional, Tuple, Dict, List, Union
 from dataclasses import dataclass
@@ -69,11 +70,11 @@ class ConcentrationField:
         self.y_coords = y_coords
         self.time_coords = time_coords
         self.source_position = source_position
-        self.land_mask = land_mask  # None = nessuna terra (sintetico)
+        self.land_mask = land_mask  # None = nessuna maschera terra disponibile
         self.run_id = run_id  # Opzionale, usato durante inference per wind_mapping
         
         self._is_time_varying = data.ndim == 3
-        self._current_time_idx = 0
+        self._current_time_idx = 0.0
         self._land_interpolator = None
         self._land_dist_interpolator = None
         self._build_land_interpolator()
@@ -104,14 +105,14 @@ class ConcentrationField:
                 fill_value=0.0  # fuori dominio = sulla terra
             )
     
-    def set_time(self, time_idx: int):
+    def set_time(self, time_idx: Union[int, float]):
         """Imposta il timestep corrente."""
         if not self._is_time_varying:
             return
-        self._current_time_idx = int(np.clip(time_idx, 0, len(self.time_coords) - 1))
+        self._current_time_idx = float(np.clip(time_idx, 0, len(self.time_coords) - 1))
     
     @property
-    def current_timestep(self) -> int:
+    def current_timestep(self) -> float:
         """Ritorna il timestep corrente."""
         return self._current_time_idx
     
@@ -122,7 +123,11 @@ class ConcentrationField:
         l'interpolatore ad ogni timestep.
         """
         if self._is_time_varying:
-            field = self.data[self._current_time_idx]
+            t0 = int(np.floor(self._current_time_idx))
+            t1 = min(t0 + 1, len(self.time_coords) - 1)
+            alpha = self._current_time_idx - t0
+            field0 = self.data[t0]
+            field1 = self.data[t1]
         else:
             field = self.data
         
@@ -140,25 +145,36 @@ class ConcentrationField:
         xf = xi - x0
         yf = yi - y0
         
-        # Interpolazione bilineare
-        c00 = field[y0, x0]
-        c01 = field[y0, x1]
-        c10 = field[y1, x0]
-        c11 = field[y1, x1]
-        
-        val = (c00 * (1 - xf) * (1 - yf) +
-               c01 * xf * (1 - yf) +
-               c10 * (1 - xf) * yf +
-               c11 * xf * yf)
+        # Interpolazione bilineare (spaziale) + lineare (temporale)
+        def bilinear(grid: np.ndarray) -> float:
+            c00 = grid[y0, x0]
+            c01 = grid[y0, x1]
+            c10 = grid[y1, x0]
+            c11 = grid[y1, x1]
+            return (
+                c00 * (1 - xf) * (1 - yf) +
+                c01 * xf * (1 - yf) +
+                c10 * (1 - xf) * yf +
+                c11 * xf * yf
+            )
+
+        if self._is_time_varying:
+            val0 = bilinear(field0)
+            val1 = bilinear(field1)
+            val = (1.0 - alpha) * val0 + alpha * val1
+        else:
+            val = bilinear(field)
         
         # BUG #7 FIX: Safety NaN handling - normalizzazione non aumenta concentrazione
         val = float(np.nan_to_num(val, nan=0.0, posinf=0.0, neginf=0.0))
+        if not np.isfinite(val):
+            return 0.0
         return max(0.0, val)  # Concentrazione mai negativa
 
     def is_land(self, x: float, y: float) -> bool:
         """Verifica se la posizione (x, y) è sulla terra."""
         if self._land_interpolator is None:
-            return False  # sintetico: nessuna terra
+            return False
         return bool(self._land_interpolator((y, x)) > 0.5)
     
     def get_land_distance(self, x: float, y: float) -> float:
@@ -168,13 +184,18 @@ class ConcentrationField:
         Returns 0 se sulla terra, valore alto se nessuna terra.
         """
         if self._land_dist_interpolator is None:
-            return 100.0  # sintetico: nessuna terra -> ritorna max
+            return 100.0
         return float(self._land_dist_interpolator((y, x)))
     
     def get_current_field(self) -> np.ndarray:
         """Ritorna il campo di concentrazione corrente [y, x]."""
         if self._is_time_varying:
-            return self.data[self._current_time_idx]
+            t0 = int(np.floor(self._current_time_idx))
+            t1 = min(t0 + 1, len(self.time_coords) - 1)
+            alpha = self._current_time_idx - t0
+            if alpha <= 0.0:
+                return self.data[t0]
+            return (1.0 - alpha) * self.data[t0] + alpha * self.data[t1]
         return self.data
     
     @property
@@ -242,18 +263,18 @@ class NetCDFLoader:
 
         with nc.Dataset(filepath, 'r') as ds:
             # Leggi le coordinate
-            x_coords = ds.variables[x_var][:]
-            y_coords = ds.variables[y_var][:]
+            x_coords = np.asarray(ds.variables[x_var][:], dtype=np.float32)
+            y_coords = np.asarray(ds.variables[y_var][:], dtype=np.float32)
 
             # Leggi il tempo se presente
             time_coords = None
             if time_var in ds.variables:
-                time_coords = ds.variables[time_var][:]
+                time_coords = np.asarray(ds.variables[time_var][:], dtype=np.float32)
 
             # Leggi la concentrazione
             # Gestisce nomi con spazi/caratteri speciali
             conc_var = ds.variables[concentration_var]
-            conc_data = conc_var[:]
+            conc_data = np.asarray(conc_var[:], dtype=np.float32)
 
             # Gestisci i valori mancanti (masked arrays e NaN)
             if hasattr(conc_data, 'mask'):
@@ -262,7 +283,7 @@ class NetCDFLoader:
 
             # Salva la maschera terra PRIMA di nan_to_num
             # True dove c'è terra (NaN in QUALSIASI timestep)
-            conc_float = conc_data.astype(np.float32)
+            conc_float = conc_data.astype(np.float32, copy=False)
             if conc_float.ndim == 3:
                 # Unione di tutti i NaN su tutti i timesteps
                 land_mask = np.any(np.isnan(conc_float), axis=0)  # [y, x]
@@ -337,6 +358,7 @@ class WindData:
         self.direction = direction
         self.dt = dt  # Intervallo temporale in minuti
         self._current_time_idx = 0
+        self._warned_oob_time = False
         
         # Interpola per affrontare diversi intervalli di tempo
         self._speed_interp = RegularGridInterpolator(
@@ -368,6 +390,14 @@ class WindData:
             time_minutes: Tempo reale in minuti dall'inizio
         """
         # Calcola l'indice temporale basato su dt
+        max_minutes = (len(self.time_coords) - 1) * self.dt
+        if time_minutes > max_minutes and not self._warned_oob_time:
+            warnings.warn(
+                f"Wind time {time_minutes:.2f} min oltre range disponibile ({max_minutes:.2f} min): clipping all'ultimo frame",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            self._warned_oob_time = True
         time_idx = time_minutes / self.dt
         self.set_time(time_idx)
     
@@ -395,9 +425,10 @@ class WindData:
         direction_deg = float(self._direction_interp([[idx]])[0])
         
         # Safety: clip NaN/inf a valori fisici ragionevoli
-        speed_val = np.clip(speed_val, 0.0, 50.0)  # m/s: max 50 m/s è ragionevole
-        direction_deg = np.clip(direction_deg, 0.0, 360.0)  # gradi: 0-360
-        direction_deg = float(np.nan_to_num(direction_deg, nan=0.0))
+        speed_val = float(np.nan_to_num(speed_val, nan=0.0, posinf=50.0, neginf=0.0))
+        direction_deg = float(np.nan_to_num(direction_deg, nan=0.0, posinf=360.0, neginf=0.0))
+        speed_val = float(np.clip(speed_val, 0.0, 50.0))  # m/s: max 50 m/s è ragionevole
+        direction_deg = float(np.clip(direction_deg, 0.0, 360.0))  # gradi: 0-360
         
         # Converti da gradi (da Nord, senso orario) a radianti
         direction_rad = np.radians(direction_deg)
@@ -433,7 +464,7 @@ class CurrentData:
         x_coords: np.ndarray,
         y_coords: np.ndarray,
         time_coords: Optional[np.ndarray] = None,
-        dt: float = 5.0
+        dt: float = 2.0
     ):
         """
         Args:
@@ -442,7 +473,7 @@ class CurrentData:
             x_coords: Coordinate x della griglia
             y_coords: Coordinate y della griglia  
             time_coords: Coordinate temporali (opzionale)
-            dt: Intervallo temporale tra timestep in minuti (default 5 min)
+            dt: Intervallo temporale tra timestep in minuti (default 2 min)
         """
         self.data_u = data_u.astype(np.float32)
         self.data_v = data_v.astype(np.float32)
@@ -613,7 +644,7 @@ class CurrentDataLoader:
     """Carica dati di corrente dai file netCDF."""
     
     @staticmethod
-    def load_from_nc(filepath: Path, u_var: str = "u", v_var: str = "v", dt: float = 5.0) -> CurrentData:
+    def load_from_nc(filepath: Path, u_var: str = "u", v_var: str = "v", dt: float = 2.0) -> CurrentData:
         """
         Carica dati di corrente da file netCDF.
         
@@ -621,7 +652,7 @@ class CurrentDataLoader:
             filepath: Path al file netCDF
             u_var: Nome della variabile velocità Est
             v_var: Nome della variabile velocità Nord
-            dt: Intervallo temporale in minuti (default 5 min per CMEMS)
+            dt: Intervallo temporale di fallback in minuti (default 2 min)
         
         Returns:
             CurrentData object con dt specificato
@@ -650,8 +681,19 @@ class CurrentDataLoader:
                 data_u = np.ma.filled(data_u, 0.0)
             if hasattr(data_v, 'mask'):
                 data_v = np.ma.filled(data_v, 0.0)
+
+        # Auto-detect dt da coordinata temporale, con fallback al valore passato.
+        detected_dt = None
+        if time_coords is not None and len(time_coords) > 1:
+            diffs = np.diff(np.asarray(time_coords, dtype=np.float64))
+            diffs = diffs[np.isfinite(diffs)]
+            diffs = diffs[diffs > 0]
+            if diffs.size > 0:
+                detected_dt = float(np.median(diffs))
+
+        dt_minutes = detected_dt if detected_dt is not None else float(dt)
         
-        return CurrentData(data_u, data_v, x_coords, y_coords, time_coords, dt=dt)
+        return CurrentData(data_u, data_v, x_coords, y_coords, time_coords, dt=dt_minutes)
 
 
 class DataManager:
@@ -1089,7 +1131,10 @@ class DataManager:
             return self._nc_loader.load(run_id)
 
         # Prendi un file random per questa sorgente
-        field, _ = self.get_random_field_for_source(source_id)
+        field, selected_run_id = self.get_random_field_for_source(source_id)
+        # Preserva la versione scelta nel campo, così l'env può caricare
+        # vento/corrente coerenti tramite wind_mapping/current_mapping.
+        field.run_id = selected_run_id
         return field
     
     def load_wind_data(self, wind_filename: str) -> WindData:

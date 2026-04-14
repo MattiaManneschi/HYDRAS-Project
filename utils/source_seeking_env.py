@@ -57,7 +57,7 @@ class SourceSeekingConfig:
     spawn_max_distance: float = 1500.0  # m distanza massima dalla sorgente
     spawn_start_frame: int = 352  # frame di partenza (25% della simulazione, Chunk 0) - sovrascitto da chunk_id
     spawn_conc_threshold: float = 0.5  # soglia minima concentrazione per spawn
-    chunk_id: int = 0  # 0 = spawn @1/4, 1 = spawn @1/2, 2 = spawn @3/4 della simulazione (data augmentation)
+    chunk_id: int = 0  # supportati: 0 = spawn @1/4, 2 = spawn @3/4 della simulazione
 
     # Reward
     source_distance_threshold: float = 50  # m (intorno di successo)
@@ -68,6 +68,10 @@ class SourceSeekingConfig:
     plume_reward_positive: float = 0.5  # reward binario dentro il plume
     plume_reward_negative: float = -0.5  # penalità fuori dal plume
     plume_threshold: float = 0.1  # soglia concentrazione per "dentro il plume"
+    plume_stay_reward: float = 0.5  # bonus se resta nel plume tra step consecutivi
+    plume_reentry_reward: float = 0.25  # bonus se rientra nel plume
+    plume_exit_penalty: float = -1.5  # penalità se esce dal plume
+    outside_plume_distance_reward_scale: float = 0.35  # riduce reward distanza positivo fuori plume
     concentration_gradient_reward_positive: float = 0.05  # reward per aumento concentrazione
     concentration_gradient_reward_negative: float = -0.05  # penalty per diminuzione concentrazione
     
@@ -198,6 +202,7 @@ class SourceSeekingEnv(gym.Env):
         self.steps = 0
         self.prev_concentration = 0.0
         self.prev_distance = 0.0
+        self._prev_position: Optional[np.ndarray] = None
 
         # Memory buffer per concentrazioni passate (usata nell'osservazione)
         self._concentration_memory: List[float] = [0.0] * self.config.memory_length
@@ -314,9 +319,11 @@ class SourceSeekingEnv(gym.Env):
             (x_coords - self.source_position[0])**2 +
             (y_coords - self.source_position[1])**2
         )
+        active_min_distance = self.config.spawn_min_distance
+        active_max_distance = self.config.spawn_max_distance
         distance_mask = (
-            (distances >= self.config.spawn_min_distance) &
-            (distances <= self.config.spawn_max_distance)
+            (distances >= active_min_distance) &
+            (distances <= active_max_distance)
         )
         
         valid_x = x_coords[distance_mask]
@@ -324,51 +331,82 @@ class SourceSeekingEnv(gym.Env):
 
         # Se non ci sono punti nei vincoli ristretti, rilassa progressivamente i limiti
         # MA rimani sempre nel plume
-        
         if len(valid_x) == 0:
-            # Rilassa solo il limit massimo di distanza, mantieni il minimo
-            relaxed_mask = distances >= self.config.spawn_min_distance
-            valid_x = x_coords[relaxed_mask]
-            valid_y = y_coords[relaxed_mask]
-        
+            relaxation_steps = [
+                (self.config.spawn_min_distance, np.inf),
+                (self.config.spawn_min_distance * 0.75, np.inf),
+                (self.config.spawn_min_distance * 0.5, np.inf),
+                (0.0, np.inf),
+            ]
+            for min_dist, max_dist in relaxation_steps:
+                relaxed_mask = (distances >= min_dist) & (distances <= max_dist)
+                valid_x = x_coords[relaxed_mask]
+                valid_y = y_coords[relaxed_mask]
+                if len(valid_x) > 0:
+                    active_min_distance = float(min_dist)
+                    active_max_distance = float(max_dist)
+                    break
+
         if len(valid_x) == 0:
-            # Rilassa ancora: 50% del min_distance
-            min_dist_relaxed = self.config.spawn_min_distance * 0.5
-            relaxed_mask = distances >= min_dist_relaxed
-            valid_x = x_coords[relaxed_mask]
-            valid_y = y_coords[relaxed_mask]
-        
-        if len(valid_x) == 0:
-            # Rilassa fino al massimo: spawnare ovunque nel plume
+            # Fallback finale: ovunque nel plume
             valid_x = x_coords
             valid_y = y_coords
+            active_min_distance = 0.0
+            active_max_distance = np.inf
 
         # Filtra punti troppo vicini alla terra
         land_safe_mask = np.array([
             self._min_distance_to_land(valid_x[i], valid_y[i]) >= self.config.spawn_min_land_distance
             for i in range(len(valid_x))
         ])
-        
-        if np.any(land_safe_mask):
+
+        enforce_land_constraint = bool(np.any(land_safe_mask))
+        if enforce_land_constraint:
             valid_x = valid_x[land_safe_mask]
             valid_y = valid_y[land_safe_mask]
-        
-        # Se dopo filtro terra non ci sono punti, rilassa il vincolo terra
-        if len(valid_x) == 0:
-            # Spawnare ovunque nel plume (priorità al plume su terra)
-            valid_x = x_coords
-            valid_y = y_coords
 
-        # Scegli una cella random tra quelle valide (SEMPRE nel plume)
-        idx = self.np_random.integers(len(valid_x))
-        x = valid_x[idx]
-        y = valid_y[idx]
+        def is_valid_spawn_position(x: float, y: float) -> bool:
+            in_domain = (
+                self.config.xmin <= x <= self.config.xmax and
+                self.config.ymin <= y <= self.config.ymax
+            )
+            if not in_domain:
+                return False
 
-        # Aggiungi piccolo rumore
-        x += self.np_random.uniform(-5, 5)
-        y += self.np_random.uniform(-5, 5)
+            conc = self.field.get_concentration(x, y)
+            if conc < self.config.spawn_conc_threshold:
+                return False
 
-        return (float(x), float(y))
+            distance = np.sqrt(
+                (x - self.source_position[0])**2 +
+                (y - self.source_position[1])**2
+            )
+            if distance < active_min_distance or distance > active_max_distance:
+                return False
+
+            if enforce_land_constraint:
+                if self._min_distance_to_land(x, y) < self.config.spawn_min_land_distance:
+                    return False
+
+            return True
+
+        for _ in range(20):
+            idx = int(self.np_random.integers(len(valid_x)))
+            base_x = float(valid_x[idx])
+            base_y = float(valid_y[idx])
+            x = base_x + float(self.np_random.uniform(-5, 5))
+            y = base_y + float(self.np_random.uniform(-5, 5))
+            if is_valid_spawn_position(x, y):
+                return (x, y)
+
+        for _ in range(20):
+            idx = int(self.np_random.integers(len(valid_x)))
+            x = float(valid_x[idx])
+            y = float(valid_y[idx])
+            if is_valid_spawn_position(x, y):
+                return (x, y)
+
+        return (float(valid_x[0]), float(valid_y[0]))
 
 
     def _get_observation(self) -> np.ndarray:
@@ -518,23 +556,50 @@ class SourceSeekingEnv(gym.Env):
 
     def _is_time_varying(self) -> bool:
         """
-        BUG #13 FIX: Verifica se il field e i dati di vento/corrente sono time-varying.
-        Utile per decidere se avanzare i timestep durante l'episodio.
+        Verifica se il campo di concentrazione è time-varying.
+        La concentrazione guida il tempo della simulazione; vento e corrente
+        vengono poi sincronizzati in minuti reali.
         """
-        has_time_varying_field = self.field.n_timesteps > 1
-        has_wind = self.wind_data is not None and len(self.wind_data.time_coords) > 1
-        has_current = self.current_data is not None and self.current_data.n_timesteps > 1
-        
-        # Se il field ha tempo, almeno uno tra wind/corrente deve averlo (fallback OK se None)
-        return has_time_varying_field and (has_wind or has_current or (self.wind_data is None and self.current_data is None))
+        return self.field.n_timesteps > 1
 
     def _check_source_reached(self) -> bool:
-        """Verifica se l'agente ha raggiunto la sorgente."""
-        distance = np.sqrt(
-            (self.state.x - self.source_position[0])**2 +
-            (self.state.y - self.source_position[1])**2
-        )
-        return distance < self.config.source_distance_threshold
+        """Verifica se l'agente ha raggiunto la sorgente.
+
+        Considera sia la posizione corrente, sia il segmento tra posizione
+        precedente e corrente: evita falsi "quasi-hit" dovuti al campionamento
+        discreto degli step (10 m) vicino alla soglia di successo.
+        """
+        if self.state is None:
+            return False
+
+        threshold = float(self.config.source_distance_threshold)
+        sx, sy = float(self.source_position[0]), float(self.source_position[1])
+        cx, cy = float(self.state.x), float(self.state.y)
+
+        # Check standard sulla posizione corrente.
+        distance = np.sqrt((cx - sx) ** 2 + (cy - sy) ** 2)
+        if distance <= threshold:
+            return True
+
+        # Check continuo sul segmento precedente->corrente.
+        prev_pos = self._prev_position
+        if prev_pos is None:
+            return False
+
+        x0, y0 = float(prev_pos[0]), float(prev_pos[1])
+        x1, y1 = cx, cy
+        seg_dx = x1 - x0
+        seg_dy = y1 - y0
+        seg_len_sq = seg_dx * seg_dx + seg_dy * seg_dy
+        if seg_len_sq <= 1e-12:
+            return False
+
+        t = ((sx - x0) * seg_dx + (sy - y0) * seg_dy) / seg_len_sq
+        t = float(np.clip(t, 0.0, 1.0))
+        closest_x = x0 + t * seg_dx
+        closest_y = y0 + t * seg_dy
+        closest_dist = np.sqrt((closest_x - sx) ** 2 + (closest_y - sy) ** 2)
+        return closest_dist <= threshold
 
     def action_masks(self) -> np.ndarray:
         """Ritorna una maschera booleana delle azioni valide.
@@ -570,8 +635,11 @@ class SourceSeekingEnv(gym.Env):
             if self.field.is_land(new_x, new_y):
                 masks[action_idx] = False
         
-        # Se tutte le azioni sono mascherate, ritorna la maschera comunque
-        # (BUG #11 FIX: Non disabilitare la sicurezza con fallback pericoloso)
+        # Se tutte le azioni sono mascherate, evita crash di MaskablePPO
+        # e lascia al reward il compito di penalizzare scelte non valide.
+        if not masks.any():
+            return np.ones(self.config.n_discrete_actions, dtype=bool)
+
         return masks
 
     def _min_distance_to_land(self, x: float, y: float) -> float:
@@ -593,6 +661,7 @@ class SourceSeekingEnv(gym.Env):
         2. Penalità terra e bordi (terminale)
         3. Reward distanza (segnale dominante continuo)
         4. Reward binario plume (+0.3 dentro, -0.3 fuori)
+        4b. Reward transizione plume (stay/re-entry/exit)
         5. Reward gradiente concentrazione (+0.1 aumento, -0.1 diminuzione)
         5b. Reward allineamento vento (controcorrente = reward, a favore = penalty)
         6. Penalità tempo (-0.1 per step)
@@ -646,11 +715,30 @@ class SourceSeekingEnv(gym.Env):
             info['plume_reward'] = self.config.plume_reward_negative
         info['in_plume'] = in_plume
 
+        prev_in_plume = self.prev_concentration > self.config.plume_threshold
+        plume_transition_reward = 0.0
+        if in_plume and prev_in_plume:
+            plume_transition_reward = self.config.plume_stay_reward
+        elif in_plume and not prev_in_plume:
+            plume_transition_reward = self.config.plume_reentry_reward
+        elif not in_plume and prev_in_plume:
+            plume_transition_reward = self.config.plume_exit_penalty
+
+        reward += plume_transition_reward
+        info['plume_transition_reward'] = plume_transition_reward
+        info['prev_in_plume'] = prev_in_plume
+
         # ============================================================
         # 4. REWARD DISTANZA (PRIORITARIO)
         # ============================================================
         distance_improvement = self.prev_distance - current_distance
         distance_reward = distance_improvement * 5.0 * self.config.distance_reward_multiplier
+        outside_plume_scale = float(np.clip(self.config.outside_plume_distance_reward_scale, 0.0, 1.0))
+
+        # Fuori plume, attenua il reward distanza positivo per evitare scorciatoie
+        # geometriche che fanno perdere il plume vicino alla sorgente.
+        if not in_plume and distance_reward > 0:
+            distance_reward *= outside_plume_scale
         
         # Applica distance reward sempre, ma annulla solo il component negativo fuori dal plume
         if not in_plume and distance_reward < 0:
@@ -660,6 +748,7 @@ class SourceSeekingEnv(gym.Env):
         
         reward += distance_reward
         info['distance_reward'] = distance_reward
+        info['outside_plume_distance_scale'] = outside_plume_scale
 
         # ============================================================
         # 5. REWARD GRADIENTE CONCENTRAZIONE
@@ -788,6 +877,7 @@ class SourceSeekingEnv(gym.Env):
 
         # Inizializza stato agente
         self.state = AgentState(x=spawn_pos[0], y=spawn_pos[1])
+        self._prev_position = self.state.position.copy()
         self._on_land = False  # BUG #5 FIX: Inizializza flag terra
         self.steps = 0
 
@@ -816,7 +906,7 @@ class SourceSeekingEnv(gym.Env):
         # Sincronizza vento e corrente al timestep di start usando TEMPO REALE (minuti)
         # dt_conc = 2 min/frame, dt_wind = 60 min/frame, dt_current = 2 min/frame
         # set_time_from_minutes() converte automaticamente: time_idx = time_minutes / dt
-        if self.field.n_timesteps > 1:
+        if self._is_time_varying():
             # Calcola tempo reale dalla concentrazione (dt_conc = 2 minuti per frame)
             time_minutes = self._start_time_idx * 2.0
             
@@ -865,6 +955,7 @@ class SourceSeekingEnv(gym.Env):
 
         # Registra posizione prima dell'azione
         old_x, old_y = self.state.x, self.state.y
+        self._prev_position = np.array([old_x, old_y], dtype=np.float64)
 
         # Applica azione
         self._apply_action(action)
@@ -876,17 +967,17 @@ class SourceSeekingEnv(gym.Env):
         self._displacement_memory.append((dx, dy))
 
         # Avanza il tempo del campo se time-varying (partendo dal frame di start)
-        if self.field.n_timesteps > 1:
+        if self._is_time_varying():
             # Calcola il frame di concentrazione a partire dal tempo simulato
             # time_offset è il numero di step × dt (in secondi) convertito a minuti
             # dt_conc = 2 minuti per frame
             time_offset_minutes = (self.steps * self.config.dt / 60.0)  # secondi → minuti
             time_minutes = self._start_time_idx * 2.0 + time_offset_minutes
             
-            # Concentrazione: usa frame integer
+            # Concentrazione: usa frame float (interpolazione temporale)
             time_offset_frames = time_offset_minutes / 2.0  # dt_conc = 2 min per frame
-            time_idx = int(self._start_time_idx + time_offset_frames)
-            time_idx = max(0, min(time_idx, self.field.n_timesteps - 1))
+            time_idx = self._start_time_idx + time_offset_frames
+            time_idx = max(0.0, min(time_idx, float(self.field.n_timesteps - 1)))
             self.field.set_time(time_idx)
             
             # Vento e corrente: sincronizza con tempo reale in minuti
@@ -917,16 +1008,28 @@ class SourceSeekingEnv(gym.Env):
         # Controlla terminazione
         terminated = False
         truncated = False
+        termination_reason = None
 
-        if self._check_source_reached():
+        source_reached = self._check_source_reached()
+        out_of_bounds = self._check_boundary()
+        on_land = self._check_on_land()
+
+        if source_reached:
             terminated = True
-        elif self._check_boundary():
+            termination_reason = 'success'
+        elif out_of_bounds:
             terminated = True
-        elif self._check_on_land():
+            termination_reason = 'boundary'
+        elif on_land:
             terminated = True  # Termina se va sulla terra
+            termination_reason = 'land'
 
-        if self.steps >= self.config.max_steps:
+        if not terminated and self.steps >= self.config.max_steps:
             truncated = True
+            termination_reason = 'timeout'
+
+        if termination_reason is None:
+            termination_reason = 'running'
 
         # Osservazione
         observation = self._get_observation()
@@ -937,9 +1040,13 @@ class SourceSeekingEnv(gym.Env):
             'steps': self.steps,
             'position': self.state.position.tolist(),
             'velocity': self.state.velocity.tolist(),
-            'source_reached': self._check_source_reached(),
-            'out_of_bounds': self._check_boundary(),
-            'on_land': self._check_on_land(),
+            'source_reached': source_reached,
+            'is_success': bool(source_reached),
+            'out_of_bounds': out_of_bounds,
+            'on_land': on_land,
+            'terminated': terminated,
+            'truncated': truncated,
+            'termination_reason': termination_reason,
             'end_time_idx': int(self.field._current_time_idx) if hasattr(self.field, '_current_time_idx') else self._start_time_idx  # Salva il frame finale prima del reset
         }
 

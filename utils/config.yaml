@@ -35,7 +35,7 @@ agent:
 environment:
   # Time settings
   dt: 10  # s - timestep della simulazione
-  max_episode_steps: 300  # passi massimi per episodio (~50 min: 3000s / 10s = 300 steps) - adatto ai 1411 timesteps disponibili
+  max_episode_steps: 1080  # passi massimi per episodio (3 ore: 10800s / 10s = 1080 steps)
 
   # Reward shaping
   reward:
@@ -46,8 +46,12 @@ environment:
     land_proximity_penalty_max: -5.0  # penalità massima per vicinanza terra (aumentata)
     distance_threshold: 50  # m - distanza dalla sorgente per "trovato"
     distance_reward_multiplier: 1.0  # moltiplicatore per reward distanza
-    plume_reward_positive: 1.0  # reward binario dentro il plume (PRIORITARIO)
-    plume_reward_negative: -1.0  # penalità fuori dal plume (PRIORITARIO)
+    plume_reward_positive: 1.5  # reward binario dentro il plume (PRIORITARIO)
+    plume_reward_negative: -1.5  # penalità fuori dal plume (PRIORITARIO)
+    plume_stay_reward: 0.75  # bonus se resta nel plume da uno step al successivo
+    plume_reentry_reward: 0.4  # bonus se rientra nel plume
+    plume_exit_penalty: -2.0  # penalità se esce dal plume
+    outside_plume_distance_reward_scale: 0.35  # attenua reward distanza positivo quando fuori plume
     plume_threshold: 0.1  # soglia concentrazione per "dentro il plume"
     concentration_gradient_reward_positive: 0.05
     concentration_gradient_reward_negative: -0.05
@@ -72,16 +76,17 @@ training:
   algorithm: "PPO"
 
   # Hyperparameters
-  learning_rate: 0.00005  # Ridotto a 5e-5 per reward ad alta varianza
+  learning_rate: 0.00002  # Fine-tuning: LR ridotto per stabilizzare su 106 sorgenti
   n_steps: 4096  # Aumentato per avere ~4 episodi completi per batch
-  batch_size: 64
-  n_epochs: 10
+  batch_size: 128
+  n_epochs: 5
   gamma: 0.99
   gae_lambda: 0.95
-  clip_range: 0.2
-  ent_coef: 0.05  # Entropy coefficient
+  clip_range: 0.15
+  ent_coef: 0.01  # Ridotto per limitare oscillazioni tardive
   vf_coef: 0.3
-  max_grad_norm: 0.5
+  max_grad_norm: 0.4
+  target_kl: 0.01  # Early stop update PPO se policy shift troppo aggressivo
 
   # Network architecture
   policy: "MlpPolicy"
@@ -92,31 +97,29 @@ training:
     activation_fn: "tanh"
 
   # Training loop
-  total_timesteps: 6000000  # 6M timesteps per training
+  total_timesteps: 1500000  # Fine-tuning: 1.5M timesteps aggiuntivi
   eval_freq: 10000
-  n_eval_episodes: 10
+  n_eval_episodes: 35
+  chunk_ids: [0, 2]  # Chunk usati in training: 0=Q1/4, 2=Q3/4
+  eval_chunk_id: 0  # Chunk usato in eval fisso
+  resume_from: "trained_models/ppo_20260407_091232/models/best/best_model.zip"  # Baseline stabile (~90% SR) per fine-tuning
+  eval_source_id: "SRC001"  # scenario fisso per EvalCallback (sorgente)
+  eval_version: "V1"  # scenario fisso per EvalCallback (versione vento/corrente)
   save_freq: 50000
+  progress_bar: true  # Mostra barra di avanzamento training
 
   # Logging
   tensorboard_log: "./logs/tensorboard"
   verbose: 1
 
-# Curriculum learning - Progressive training on increasing source sets (V0+V1+V2+V3)
+# Curriculum learning - Fine-tuning su full training set (106 sorgenti x 4 scenari)
 curriculum:
   enabled: true
   phases:
     - start: 0
-      end: 1800000
-      num_sources: 35  # SRC001-SRC035 (first 1/3 of 106 training sources × V0+V1+V2+V3)
-      description: "Phase 1: Initial 35 sources with all 4 versions (1.8M steps)"
-    - start: 1800000
-      end: 4200000
-      num_sources: 70  # SRC001-SRC070 (first 2/3 of 106 training sources × V0+V1+V2+V3)
-      description: "Phase 2: Extended to 70 sources with all 4 versions (2.4M steps)"
-    - start: 4200000
-      end: 6000000
-      num_sources: 106  # SRC001-SRC106 (full 80% training set × V0+V1+V2+V3)
-      description: "Phase 3: Full 106 training sources with all 4 versions (1.8M steps)"
+      end: 1500000
+      num_sources: 106  # SRC001-SRC106 -> 106 sorgenti x 4 scenari vento = 424 file
+      description: "Fine-tuning: 106 sources x 4 scenarios = 424 files (1.5M steps)"
 
 # Data configuration
 data:
@@ -137,18 +140,3 @@ data:
   # Preprocessing
   interpolation: "linear"
   fill_value: 0.0
-
-# Synthetic data (for testing without NC files)
-synthetic:
-  enabled: true  # usa dati sintetici se NC non disponibile
-  plume_model: "gaussian"  # "gaussian", "advection_diffusion"
-
-  # Gaussian plume parameters
-  gaussian:
-    diffusion_coef: 5.0  # m²/s
-    advection_velocity: [0.1, 0.05]  # m/s [u, v]
-    source_strength: 1000  # g/m³
-
-  # Time-varying parameters
-  time_varying: true
-  wind_variability: 0.2  # coefficiente di variabilità

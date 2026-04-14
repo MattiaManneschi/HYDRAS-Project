@@ -75,11 +75,8 @@ class SourceSeekingCallback(BaseCallback):
         for info, done in zip(infos, dones):
             if not done:
                 continue
-            # Episodio terminato: registra se successo o collisione terra
-            if 'source_found' in info:  # Fixed: was 'source_reached', now 'source_found'
-                self.success_rate.append(1.0)
-            elif 'distance_to_source' in info:  # Episode ended without success
-                self.success_rate.append(0.0)
+            # Episodio terminato: successo se la sorgente è stata raggiunta.
+            self.success_rate.append(1.0 if info.get('source_reached', False) else 0.0)
 
         # Log ogni 1000 steps (almeno 20 episodi per stabilità statistica)
         if self.num_timesteps % 1000 == 0 and len(self.success_rate) >= 20:
@@ -108,10 +105,13 @@ class CurriculumCallback(BaseCallback):
     """
     Callback per implementare curriculum learning con progressione di sorgenti.
     
-    Progressione su 6M timesteps ai tutte e 4 le versioni (V0, V1, V2, V3):
-    - Fase 1 (0-1.8M steps): SRC001-SRC035 × 4 versions (35 sorgenti, 1/3 dell'80%)
-    - Fase 2 (1.8M-4.2M steps): SRC001-SRC070 × 4 versions (70 sorgenti, 2/3 dell'80%)
-    - Fase 3 (4.2M-6M steps): SRC001-SRC106 × 4 versions (106 sorgenti, 80% del totale 132)
+    Progressione su 6M timesteps su tutte e 4 le versioni (V0, V1, V2, V3):
+    - Fase 1 (0-0.9M): SRC001-SRC020
+    - Fase 2 (0.9M-1.8M): SRC001-SRC035
+    - Fase 3 (1.8M-3.0M): SRC001-SRC055
+    - Fase 4 (3.0M-4.5M): SRC001-SRC080
+    - Fase 5 (4.5M-6.0M): SRC001-SRC106
+    Ogni sorgente equivale a 4 scenari (V0+V1+V2+V3).
     """
     
     def __init__(
@@ -258,7 +258,7 @@ def create_env(
         source_found_reward=env_config.get('reward', {}).get('source_reached_bonus', 100),
         step_penalty=env_config.get('reward', {}).get('step_penalty', -0.1),
         boundary_penalty=env_config.get('reward', {}).get('boundary_penalty', -10),
-        source_distance_threshold=env_config.get('reward', {}).get('distance_threshold', 100),
+        source_distance_threshold=env_config.get('reward', {}).get('distance_threshold', 50),
         distance_reward_multiplier=env_config.get('reward', {}).get('distance_reward_multiplier', 1.0),
         # Land avoidance
         land_proximity_threshold=env_config.get('reward', {}).get('land_proximity_threshold', 10.0),
@@ -274,6 +274,10 @@ def create_env(
         # Plume reward
         plume_reward_positive=env_config.get('reward', {}).get('plume_reward_positive', 0.5),
         plume_reward_negative=env_config.get('reward', {}).get('plume_reward_negative', -0.5),
+        plume_stay_reward=env_config.get('reward', {}).get('plume_stay_reward', 0.5),
+        plume_reentry_reward=env_config.get('reward', {}).get('plume_reentry_reward', 0.25),
+        plume_exit_penalty=env_config.get('reward', {}).get('plume_exit_penalty', -1.5),
+        outside_plume_distance_reward_scale=env_config.get('reward', {}).get('outside_plume_distance_reward_scale', 0.35),
         plume_threshold=env_config.get('reward', {}).get('plume_threshold', 0.1),
         # Concentration gradient reward
         concentration_gradient_reward_positive=env_config.get('reward', {}).get('concentration_gradient_reward_positive', 0.05),
@@ -358,7 +362,10 @@ def make_env_fn(
         
         # Imposta allowed_sources PRIMA del reset per evitare errori
         if allowed_sources is not None:
-            env.allowed_sources = allowed_sources
+            inner = env
+            while hasattr(inner, 'env'):
+                inner = inner.env
+            inner.allowed_sources = list(allowed_sources)
         
         env.reset(seed=seed + rank)
         
@@ -481,15 +488,36 @@ def train(
     print(f"    - Concentrazione Vx + Current Vx caricati coerentemente")
 
     # Crea ambienti vettorizzati
-    print(f"\nCreating {n_envs*2} parallel environments...")
-    print(f"  (2 chunks per file: spawn @1/4 e @3/4 della simulazione)")
-    print(f"  Chunk config: [0, 2] = Q1/4 + Q3/4")
+    raw_chunk_ids = training_config.get('chunk_ids', [0, 2])
+    if not isinstance(raw_chunk_ids, list) or len(raw_chunk_ids) == 0:
+        raise ValueError("training.chunk_ids must be a non-empty list containing 0 and/or 2")
+
+    chunk_ids: List[int] = []
+    for cid in raw_chunk_ids:
+        try:
+            chunk_int = int(cid)
+        except (TypeError, ValueError):
+            continue
+        if chunk_int in [0, 2]:
+            chunk_ids.append(chunk_int)
+    chunk_ids = sorted(set(chunk_ids))
+
+    if not chunk_ids:
+        raise ValueError("No valid chunk IDs provided. Allowed values are [0, 2]")
+
+    chunk_desc = []
+    if 0 in chunk_ids:
+        chunk_desc.append("0=Q1/4")
+    if 2 in chunk_ids:
+        chunk_desc.append("2=Q3/4")
+
+    print(f"\nCreating {n_envs * len(chunk_ids)} parallel environments...")
+    print(f"  (1 env per worker per chunk configurato)")
+    print(f"  Chunk config: {chunk_desc}")
 
     timesteps = total_timesteps or training_config.get('total_timesteps', 6000000)
 
-    # Crea 2 environments per ogni "file" (rank):
-    # - chunk_id=0: spawn @1/4 della simulazione (plume concentrato)
-    # - chunk_id=2: spawn @3/4 della simulazione (plume disperso)
+    # Crea environments per ogni worker su tutti i chunk configurati.
     env_fns = [
         make_env_fn(
             config, concentration_field, wind_data, current_data, i, chunk_id, 
@@ -499,25 +527,86 @@ def train(
             current_mapping=current_mapping,
             allowed_sources=discovered_sources  # Passa le sorgenti disponibili
         )
-        for i in range(n_envs) for chunk_id in [0, 2]
+        for i in range(n_envs) for chunk_id in chunk_ids
     ]
+    n_parallel_envs = len(env_fns)
 
     # DummyVecEnv sempre (necessario per accesso diretto agli env)
-    vec_env = DummyVecEnv(env_fns)
+    base_vec_env = DummyVecEnv(env_fns)
+    vec_env = base_vec_env
 
     # Normalizzazione
-    if config.get('environment', {}).get('normalize_obs', True):
-        vec_env = VecNormalize(
-            vec_env,
-            norm_obs=True,
-            norm_reward=config.get('environment', {}).get('normalize_reward', False),
-            clip_obs=10.0
-        )
+    use_vec_normalize = config.get('environment', {}).get('normalize_obs', True)
+    norm_reward_enabled = config.get('environment', {}).get('normalize_reward', False)
+    if use_vec_normalize:
+        # In resume, ricarica le statistiche VecNormalize del run precedente
+        # senza creare doppi wrapper VecNormalize.
+        loaded_vecnorm = False
+        if resume_from:
+            resume_path = Path(resume_from)
+            vecnorm_candidates = [
+                resume_path.parent / "vec_normalize.pkl",            # .../models/vec_normalize.pkl
+                resume_path.parent.parent / "vec_normalize.pkl",     # .../models/best/../vec_normalize.pkl
+                resume_path.parent.parent.parent / "vec_normalize.pkl"
+            ]
+            for vecnorm_path in vecnorm_candidates:
+                if vecnorm_path.exists():
+                    vec_env = VecNormalize.load(str(vecnorm_path), base_vec_env)
+                    vec_env.training = True
+                    vec_env.norm_reward = norm_reward_enabled
+                    print(f"  Loaded VecNormalize stats from: {vecnorm_path}")
+                    loaded_vecnorm = True
+                    break
 
-    # Crea ambiente di valutazione (usa primo file NC o sintetico, non random)
+        if not loaded_vecnorm:
+            if resume_from:
+                print("  WARNING: resume_from set but vec_normalize.pkl not found; using fresh normalization stats")
+            vec_env = VecNormalize(
+                base_vec_env,
+                norm_obs=True,
+                norm_reward=norm_reward_enabled,
+                clip_obs=10.0
+            )
+
+    # Eval scenario fisso e riproducibile (source+version), con run_id valorizzato
+    # per garantire mapping coerente Conc/Wind/Current in EvalCallback.
+    eval_source_id = training_config.get('eval_source_id', 'SRC001')
+    eval_version = training_config.get('eval_version', 'V1')
+    eval_pattern = f"_{eval_version}_{eval_source_id}_"
+    eval_candidates = [
+        f for f in data_manager._nc_files
+        if eval_pattern in f.name and 'Conc' in f.name
+    ]
+
+    if eval_candidates:
+        eval_file = sorted(eval_candidates)[0]
+        eval_concentration_field = data_manager._nc_loader.load(
+            str(eval_file),
+            concentration_var="Concentration - component 1"
+        )
+        eval_concentration_field.run_id = f"{eval_source_id}_{eval_version}"
+        eval_coords = data_manager.get_source_coordinates(eval_source_id)
+        if eval_coords:
+            eval_concentration_field.source_position = eval_coords
+        print(f"  Eval scenario fisso: {eval_source_id}_{eval_version} ({eval_file.name})")
+    else:
+        # Fallback robusto: usa get_concentration_field (ora preserva run_id)
+        eval_concentration_field = data_manager.get_concentration_field(source_id=eval_source_id)
+        print(f"  Eval scenario fallback: {eval_source_id} (versione da field.run_id)")
+
+    # Chunk di eval (default 0 = Q1/4). Se non valido, fallback a 0.
+    eval_chunk_id = training_config.get('eval_chunk_id', 0)
+    try:
+        eval_chunk_id = int(eval_chunk_id)
+    except (TypeError, ValueError):
+        eval_chunk_id = 0
+    if eval_chunk_id not in [0, 2]:
+        eval_chunk_id = 0
+
+    # Crea ambiente di valutazione (usa file NC reale, non random)
     eval_env = DummyVecEnv([
         make_env_fn(
-            config, concentration_field, wind_data, current_data, 0, 0, 
+            config, eval_concentration_field, wind_data, current_data, 0, eval_chunk_id,
             seed + 1000, data_dir, False,
             data_manager=data_manager,
             wind_mapping=wind_mapping,
@@ -525,7 +614,7 @@ def train(
             allowed_sources=discovered_sources  # Passa le sorgenti disponibili anche all'eval
         )
     ])
-    if config.get('environment', {}).get('normalize_obs', True):
+    if use_vec_normalize and isinstance(vec_env, VecNormalize):
         eval_env = VecNormalize(
             eval_env,
             norm_obs=True,
@@ -557,37 +646,42 @@ def train(
     PPOClass = MaskablePPO if use_maskable else PPO
     algo_name = "MaskablePPO" if use_maskable else "PPO"
     
+    # Hyperparameters usati sia per modello nuovo che per fine-tuning (resume)
+    model_kwargs = {
+        'policy': training_config.get('policy', 'MlpPolicy'),
+        'env': vec_env,
+        'learning_rate': training_config.get('learning_rate', 5e-5),
+        'n_steps': training_config.get('n_steps', 4096),
+        'batch_size': training_config.get('batch_size', 64),
+        'n_epochs': training_config.get('n_epochs', 10),
+        'gamma': training_config.get('gamma', 0.99),
+        'gae_lambda': training_config.get('gae_lambda', 0.95),
+        'clip_range': training_config.get('clip_range', 0.2),
+        'ent_coef': training_config.get('ent_coef', 0.05),
+        'vf_coef': training_config.get('vf_coef', 0.3),
+        'max_grad_norm': training_config.get('max_grad_norm', 0.5),
+        'target_kl': training_config.get('target_kl', None),
+        'policy_kwargs': sb3_policy_kwargs,
+        'tensorboard_log': str(log_dir / "tensorboard"),
+        'verbose': training_config.get('verbose', 1),
+        'seed': seed,
+        'device': 'cpu',  # Forza CPU - MlpPolicy è più efficiente su CPU
+    }
+
     # Crea o carica modello
     if resume_from:
         print(f"\nResuming training from: {resume_from}")
-        model = PPOClass.load(
-            resume_from,
-            env=vec_env,
-            tensorboard_log=str(log_dir / "tensorboard")
-        )
+        model = PPOClass(**model_kwargs)
+        # Carica i pesi policy/value dal checkpoint ma mantiene gli hyperparams correnti
+        # del fine-tuning (LR, ent_coef, n_epochs, target_kl, ecc.).
+        loaded_model = PPOClass.load(resume_from, device='cpu')
+        model.set_parameters(loaded_model.get_parameters(), exact_match=False)
+        del loaded_model
     else:
         print(f"\nCreating new {algo_name} model...")
         if use_maskable:
             print("  Action masking: ENABLED (evita land collision)")
-        model = PPOClass(
-            policy=training_config.get('policy', 'MlpPolicy'),
-            env=vec_env,
-            learning_rate=training_config.get('learning_rate', 5e-5),
-            n_steps=training_config.get('n_steps', 4096),
-            batch_size=training_config.get('batch_size', 64),
-            n_epochs=training_config.get('n_epochs', 10),
-            gamma=training_config.get('gamma', 0.99),
-            gae_lambda=training_config.get('gae_lambda', 0.95),
-            clip_range=training_config.get('clip_range', 0.2),
-            ent_coef=training_config.get('ent_coef', 0.05),
-            vf_coef=training_config.get('vf_coef', 0.3),
-            max_grad_norm=training_config.get('max_grad_norm', 0.5),
-            policy_kwargs=sb3_policy_kwargs,
-            tensorboard_log=str(log_dir / "tensorboard"),
-            verbose=training_config.get('verbose', 1),
-            seed=seed,
-            device='cpu'  # Forza CPU - MlpPolicy è più efficiente su CPU
-        )
+        model = PPOClass(**model_kwargs)
 
     print(f"\nModel architecture:")
     print(f"  Algorithm: {algo_name}")
@@ -610,7 +704,10 @@ def train(
         callbacks.append(curriculum_callback)
 
     # Evaluation callback
-    eval_freq = training_config.get('eval_freq', 10000) // n_envs
+    # Le frequenze in config sono espresse in timesteps globali.
+    # SB3 le interpreta in step del VecEnv, quindi dividiamo per il numero
+    # reale di ambienti paralleli (2 chunk per worker).
+    eval_freq = max(1, training_config.get('eval_freq', 10000) // n_parallel_envs)
     eval_callback = EvalCallback(
         eval_env,
         best_model_save_path=str(model_dir / "best"),
@@ -635,7 +732,7 @@ def train(
 
     # Checkpoint callback
     checkpoint_callback = CheckpointCallback(
-        save_freq=training_config.get('save_freq', 50000) // n_envs,
+        save_freq=max(1, training_config.get('save_freq', 50000) // n_parallel_envs),
         save_path=str(model_dir / "checkpoints"),
         name_prefix="ppo_source_seeking"
     )
@@ -654,7 +751,7 @@ def train(
         model.learn(
             total_timesteps=timesteps,
             callback=callback,
-            progress_bar=True
+            progress_bar=training_config.get('progress_bar', True)
         )
     except KeyboardInterrupt:
         print("\n\nTraining interrupted by user!")
@@ -676,7 +773,7 @@ def train(
 
     mean_reward, std_reward = evaluate_policy(
         model, eval_env,
-        n_eval_episodes=20,
+        n_eval_episodes=training_config.get('n_eval_episodes', 10),
         deterministic=True
     )
     print(f"Mean reward: {mean_reward:.2f} +/- {std_reward:.2f}")
@@ -728,6 +825,7 @@ def main():
     os.chdir(PROJECT_ROOT)  # Assicura CWD = root del progetto
 
     config_path = str(PROJECT_ROOT / "utils" / "config.yaml")
+    config = load_config(config_path)
     output_dir = str(PROJECT_ROOT / "trained_models")
     data_dir = str(PROJECT_ROOT / "data")  # Carica da tutte le versioni (V0, V2, V3 tramite filtro)
 
@@ -737,14 +835,24 @@ def main():
             f"Scarica i file .nc di simulazione MIKE21 nella cartella 'data/'"
         )
 
-    # Train from scratch (no resume)
-    resume_from = None
-    print(f"Training from scratch on all 80% training set (V0+V1+V2+V3)\n")
+    # Optional resume path da config per fine-tuning
+    resume_from = config.get('training', {}).get('resume_from')
+    if resume_from:
+        resume_path = Path(resume_from)
+        if not resume_path.is_absolute():
+            resume_path = (PROJECT_ROOT / resume_path).resolve()
+        if not resume_path.exists():
+            raise FileNotFoundError(f"Modello per resume non trovato: {resume_path}")
+        resume_from = str(resume_path)
+        print(f"Fine-tuning from checkpoint: {resume_from}\n")
+    else:
+        resume_from = None
+        print(f"Training from scratch on all 80% training set (V0+V1+V2+V3)\n")
     
     train(
         config_path=config_path,
         output_dir=output_dir,
-        n_envs=4,
+        n_envs=2,
         seed=42,
         data_dir=data_dir,
         resume_from=resume_from,

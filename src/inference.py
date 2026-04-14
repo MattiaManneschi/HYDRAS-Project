@@ -12,9 +12,11 @@ Output:
 """
 
 import sys
+import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 import yaml
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
@@ -106,7 +108,7 @@ class EpisodeResult:
     source_id: str         # "SRC001" ... "SRC132"
     episode: int
     success: bool
-    termination: str       # "success" / "timeout" / "boundary"
+    termination: str       # "success" / "timeout" / "boundary" / "land"
     initial_distance: float  # m - distanza spawn-sorgente
     final_distance: float  # m
     steps: int
@@ -134,6 +136,67 @@ class ScenarioStats:
 def load_config(config_path: str) -> dict:
     with open(config_path, 'r') as f:
         return yaml.safe_load(f)
+
+
+def write_inference_log(
+    output_path: Path,
+    model_path: str,
+    dt_seconds: float,
+    global_success_rate: Optional[float],
+    version_success_rates: Dict[str, Optional[float]],
+    chunk_success_rates: Dict[str, Optional[float]],
+    mean_initial_distance: Optional[float],
+    mean_success_steps: Optional[float],
+    total_scenarios: int,
+    total_episodes: int,
+) -> Path:
+    """Scrive un log di sintesi in output_path/log.txt."""
+
+    def fmt_percent(value: Optional[float]) -> str:
+        return "n/d" if value is None else f"{value * 100:.1f}%"
+
+    def fmt_distance(value: Optional[float]) -> str:
+        return "n/d" if value is None else f"{value:.1f} m"
+
+    def fmt_steps(value: Optional[float]) -> str:
+        return "n/d" if value is None else f"{value:.1f}"
+
+    mean_success_minutes = None
+    if mean_success_steps is not None:
+        mean_success_minutes = (mean_success_steps * dt_seconds) / 60.0
+
+    lines = [
+        "HYDRAS Inference Summary",
+        f"Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"Model: {model_path}",
+        "",
+        "Metrics:",
+        f"- Global Success Rate: {fmt_percent(global_success_rate)}",
+        f"- Mean Initial Distance: {fmt_distance(mean_initial_distance)}",
+        (
+            f"- Mean Success Steps: {fmt_steps(mean_success_steps)} "
+            f"(~{'n/d' if mean_success_minutes is None else f'{mean_success_minutes:.1f} min'})"
+        ),
+        "",
+        "Success Rate by Wind:",
+        f"- V0: {fmt_percent(version_success_rates.get('V0'))}",
+        f"- V1: {fmt_percent(version_success_rates.get('V1'))}",
+        f"- V2: {fmt_percent(version_success_rates.get('V2'))}",
+        f"- V3: {fmt_percent(version_success_rates.get('V3'))}",
+        "",
+        "Success Rate by Frame:",
+        f"- Q1/4: {fmt_percent(chunk_success_rates.get('Q1/4'))}",
+        f"- Q3/4: {fmt_percent(chunk_success_rates.get('Q3/4'))}",
+        "",
+        f"Total Scenarios Evaluated: {total_scenarios}",
+        f"Total Episodes Evaluated: {total_episodes}",
+    ]
+
+    log_path = output_path / "log.txt"
+    with open(log_path, 'w', encoding='utf-8') as f:
+        f.write("\n".join(lines) + "\n")
+
+    return log_path
 
 
 
@@ -167,7 +230,7 @@ def make_env_config(config: dict, chunk_id: int = 0) -> SourceSeekingConfig:
         memory_length=agent_cfg.get('memory_length', 9),
         dt=env_cfg.get('dt', 10),
         max_steps=env_cfg.get('max_episode_steps', 1080),
-        source_distance_threshold=reward_cfg.get('distance_threshold', 100),
+        source_distance_threshold=reward_cfg.get('distance_threshold', 50),
         source_found_reward=reward_cfg.get('source_reached_bonus', 100),
         step_penalty=reward_cfg.get('step_penalty', -0.1),
         boundary_penalty=reward_cfg.get('boundary_penalty', -10),
@@ -183,6 +246,10 @@ def make_env_config(config: dict, chunk_id: int = 0) -> SourceSeekingConfig:
         chunk_id=chunk_id,
         plume_reward_positive=reward_cfg.get('plume_reward_positive', 0.5),
         plume_reward_negative=reward_cfg.get('plume_reward_negative', -0.5),
+        plume_stay_reward=reward_cfg.get('plume_stay_reward', 0.5),
+        plume_reentry_reward=reward_cfg.get('plume_reentry_reward', 0.25),
+        plume_exit_penalty=reward_cfg.get('plume_exit_penalty', -1.5),
+        outside_plume_distance_reward_scale=reward_cfg.get('outside_plume_distance_reward_scale', 0.35),
         plume_threshold=reward_cfg.get('plume_threshold', 0.1),
     )
 
@@ -275,13 +342,19 @@ def run_episode(model, vec_env, deterministic=True) -> EpisodeResult:
         pos = last_info.get('position', inner.state.position.tolist())
         trajectory.append(np.array(pos))
 
-    # Determina terminazione
-    if last_info.get('source_reached', False):
-        termination = 'success'
-    elif last_info.get('out_of_bounds', False):
-        termination = 'boundary'
-    else:
-        termination = 'timeout'
+    # Determina terminazione: usa la reason esplicita dall'ambiente quando disponibile.
+    termination = last_info.get('termination_reason')
+    if termination not in {'success', 'boundary', 'land', 'timeout'}:
+        if last_info.get('source_reached', False):
+            termination = 'success'
+        elif last_info.get('out_of_bounds', False):
+            termination = 'boundary'
+        elif last_info.get('on_land', False):
+            termination = 'land'
+        else:
+            n_steps_info = int(last_info.get('steps', 0))
+            max_steps = int(getattr(inner.config, 'max_steps', 0)) if hasattr(inner, 'config') else 0
+            termination = 'timeout' if max_steps > 0 and n_steps_info >= max_steps else 'timeout'
 
     # Usa i valori dall'info dict
     final_dist = last_info.get('distance_to_source', 0.0)
@@ -407,7 +480,7 @@ def run_inference(
                      0 = spawn @1/4, 2 = spawn @3/4
     """
     if chunk_ids is None:
-        chunk_ids = [0, 2]  # Default: Q1/4 e Q3/4 (skippa Q1/2 che generalizza male)
+        chunk_ids = [0, 2]  # Default: Q1/4 e Q3/4
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -415,7 +488,7 @@ def run_inference(
     config = load_config(config_path)
     model = load_model(model_path)
     env_cfg = make_env_config(config)
-    success_threshold = config.get('environment', {}).get('reward', {}).get('distance_threshold', 100)
+    success_threshold = config.get('environment', {}).get('reward', {}).get('distance_threshold', 50)
 
     vec_norm_path = Path(model_path).parent / "vec_normalize.pkl"
     
@@ -432,9 +505,11 @@ def run_inference(
     all_sources = data_manager.get_discovered_sources()
     inference_sources = [s for s in all_sources if int(s[3:]) > 106]  # SRC107-SRC132 (26 file, ~20%)
     
-    # Mappa chunk_id a label
+    # Mappa chunk_id a label (supportati: 0, 2)
     chunk_labels = {0: "Q1/4", 2: "Q3/4"}
-    chunk_descriptions = ", ".join([f"{chunk_labels[cid]} (chunk_id={cid})" for cid in chunk_ids])
+    chunk_descriptions = ", ".join([
+        f"{chunk_labels[cid]} (chunk_id={cid})" for cid in chunk_ids
+    ])
     
     print(f"\n{'='*100}")
     print(f"HYDRAS Inference — {len(inference_sources)} sorgenti × 4 scenari vento × {len(chunk_ids)} chunk × {n_episodes} episodi")
@@ -475,7 +550,13 @@ def run_inference(
     dt_seconds = config.get('environment', {}).get('dt', 10)
     
     all_stats: List[ScenarioStats] = []
-    version_stats: Dict[str, List[float]] = {'V0': [], 'V1': [], 'V2': [], 'V3': []}
+
+    # Accumulatori episodio-level (più robusti delle medie per scenario)
+    episode_success_all: List[float] = []
+    episode_success_by_version: Dict[str, List[float]] = {'V0': [], 'V1': [], 'V2': [], 'V3': []}
+    episode_success_by_chunk: Dict[str, List[float]] = {'Q1/4': [], 'Q3/4': []}
+    initial_distances_all: List[float] = []
+    success_steps_all: List[float] = []
 
     for src_idx, source_id in enumerate(inference_sources, 1):
         if src_idx % 5 == 0:
@@ -542,6 +623,16 @@ def run_inference(
                     result.source_id = source_id
                     result.episode = ep
 
+                    success_value = 1.0 if result.success else 0.0
+                    episode_success_all.append(success_value)
+                    if version in episode_success_by_version:
+                        episode_success_by_version[version].append(success_value)
+                    if chunk_label in episode_success_by_chunk:
+                        episode_success_by_chunk[chunk_label].append(success_value)
+                    initial_distances_all.append(result.initial_distance)
+                    if result.success:
+                        success_steps_all.append(float(result.steps))
+
                     episode_results.append(result)
                     vec_env.close()
 
@@ -555,68 +646,126 @@ def run_inference(
                         time_mins = (result.steps * dt_seconds) / 60
                         print(f"  {version}_{source_id}_{chunk_label} Ep{ep+1}: spawn_dist={init_dist:>5s} → SUCCESS in {result.steps:3d} steps ({time_mins:5.1f}m)")
                     else:
-                        print(f"  {version}_{source_id}_{chunk_label} Ep{ep+1}: spawn_dist={init_dist:>5s} → {result.termination.upper()}")
+                        print(
+                            f"  {version}_{source_id}_{chunk_label} Ep{ep+1}: "
+                            f"spawn_dist={init_dist:>5s} → {result.termination.upper()} "
+                            f"at {result.steps:4d} steps (final_dist={result.final_distance:6.1f}m)"
+                        )
 
                 if episode_results:
                     # Statistiche scenario
                     stats = compute_scenario_stats(episode_results, scenario_label, source_id)
                     all_stats.append(stats)
-                    
-                    # Accumula SR per versione
-                    version_stats[version].append(stats.success_rate)
+
+    def safe_mean(values: List[float]) -> Optional[float]:
+        return float(np.mean(values)) if values else None
+
+    global_sr = safe_mean(episode_success_all)
+    mean_initial_dist = safe_mean(initial_distances_all)
+    mean_success_steps = safe_mean(success_steps_all)
+
+    version_sr = {
+        version: safe_mean(episode_success_by_version.get(version, []))
+        for version in ['V0', 'V1', 'V2', 'V3']
+    }
+    chunk_sr = {
+        chunk: safe_mean(episode_success_by_chunk.get(chunk, []))
+        for chunk in ['Q1/4', 'Q3/4']
+    }
 
     # Riepilogo globale
     if all_stats:
-        # Mappa chunk_id a label
-        chunk_labels_map = {0: "Q1/4", 2: "Q3/4"}
-        
-        # Aggregazione per chunk
-        chunk_stats = {}
-        for chunk_id in chunk_ids:
-            chunk_label = chunk_labels_map[chunk_id]
-            chunk_scenarios = [s for s in all_stats if chunk_label in s.scenario]
-            if chunk_scenarios:
-                chunk_sr = np.mean([s.success_rate for s in chunk_scenarios])
-                chunk_stats[chunk_label] = (chunk_sr, len(chunk_scenarios))
-        
         print(f"\n{'='*80}")
         print(f"RESULTS BY CHUNK (Time Instant)")
         print(f"{'='*80}")
-        for chunk_label, (chunk_sr, n_scenarios) in chunk_stats.items():
-            print(f"{chunk_label}: {chunk_sr*100:6.1f}% ({n_scenarios} scenarios)")
+        for chunk_label in ['Q1/4', 'Q3/4']:
+            sr = chunk_sr.get(chunk_label)
+            n_eps = len(episode_success_by_chunk.get(chunk_label, []))
+            if sr is None:
+                print(f"{chunk_label}: (no data)")
+            else:
+                print(f"{chunk_label}: {sr*100:6.1f}% ({n_eps} episodes)")
         
         print(f"\n{'='*80}")
         print(f"RESULTS BY WIND SCENARIO (across all chunks)")
         print(f"{'='*80}")
         
         for version in ['V0', 'V1', 'V2', 'V3']:
-            sr_list = version_stats[version]
-            if sr_list:
-                version_sr = np.mean(sr_list)
-                print(f"{version}: {version_sr*100:6.1f}% ({len(sr_list)} scenarios)")
+            sr = version_sr.get(version)
+            n_eps = len(episode_success_by_version.get(version, []))
+            if sr is not None:
+                print(f"{version}: {sr*100:6.1f}% ({n_eps} episodes)")
             else:
                 print(f"{version}: (no data)")
         
-        # Global SR
-        global_sr = np.mean([s.success_rate for s in all_stats])
-        mean_initial_dist = np.mean([s.mean_initial_dist for s in all_stats])
-        
         print(f"\n{'='*80}")
-        print(f"Global Success Rate: {global_sr*100:.1f}%")
-        print(f"Mean initial distance: {mean_initial_dist:.0f}m")
+        print(f"Global Success Rate: {('n/d' if global_sr is None else f'{global_sr*100:.1f}%')}")
+        print(f"Mean initial distance: {('n/d' if mean_initial_dist is None else f'{mean_initial_dist:.0f}m')}")
+        if mean_success_steps is not None:
+            mean_success_minutes = (mean_success_steps * dt_seconds) / 60.0
+            print(f"Mean success steps: {mean_success_steps:.1f} (~{mean_success_minutes:.1f} min)")
+        else:
+            print("Mean success steps: n/d (nessun episodio di successo)")
         print(f"Total scenarios: {len(all_stats)}")
+        print(f"Total episodes: {len(episode_success_all)}")
         print(f"{'='*80}\n")
+
+    # Scrive sempre il log di riepilogo nello stesso output_dir delle valutazioni
+    log_path = write_inference_log(
+        output_path=output_path,
+        model_path=model_path,
+        dt_seconds=dt_seconds,
+        global_success_rate=global_sr,
+        version_success_rates=version_sr,
+        chunk_success_rates=chunk_sr,
+        mean_initial_distance=mean_initial_dist,
+        mean_success_steps=mean_success_steps,
+        total_scenarios=len(all_stats),
+        total_episodes=len(episode_success_all),
+    )
+    print(f"Summary log salvato in: {log_path}")
 
     return all_stats
 
 
 def main():
+    parser = argparse.ArgumentParser(description="HYDRAS inference runner")
+    parser.add_argument(
+        "--chunk-ids",
+        type=int,
+        nargs="+",
+        choices=[0, 2],
+        default=[0, 2],
+        help="Chunk IDs da valutare: 0=Q1/4, 2=Q3/4 (es: 0 2)",
+    )
+    parser.add_argument(
+        "--episodes",
+        type=int,
+        default=5,
+        help="Numero episodi per scenario",
+    )
+    parser.add_argument(
+        "--stochastic",
+        action="store_true",
+        help="Usa policy stocastica invece di deterministica",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="evaluations_v5",
+        help="Directory output valutazioni (relativa alla root progetto o assoluta)",
+    )
+    args = parser.parse_args()
+
     PROJECT_ROOT = Path(__file__).resolve().parent.parent  # Root del progetto (parent di src/)
 
-    # Carica da tutte le versioni (V0, V2, V3 - escludendo V1 per consistency con training)
+    # Carica da tutte le versioni disponibili (V0, V1, V2, V3)
     DATA_DIR    = str(PROJECT_ROOT / "data")
     CONFIG_PATH = str(PROJECT_ROOT / "utils" / "config.yaml")
-    OUTPUT_DIR  = str(PROJECT_ROOT / "evaluations_v4")  # Valutazione su 132 sorgenti
+    output_dir_path = Path(args.output_dir)
+    if not output_dir_path.is_absolute():
+        output_dir_path = PROJECT_ROOT / output_dir_path
+    OUTPUT_DIR  = str(output_dir_path)
 
     # Seleziona l'ultimo modello addestrato (directory più recente per nome)
     trained_dir = PROJECT_ROOT / "trained_models"
@@ -639,16 +788,17 @@ def main():
 
     MODEL_PATH = str(model_path)
     print(f"Modello selezionato: {MODEL_PATH}")
+    print(f"Output valutazioni: {OUTPUT_DIR}")
 
     run_inference(
         model_path=MODEL_PATH,
         config_path=CONFIG_PATH,
         data_dir=DATA_DIR,
         output_dir=OUTPUT_DIR,
-        n_episodes=5,
-        deterministic=True,
+        n_episodes=args.episodes,
+        deterministic=not args.stochastic,
         sources_csv="Coordinate_Sorgenti_FaseII.csv",
-        chunk_ids=[0, 2],  # Q1/4 (chunk_id=0) and Q3/4 (chunk_id=2) - skippa Q1/2
+        chunk_ids=args.chunk_ids,
     )
 
 
