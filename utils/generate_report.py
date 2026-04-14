@@ -23,7 +23,7 @@ from PIL import Image as PILImage
 
 
 class HydrasReportGenerator:
-    def __init__(self, output_path="HYDRAS_Report_v4.pdf"):
+    def __init__(self, output_path="HYDRAS_Report_v5.pdf"):
         self.output_path = output_path
         self.project_root = Path(__file__).parent
         self.styles = self._setup_styles()
@@ -92,102 +92,154 @@ class HydrasReportGenerator:
             return yaml.safe_load(f)
 
     def _parse_logs(self):
-        """Parsa il file logs.txt dal nuovo formato evaluations_v4 (132 sorgenti)."""
+        """Parsa i log di inferenza (formato v5, con fallback retrocompatibile)."""
         import re
-        
-        logs_path = self.project_root.parent / "evaluations_v4/logs.txt"
-        
-        if not logs_path.exists():
-            return {}, 0, 0, 0
-        
+
+        # Formato corrente: evaluations_v5/log.txt
+        # Fallback legacy: evaluations_v4/logs.txt
+        candidate_paths = [
+            self.project_root.parent / "evaluations_v5/log.txt",
+            self.project_root.parent / "evaluations_v4/logs.txt",
+        ]
+        logs_path = next((p for p in candidate_paths if p.exists()), None)
+
+        if logs_path is None:
+            return {
+                'log_path': None,
+                'generated_at': None,
+                'model_path': None,
+                'source_count': None,
+                'episodes_per_scenario': None,
+                'episodes_total': None,
+                'scenarios_total': None,
+                'success_rate': None,
+                'successful_episodes': None,
+                'timeout_episodes': None,
+                'mean_steps': None,
+                'mean_minutes': None,
+                'mean_initial_distance': None,
+                'chunk_rates': {},
+                'wind_rates': {},
+            }
+
         with open(logs_path) as f:
             content = f.read()
-        
-        sources_stats = {}
-        total_episodes = 0
-        success_count = 0
-        success_rate = 0
-        mean_steps = 0
-        mean_initial_distance = 0
-        
-        # Parse: "[  1/26] SRC107 Q1/4   success" o "failed"
-        for match in re.finditer(r'\[\s*\d+/\d+\]\s+(SRC\d+)\s+(Q\d/\d)\s+(success|failed)', content):
-            source = match.group(1)
-            chunk = match.group(2)
-            result = match.group(3)
-            
-            total_episodes += 1
-            if result == 'success':
-                success_count += 1
-            
-            if source not in sources_stats:
-                sources_stats[source] = {'success': 0, 'total': 0}
-            
-            sources_stats[source]['total'] += 1
-            if result == 'success':
-                sources_stats[source]['success'] += 1
-        
-        success_rate = (success_count / total_episodes * 100) if total_episodes > 0 else 0
-        
-        # Parse: Final Success Rate: 88.5%
-        match_sr = re.search(r'Final Success Rate:\s*([\d.]+)%', content)
-        if match_sr:
-            success_rate = float(match_sr.group(1))
-        
-        # Parse: Mean Steps (success): 73 (~12.1 min)
-        match_steps = re.search(r'Mean Steps \(success\):\s*(\d+)', content)
-        if match_steps:
-            mean_steps = int(match_steps.group(1))
-        
-        # Parse: Mean Initial Distance: 490m
-        match_dist = re.search(r'Mean Initial Distance:\s*(\d+)m', content)
-        if match_dist:
-            mean_initial_distance = int(match_dist.group(1))
-        
-        return sources_stats, success_rate, mean_steps, mean_initial_distance
+
+        def extract_int(pattern):
+            match = re.search(pattern, content, flags=re.MULTILINE)
+            return int(match.group(1)) if match else None
+
+        def extract_float(pattern):
+            match = re.search(pattern, content, flags=re.MULTILINE)
+            return float(match.group(1)) if match else None
+
+        def extract_text(pattern):
+            match = re.search(pattern, content, flags=re.MULTILINE)
+            return match.group(1).strip() if match else None
+
+        chunk_rates = {}
+        for chunk_label in ("Q1/4", "Q3/4"):
+            match = re.search(rf'^\s*-\s*{re.escape(chunk_label)}:\s*([\d.]+)%', content, flags=re.MULTILINE)
+            if match:
+                chunk_rates[chunk_label] = float(match.group(1))
+
+        wind_rates = {}
+        for version in ("V0", "V1", "V2", "V3"):
+            match = re.search(rf'^\s*-\s*{version}:\s*([\d.]+)%', content, flags=re.MULTILINE)
+            if match:
+                wind_rates[version] = float(match.group(1))
+
+        source_count = extract_int(r'Test Set:\s*(\d+)\s*held-out sources')
+        scenarios_total = extract_int(r'Total Scenarios Evaluated:\s*(\d+)')
+        episodes_total = extract_int(r'Total Episodes Evaluated:\s*(\d+)')
+        episodes_per_scenario = extract_int(r'Episodes:\s*(\d+)\s*per scenario')
+
+        if episodes_per_scenario is None and episodes_total and scenarios_total:
+            if scenarios_total > 0:
+                episodes_per_scenario = int(round(episodes_total / scenarios_total))
+
+        # Nel setup standard: scenarios = sources * 4 venti * 2 chunk = sources * 8
+        if source_count is None and scenarios_total and scenarios_total % 8 == 0:
+            source_count = scenarios_total // 8
+
+        mean_initial_distance = extract_float(r'Mean Initial Distance:\s*([\d.]+)\s*m')
+        if mean_initial_distance is None:
+            mean_initial_distance = extract_float(r'Average Initial Distance:\s*([\d.]+)\s*m')
+
+        mean_steps = extract_float(r'Mean Success Steps:\s*([\d.]+)')
+        if mean_steps is None:
+            mean_steps = extract_float(r'Average Steps per Success Episode:\s*([\d.]+)\s*steps')
+
+        mean_minutes = extract_float(r'Mean Success Steps:\s*[\d.]+\s*\(~([\d.]+)\s*min\)')
+        if mean_minutes is None:
+            mean_minutes = extract_float(r'Average Time per Success:\s*([\d.]+)\s*minutes')
+
+        success_rate = extract_float(r'Global Success Rate:\s*([\d.]+)%')
+        successful_episodes = extract_int(r'Successful Episodes:\s*(\d+)')
+        timeout_episodes = extract_int(r'Timeout Episodes:\s*(\d+)')
+
+        if successful_episodes is None and success_rate is not None and episodes_total is not None:
+            successful_episodes = int(round((success_rate / 100.0) * episodes_total))
+        if timeout_episodes is None and successful_episodes is not None and episodes_total is not None:
+            timeout_episodes = episodes_total - successful_episodes
+
+        return {
+            'log_path': str(logs_path),
+            'generated_at': extract_text(r'Generated at:\s*(.+)'),
+            'model_path': extract_text(r'Model:\s*(.+)'),
+            'source_count': source_count,
+            'episodes_per_scenario': episodes_per_scenario,
+            'episodes_total': episodes_total,
+            'scenarios_total': scenarios_total,
+            'success_rate': success_rate,
+            'successful_episodes': successful_episodes,
+            'timeout_episodes': timeout_episodes,
+            'mean_steps': mean_steps,
+            'mean_minutes': mean_minutes,
+            'mean_initial_distance': mean_initial_distance,
+            'chunk_rates': chunk_rates,
+            'wind_rates': wind_rates,
+        }
 
     def add_ppo_algorithm_section(self):
         """Sezione 1 (nuovo): Algoritmo PPO - dettagli teorici e implementazione."""
         self.story.append(Spacer(1, 0.5*cm))
         
         self.story.append(Paragraph("1. Algoritmo PPO (Proximal Policy Optimization)", self.styles['SectionHeading']))
-        
-        self.story.append(Paragraph("1.1 Teoria dell'Algoritmo", self.styles['SubHeading']))
-        
-        ppo_theory = """
-        <b>Proximal Policy Optimization (PPO)</b> è un algoritmo di reinforcement learning on-policy di ultima generazione, 
-        appartenente alla famiglia dei <b>Policy Gradient Methods</b>. A differenza degli algoritmi off-policy (DQN, DDPG) che 
-        apprendono da dati stocastici, PPO apprende direttamente dalla policy corrente, rendendo l'apprendimento più stabile.<br/><br/>
-        
-        <b>Principio Fondamentale:</b> PPO ottimizza la policy pi(a|s) massimizzando il <b>clipped surrogate objective</b>.<br/>
-        Questo meccanismo impedisce aggiornamenti troppo bruschi della policy, garantendo stabilità anche con batch size piccoli.
+
+        ppo_overview = """
+        <b>Proximal Policy Optimization (PPO)</b> è un algoritmo di reinforcement learning <b>on-policy</b>, 
+        appartenente alla famiglia dei <b>Policy Gradient Methods</b>. La black-box è strutturata secondo 
+        schema <b>actor-critic</b>: una rete (policy) produce la distribuzione di probabilità delle azioni, 
+        mentre una seconda rete (value function) stima il valore dello stato V(s).<br/><br/>
+
+        <b>Stable-Baselines3 (SB3)</b> è una libreria open-source per reinforcement learning in Python, 
+        costruita su PyTorch. Fornisce implementazioni standardizzate e affidabili dei principali algoritmi 
+        (tra cui PPO), con API omogenee per training/inferenza, gestione dei callback, logging e ambienti 
+        vettorizzati. In pratica, SB3 è il framework che incapsula la black-box algoritmica e ne rende 
+        l'uso riproducibile e comparabile tra esperimenti.<br/><br/>
+
+        In <b>Stable-Baselines3</b>, PPO è implementato con una policy neurale (tipicamente MLP) che elabora 
+        l'osservazione e produce due uscite: <b>policy head</b> e <b>value head</b>. In termini architetturali, 
+        il pattern generale è: input osservazionale, hidden layers fully-connected, output su spazio azioni 
+        e stima del valore.<br/><br/>
+
+        Il meccanismo chiave è il <b>clipped surrogate objective</b>: PPO massimizza il miglioramento della policy, 
+        ma limita la deviazione rispetto alla policy precedente tramite clipping del rapporto 
+        r_t(θ) = π_θ(a|s) / π_θ_old(a|s). Questo vincolo riduce update troppo aggressivi e aumenta la stabilità 
+        dell'apprendimento.<br/><br/>
+
+        L'obiettivo complessivo combina tre contributi:<br/>
+        • <b>Policy loss (clipped)</b>: aumenta la probabilità delle azioni vantaggiose;<br/>
+        • <b>Value loss</b>: allinea la stima V(s) ai ritorni osservati;<br/>
+        • <b>Entropy bonus</b>: mantiene esplorazione, evitando policy premature/deterministiche.<br/>
+        Una forma compatta è: <b>L = L_clip + c1·L_vf - c2·H(π)</b>.<br/><br/>
+
+        PPO usa tipicamente <b>GAE (Generalized Advantage Estimation)</b> per stimare il vantaggio con buon 
+        compromesso bias-varianza. In training la policy è stocastica (campionamento da π(a|s)); in inferenza 
+        può essere resa deterministica scegliendo l'azione a probabilità massima.
         """
-        self.story.append(Paragraph(ppo_theory, self.styles['Normal']))
-        
-        self.story.append(Spacer(1, 0.3*cm))
-        
-        self.story.append(Paragraph("1.2 Implementazione: Stable-Baselines3", self.styles['SubHeading']))
-        
-        ppo_impl = """
-        Il modello utilizza <b>PPO di Stable-Baselines3</b> con architettura <b>MLP (Multi-Layer Perceptron)</b> per la policy 
-        e value function. La rete neurale è composta da:<br/>
-        • <b>Input Layer:</b> 112 dimensioni (osservazioni normalizzate via VecNormalize)<br/>
-        • <b>Hidden Layers:</b> 2 strati da 256 unità con attivazione <b>Tanh</b><br/>
-        • <b>Output Layers:</b> Policy head (8 azioni discrete via softmax) e Value head (1 scalare)<br/><br/>
-        
-        <b>Policy Stocastica:</b> La rete neurale genera una distribuzione di probabilità π(a|s) su tutte le 8 azioni. 
-        Durante il training, l'agente <b>campiona</b> azioni da questa distribuzione, garantendo <b>esplorazione naturale</b> senza bisogno 
-        di epsilon-greedy artificiale. Durante l'inferenza, sceglie deterministicamente l'azione con probabilità massima via <b>argmax</b>.<br/><br/>
-        
-        <b>Loss Function:</b> L_TOTAL = L_CLIP + 0.5 * L_VF - 0.01 * H(pi), dove L_CLIP è il clipped surrogate objective 
-        (previene aggiornamenti eccessivi della policy), L_VF è l'MSE della value function, e H(pi) è l'entropy della policy 
-        (c2=0.01 bilancia l'esplorazione senza eccessi).<br/><br/>
-        
-        <b>Parametri di Training:</b> Learning rate 5e-5, clip range 0.2, batch size 2048, 4 epoche di aggiornamento per batch, 
-        <b>GAE lambda=0.95</b> (stima dei vantaggi con bias-variance trade-off), 
-        <b>VecNormalize</b> (osservazioni a media 0, std 1 per accelerare convergenza).
-        """
-        self.story.append(Paragraph(ppo_impl, self.styles['Normal']))
+        self.story.append(Paragraph(ppo_overview, self.styles['Normal']))
         
         self.story.append(Spacer(1, 0.2*cm))
 
@@ -196,7 +248,7 @@ class HydrasReportGenerator:
         self.story.append(Spacer(1, 2*cm))
         
         title = Paragraph(
-            "HYDRAS Project Report v4",
+            "HYDRAS Project Report v5",
             self.styles['TitleReport']
         )
         self.story.append(title)
@@ -224,9 +276,9 @@ class HydrasReportGenerator:
         
         <b>Augmentazione Dati (Chunking):</b> Per massimizzare la variabilità e creare multipli scenari di partenza per ogni sorgente, i 1411 timestep di ogni simulazione vengono suddivisi in <b>2 chunk temporali</b>:<br/>
         • <b>Chunk 0</b> (Q1/4, spawn @ 352 timestep): inizio della propagazione del plume, concentrazione ancora concentrata;<br/>
-        • <b>Chunk 1</b> (Q3/4, spawn @ 1058 timestep): stadio avanzato, plume pesantemente disperso da vento e correnti.<br/>
+        • <b>Chunk 2</b> (Q3/4, spawn @ 1058 timestep): stadio avanzato, plume pesantemente disperso da vento e correnti.<br/>
         L'agente può essere inizializzato in fasi diverse della dispersione, aumentando la robustezza del modello. 
-        Con 4 ambienti paralleli × 2 chunks × 4 versioni vento = 32 scenari di training simultanei.<br/><br/>
+        Con <b>2 ambienti paralleli</b>, il training esplora combinazioni su <b>2 chunks × 4 versioni vento</b> (8 configurazioni), mantenendo 2 scenari attivi simultaneamente.<br/><br/>
         """
         self.story.append(Paragraph(text, self.styles['Normal']))
         
@@ -281,8 +333,8 @@ class HydrasReportGenerator:
         quindi ogni azione sposta l'agente di 10 metri (o ~7m per componente nelle direzioni diagonali). 
         L'episodio termina quando la sorgente viene raggiunta (distanza &lt; 50m) oppure dopo 1080 step (~3 ore simulate).<br/><br/>
         
-        <b>Evoluzione Temporale:</b> Il campo di concentrazione evolve nel tempo: ogni 6 step dell'agente (~1 minuto reale) 
-        il campo NetCDF avanza di 1 frame temporale, permettendo a vento e correnti di continuare a disperdere il plume.
+        <b>Evoluzione Temporale:</b> Il campo di concentrazione evolve nel tempo: ogni 12 step dell'agente (~2 minuti reali) 
+        il campo NetCDF avanza di 1 frame temporale. Vento e corrente sono sincronizzati in minuti reali lungo tutto l'episodio.
         """
         self.story.append(Paragraph(text, self.styles['Normal']))
         
@@ -298,9 +350,9 @@ class HydrasReportGenerator:
         <b>500 ≤ distanza ≤ 1500 metri</b> dalla sorgente, mantenendo almeno 50 metri dalla terra.<br/><br/>
         
         <b>Fallback automatico:</b> Se non trova punti nel range primario (situazione frequente in scenari con plume disperso o costieri), 
-        il codice applica rilassamenti progressivi dei vincoli di distanza, selezionando celle con concentrazione > 0.5 sempre più vicine alla sorgente, 
-        finché non trova un punto valido. Gli step di rilassamento sono: <b>d ≥ 500m</b> → <b>d ≥ 250m</b> → <b>d ≥ 100m</b> → 
-        <b>spawn casuale</b> se nessun plume disponibile.
+        il codice applica rilassamenti progressivi dei vincoli di distanza, mantenendo il vincolo sul plume. 
+        Gli step di rilassamento sono: <b>d ≥ 500m</b> → <b>d ≥ 375m</b> → <b>d ≥ 250m</b> → <b>d ≥ 0m</b>. 
+        La posizione finale viene validata anche dopo il jitter spaziale per rispettare i vincoli attivi.
         """
         self.story.append(Paragraph(spawn_text, self.styles['Normal']))
 
@@ -353,6 +405,12 @@ class HydrasReportGenerator:
         self.story.append(Paragraph("4.2 Parametri di Training", self.styles['SubHeading']))
         
         train_cfg = config['training']
+        total_timesteps = int(train_cfg.get('total_timesteps', 0))
+        if total_timesteps >= 1_000_000:
+            total_timesteps_str = f"{total_timesteps / 1_000_000:.1f}M ({total_timesteps:,})"
+        else:
+            total_timesteps_str = f"{total_timesteps:,}"
+
         train_data = [
             ['Parametro', 'Valore'],
             ['Architettura Policy', 'MLP (256-256 unità nascoste, attivazione Tanh)'],
@@ -362,9 +420,9 @@ class HydrasReportGenerator:
             ['Gamma (discount factor)', f"{train_cfg['gamma']}"],
             ['GAE Lambda', f"{train_cfg['gae_lambda']}"],
             ['Entropy Coefficient', f"{train_cfg['ent_coef']}"],
-            ['Timestep Totali', '4M (4,000,000)'],
-            ['Curriculum Learning', '3 fasi (35 → 70 → 106 sorgenti × 4 scenari vento)'],
-            ['Ambienti Paralleli', '4 (×2 chunks × 4 venti = 32 scenari contemporanei)'],
+            ['Timestep Totali', total_timesteps_str],
+            ['Curriculum Learning', '1 fase di fine-tuning (106 sorgenti × 4 scenari vento)'],
+            ['Ambienti Paralleli', '2 worker × 2 chunk = 4 env simultanei'],
         ]
         
         train_table = Table(train_data, colWidths=[4.5*cm, 8.5*cm])
@@ -386,7 +444,6 @@ class HydrasReportGenerator:
         self.story.append(Paragraph("4.3 Funzione di Reward", self.styles['SubHeading']))
         
         reward_cfg = config['environment']['reward']
-        reward_config = config.get('reward', {})
         
         reward_data = [
             ['Componente', 'Valore/Descrizione'],
@@ -395,10 +452,10 @@ class HydrasReportGenerator:
             ['Plume (dentro)', f"+{int(reward_cfg['plume_reward_positive'])}"],
             ['Plume (fuori)', f"{int(reward_cfg['plume_reward_negative'])}"],
             ['Reward Distanza', f"dist_impr × 5.0 × {reward_cfg['distance_reward_multiplier']}"],
-            ['Gradiente Conc +', f"+{reward_config.get('concentration_gradient_reward_positive', 0.05)}"],
-            ['Gradiente Conc -', f"{reward_config.get('concentration_gradient_reward_negative', -0.05)}"],
-            ['Vento (controcorr.)', f"+{reward_config.get('wind_alignment_reward', 0.05)}"],
-            ['Vento (a favore)', f"{reward_config.get('wind_alignment_penalty', -0.05)}"],
+            ['Gradiente Conc +', f"+{reward_cfg.get('concentration_gradient_reward_positive', 0.05)}"],
+            ['Gradiente Conc -', f"{reward_cfg.get('concentration_gradient_reward_negative', -0.05)}"],
+            ['Vento (controcorr.)', f"+{reward_cfg.get('wind_alignment_reward', 0.05)}"],
+            ['Vento (a favore)', f"{reward_cfg.get('wind_alignment_penalty', -0.05)}"],
             ['Penalità Tempo', f"{reward_cfg['step_penalty']}/step"],
             ['Vicinanza Terra', f"max {reward_cfg['land_proximity_penalty_max']}"]
         ]
@@ -451,159 +508,158 @@ class HydrasReportGenerator:
         else:
             self.story.append(Paragraph("<i>Nessun modello addestrato trovato</i>", self.styles['Normal']))
 
-    def add_inference_section(self):
+    def add_inference_section(self, config):
         """Sezione 5 (rinumerata): Risultati delle inferenze su 26 sorgenti held-out."""
         self.story.append(PageBreak())
         
         self.story.append(Paragraph("5. Risultati delle Inferenze", self.styles['SectionHeading']))
         
         # Carica statistiche dal log
-        sources_stats, success_rate, mean_steps, mean_initial_distance = self._parse_logs()
+        metrics = self._parse_logs()
+        env_cfg = config.get('environment', {})
+        reward_cfg = env_cfg.get('reward', {})
+        dt_seconds = float(env_cfg.get('dt', 10))
+        distance_threshold = float(reward_cfg.get('distance_threshold', 50))
+        timeout_steps = int(env_cfg.get('max_episode_steps', 1080))
+
+        source_count = metrics.get('source_count') or 26
+        episodes_per_scenario = metrics.get('episodes_per_scenario') or 5
+        episodes_total = metrics.get('episodes_total') or (source_count * 4 * 2 * episodes_per_scenario)
+        scenarios_total = metrics.get('scenarios_total') or (source_count * 4 * 2)
+        model_path = metrics.get('model_path')
+        generated_at = metrics.get('generated_at')
+
+        success_rate = metrics.get('success_rate')
+        mean_steps = metrics.get('mean_steps')
+        mean_minutes = metrics.get('mean_minutes')
+        if mean_minutes is None and mean_steps is not None:
+            mean_minutes = mean_steps * dt_seconds / 60.0
+        mean_initial_distance = metrics.get('mean_initial_distance')
+
+        chunk_rates = metrics.get('chunk_rates', {})
+        q14_rate = chunk_rates.get('Q1/4')
+        q34_rate = chunk_rates.get('Q3/4')
+
+        wind_rates = metrics.get('wind_rates', {})
+        v0_rate = wind_rates.get('V0')
+        v1_rate = wind_rates.get('V1')
+        v2_rate = wind_rates.get('V2')
+        v3_rate = wind_rates.get('V3')
+
+        def fmt_pct(value):
+            return f"{value:.1f}%" if value is not None else "n/d"
+
+        def fmt_num(value, digits=1):
+            if value is None:
+                return "n/d"
+            return f"{value:.{digits}f}"
+
+        distance_line = f"{mean_initial_distance:.0f} metri" if mean_initial_distance is not None else "n/d"
         
         # Calcola minutaggio da steps
-        minutes = mean_steps * 10 / 60 if mean_steps > 0 else 0
+        minutes = mean_minutes
         
         # Descrizione prima della tabella
         description = f"""
-        Valutazione del modello PPO su <b>26 sorgenti held-out</b> (SRC107-SRC132) non viste durante il training curriculum, 
+        Valutazione del modello PPO su <b>{source_count} sorgenti held-out</b> (SRC107-SRC132) non viste durante il training curriculum, 
         testato su tutti e <b>4 scenari vento</b> (V0, V1, V2, V3). 
         Test eseguito con <b>vento e correnti reali CMEMS</b>:<br/><br/>
+        <b>Log inferenza:</b> {metrics.get('log_path') or 'n/d'}<br/>
+        <b>Timestamp inferenza:</b> {generated_at or 'n/d'}<br/>
+        <b>Modello valutato:</b> {model_path or 'n/d'}<br/><br/>
         <b>Setup Valutazione:</b><br/>
-        • <b>26 sorgenti</b> × <b>4 scenari vento</b> (V0, V1, V2, V3) × <b>2 chunk temporali</b> (Q1/4, Q3/4)<br/>
-        • <b>5 episodi</b> per configurazione (totale 26 × 4 × 2 × 5 = <b>1040 episodi</b>)<br/>
-        • <b>Distanza media di partenza</b>: 511 metri<br/>
-        • <b>Success @ 50m</b>: distanza finale ≤ 50m dalla sorgente<br/>
-        • <b>Timeout @ 1080 steps</b> (~3 ore simulate)<br/><br/>
+        • <b>{source_count} sorgenti</b> × <b>4 scenari vento</b> (V0, V1, V2, V3) × <b>2 chunk temporali</b> (Q1/4, Q3/4)<br/>
+        • <b>{episodes_per_scenario} episodi</b> per configurazione (totale <b>{episodes_total}</b> episodi)<br/>
+        • <b>Distanza media di partenza</b>: {distance_line}<br/>
+        • <b>Success @ {distance_threshold:.0f}m</b>: distanza finale ≤ {distance_threshold:.0f}m dalla sorgente<br/>
+        • <b>Timeout @ {timeout_steps} steps</b> (~{timeout_steps * dt_seconds / 3600:.1f} ore simulate)<br/><br/>
+        • <b>Durata media episodio di successo</b>: {fmt_num(mean_steps, 1)} step (~{fmt_num(minutes, 1)} min)<br/><br/>
         
         <b>Risultati per Tipologia di Vento:</b><br/>
-        • <b>V0:</b> 95.4% success rate<br/>
-        • <b>V1:</b> 80.8% success rate<br/>
-        • <b>V2:</b> 84.2% success rate<br/>
-        • <b>V3:</b> 100.0% success rate<br/><br/>
+        • <b>V0:</b> {fmt_pct(v0_rate)} success rate<br/>
+        • <b>V1:</b> {fmt_pct(v1_rate)} success rate<br/>
+        • <b>V2:</b> {fmt_pct(v2_rate)} success rate<br/>
+        • <b>V3:</b> {fmt_pct(v3_rate)} success rate<br/><br/>
         
         <b>Risultati per Frame Temporale:</b><br/>
-        • <b>Q1/4:</b> 100.0% success rate<br/>
-        • <b>Q3/4:</b> 80.2% success rate<br/>
+        • <b>Q1/4:</b> {fmt_pct(q14_rate)} success rate<br/>
+        • <b>Q3/4:</b> {fmt_pct(q34_rate)} success rate<br/>
         
-        <b>Successo Globale:</b> <b>90.1%</b> (media su tutti i 208 scenari)<br/>
+        <b>Successo Globale:</b> <b>{fmt_pct(success_rate)}</b> (media su tutti i {scenarios_total} scenari)<br/>
         """
         self.story.append(Paragraph(description, self.styles['Normal']))
         
-        self.story.append(Spacer(1, 0.4*cm))
+        self.story.append(Spacer(1, 0.25*cm))
         
         # Note sui fallimenti
         note = """
-        <b>Analisi dei Fallimenti:</b> Durante il training l'agente ha imparato che se procede verso <b>SE</b> ha grosse 
-        probabilità di trovare la sorgente. Tuttavia, questo porta dei problemi negli scenari V1 e V2 a fine simulazione (Q3/4) perché: <br/>
-        1) <b>Scenari V1:</b> Il plume va in direzione opposta tra inizio e fine simulazione (prima verso NW e poi verso SE); <br/>
-        2) <b>Scenari V2:</b> Il plume a volte si diffonde a macchia d'olio e diventa troppo disperso per permettere all'agente di trovare la sorgente.
+        <b>Analisi dei Fallimenti:</b> I fallimenti residui si concentrano ormai in alcuni casi dello <b>scenario V2</b>, 
+        soprattutto nel <b>chunk Q3/4</b>. In queste configurazioni il plume si disperde a "macchia d'olio": 
+        il gradiente locale diventa debole e discontinuo, quindi l'agente fatica a mantenere una direzione affidabile 
+        verso la sorgente e può terminare in <b>timeout</b>.
         """
         self.story.append(Paragraph(note, self.styles['Normal']))
         
-        # Aggiungi spazio prima dei plot di fallimento
-        self.story.append(Spacer(1, 0.5*cm))
-        
-        # Plot dei fallimenti caratteristici
-        self.story.append(Paragraph("<b>Esempi Caratteristici di Fallimento:</b>", self.styles['SubHeading']))
-        self.story.append(Spacer(1, 0.3*cm))
-        
-        # Scenario V1
-        self.story.append(Paragraph("<b>Scenario V1: Cambio di Direzione del Plume</b>", self.styles['SubHeading']))
-        self.story.append(Spacer(1, 0.3*cm))
-        
-        # SRC131 V1 - Chunk 0 e Chunk 2 side by side (gli scenari V1)
-        try:
-            img_path_c0 = self.project_root.parent / "evaluations_v4/SRC131/V1/ep01_chunk0_trajectory.png"
-            img_path_c2 = self.project_root.parent / "evaluations_v4/SRC131/V1/ep01_chunk2_trajectory.png"
-            
-            if img_path_c0.exists() and img_path_c2.exists():
-                # Crea le immagini più grandi per layout side-by-side
-                img_c0 = Image(str(img_path_c0), width=8.5*cm, height=7*cm)
-                img_c2 = Image(str(img_path_c2), width=8.5*cm, height=7*cm)
-                
-                # Crea didascalie
-                caption_c0 = Paragraph(
-                    "<i><b>Chunk 0</b> (inizio simulazione):<br/>Plume verso NW</i>",
-                    self.styles['Normal']
-                )
-                caption_c2 = Paragraph(
-                    "<i><b>Chunk 2</b> (fine simulazione):<br/>Plume ruota verso SE</i>",
-                    self.styles['Normal']
-                )
-                
-                # Tabella side-by-side
-                table_data = [
-                    [img_c0, img_c2],
-                    [caption_c0, caption_c2]
-                ]
-                
-                table = Table(table_data, colWidths=[9.5*cm, 9.5*cm])
-                table.setStyle(TableStyle([
-                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                    ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                    ('LEFTPADDING', (0, 0), (-1, -1), 5),
-                    ('RIGHTPADDING', (0, 0), (-1, -1), 5),
-                ]))
-                
-                self.story.append(table)
-                self.story.append(Spacer(1, 0.4*cm))
-        except Exception as e:
-            print(f"Errore nel caricamento immagini SRC131 V1: {e}")
-        
-        # SRC112 V1 - Chunk 0 e Chunk 2 side by side (altro esempio di fallimento V1)
-        try:
-            img_path_c0 = self.project_root.parent / "evaluations_v4/SRC112/V1/ep01_chunk0_trajectory.png"
-            img_path_c2 = self.project_root.parent / "evaluations_v4/SRC112/V1/ep01_chunk2_trajectory.png"
-            
-            if img_path_c0.exists() and img_path_c2.exists():
-                # Crea le immagini più grandi per layout side-by-side
-                img_c0 = Image(str(img_path_c0), width=8.5*cm, height=7*cm)
-                img_c2 = Image(str(img_path_c2), width=8.5*cm, height=7*cm)
-                
-                # Crea didascalie
-                caption_c0 = Paragraph(
-                    "<i><b>Chunk 0</b> (inizio simulazione):<br/>Posizionamento iniziale</i>",
-                    self.styles['Normal']
-                )
-                caption_c2 = Paragraph(
-                    "<i><b>Chunk 2</b> (fine simulazione):<br/>Fallimento a trovare la sorgente</i>",
-                    self.styles['Normal']
-                )
-                
-                # Tabella side-by-side
-                table_data = [
-                    [img_c0, img_c2],
-                    [caption_c0, caption_c2]
-                ]
-                
-                table = Table(table_data, colWidths=[9.5*cm, 9.5*cm])
-                table.setStyle(TableStyle([
-                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                    ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                    ('LEFTPADDING', (0, 0), (-1, -1), 5),
-                    ('RIGHTPADDING', (0, 0), (-1, -1), 5),
-                ]))
-                
-                self.story.append(table)
-                self.story.append(Spacer(1, 0.4*cm))
-        except Exception as e:
-            print(f"Errore nel caricamento immagini SRC112 V1: {e}")
-        
-        # Spazio tra V1 e V2
-        self.story.append(Spacer(1, 0.8*cm))
-        
-        # Scenario V2
-        self.story.append(Paragraph("<b>Scenario V2: Dispersione Eccessiva del Plume</b>", self.styles['SubHeading']))
-        self.story.append(Spacer(1, 0.3*cm))
-        
-        # SRC118 V2 - Chunk 2 (Q3/4)
-        try:
-            img_path = self.project_root.parent / "evaluations_v4/SRC118/V2/ep01_chunk2_trajectory.png"
-            if img_path.exists():
-                img = Image(str(img_path), width=14*cm, height=11*cm)
-                self.story.append(img)
-        except Exception as e:
-            print(f"Errore nel caricamento immagine SRC118 V2 Chunk2: {e}")
+        self.story.append(Spacer(1, 0.08*cm))
+        self.story.append(Paragraph("<b>Esempi di Fallimento V2 (Q3/4)</b>", self.styles['SubHeading']))
+        self.story.append(Spacer(1, 0.04*cm))
+
+        v2_failure_cases = [
+            (
+                self.project_root.parent / "evaluations_v5/SRC128/V2/ep01_chunk2_trajectory.png",
+                "<i><b>SRC128 - Ep1</b>: FAILED [timeout], dist finale 1034m. Dispersione elevata e percorso erratico lontano dalla sorgente.</i>",
+            ),
+            (
+                self.project_root.parent / "evaluations_v5/SRC122/V2/ep01_chunk2_trajectory.png",
+                "<i><b>SRC122 - Ep1</b>: FAILED [timeout], dist finale 687m. Plume molto diffuso e traiettoria non convergente.</i>",
+            ),
+            (
+                self.project_root.parent / "evaluations_v5/SRC131/V2/ep01_chunk2_trajectory.png",
+                "<i><b>SRC131 - Ep1</b>: FAILED [timeout], dist finale 626m. Deriva fuori plume e perdita del gradiente utile.</i>",
+            ),
+        ]
+
+        available_cases = [(img_path, caption) for img_path, caption in v2_failure_cases if img_path.exists()]
+
+        if not available_cases:
+            self.story.append(Paragraph("<i>Nessun plot di fallimento V2 disponibile in evaluations_v5.</i>", self.styles['Normal']))
+        else:
+            # 1) Primo caso subito sotto al titolo "Esempi di Fallimento"
+            first_path, first_caption = available_cases[0]
+            first_img = Image(str(first_path), width=12.8*cm, height=7.2*cm)
+            first_table = Table([[first_img], [Paragraph(first_caption, self.styles['Normal'])]], colWidths=[18*cm])
+            first_table.setStyle(TableStyle([
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('LEFTPADDING', (0, 0), (-1, -1), 4),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+                ('TOPPADDING', (0, 0), (-1, -1), 2),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+            ]))
+            self.story.append(first_table)
+            self.story.append(Spacer(1, 0.15*cm))
+
+            # 2) Gli altri due casi nella pagina successiva, uno sotto l'altro
+            remaining_cases = available_cases[1:3]
+            if remaining_cases:
+                self.story.append(PageBreak())
+                self.story.append(Paragraph("<b>Altri Esempi di Fallimento V2 (Q3/4)</b>", self.styles['SubHeading']))
+                self.story.append(Spacer(1, 0.2*cm))
+
+                for idx, (img_path, caption) in enumerate(remaining_cases):
+                    img = Image(str(img_path), width=14.8*cm, height=8.7*cm)
+                    table = Table([[img], [Paragraph(caption, self.styles['Normal'])]], colWidths=[18*cm])
+                    table.setStyle(TableStyle([
+                        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                        ('LEFTPADDING', (0, 0), (-1, -1), 4),
+                        ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+                        ('TOPPADDING', (0, 0), (-1, -1), 2),
+                        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                    ]))
+                    self.story.append(table)
+                    if idx < len(remaining_cases) - 1:
+                        self.story.append(Spacer(1, 0.2*cm))
 
     def generate(self):
         """Genera il report PDF."""
@@ -618,7 +674,7 @@ class HydrasReportGenerator:
         self.add_data_acquisition_section(config)
         self.add_environment_section(config)
         self.add_training_section(config)
-        self.add_inference_section()
+        self.add_inference_section(config)
         
         # Genera PDF
         doc = SimpleDocTemplate(self.output_path, pagesize=A4,
@@ -634,7 +690,7 @@ if __name__ == "__main__":
     # Salva il report nella cartella reports
     reports_dir = Path(__file__).parent.parent / "reports"
     reports_dir.mkdir(exist_ok=True)
-    output_path = reports_dir / "HYDRAS_Report_v4.pdf"
+    output_path = reports_dir / "HYDRAS_Report_v5.pdf"
     
     generator = HydrasReportGenerator(str(output_path))
     generator.generate()
