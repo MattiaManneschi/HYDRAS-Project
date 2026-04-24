@@ -12,7 +12,6 @@ Output:
 """
 
 import sys
-import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 import yaml
@@ -23,6 +22,8 @@ from dataclasses import dataclass, field
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from utils.video_generator import generate_showcase_videos
 
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
@@ -186,6 +187,7 @@ def write_inference_log(
         "",
         "Success Rate by Frame:",
         f"- Q1/4: {fmt_percent(chunk_success_rates.get('Q1/4'))}",
+        f"- Q1/2: {fmt_percent(chunk_success_rates.get('Q1/2'))}",
         f"- Q3/4: {fmt_percent(chunk_success_rates.get('Q3/4'))}",
         "",
         f"Total Scenarios Evaluated: {total_scenarios}",
@@ -238,8 +240,6 @@ def make_env_config(config: dict, chunk_id: int = 0) -> SourceSeekingConfig:
         land_proximity_threshold=reward_cfg.get('land_proximity_threshold', 10.0),
         land_proximity_penalty_max=reward_cfg.get('land_proximity_penalty_max', -5.0),
         n_discrete_actions=agent_cfg.get('n_discrete_actions', 8),
-        spawn_min_distance=spawn_cfg.get('min_distance', 500),
-        spawn_max_distance=spawn_cfg.get('max_distance', 1500),
         spawn_min_land_distance=spawn_cfg.get('min_land_distance', 50.0),
         spawn_start_frame=spawn_cfg.get('start_frame', 1440),
         spawn_conc_threshold=spawn_cfg.get('conc_threshold', 0.5),
@@ -251,6 +251,15 @@ def make_env_config(config: dict, chunk_id: int = 0) -> SourceSeekingConfig:
         plume_exit_penalty=reward_cfg.get('plume_exit_penalty', -1.5),
         outside_plume_distance_reward_scale=reward_cfg.get('outside_plume_distance_reward_scale', 0.35),
         plume_threshold=reward_cfg.get('plume_threshold', 0.1),
+        concentration_gradient_reward_positive=reward_cfg.get('concentration_gradient_reward_positive', 0.05),
+        concentration_gradient_reward_negative=reward_cfg.get('concentration_gradient_reward_negative', -0.05),
+        wind_alignment_reward=reward_cfg.get('wind_alignment_reward', 0.05),
+        wind_alignment_penalty=reward_cfg.get('wind_alignment_penalty', -0.05),
+        current_alignment_reward=reward_cfg.get('current_alignment_reward', 0.05),
+        current_alignment_penalty=reward_cfg.get('current_alignment_penalty', -0.05),
+        stagnation_window=reward_cfg.get('stagnation_window', 50),
+        stagnation_distance_threshold=reward_cfg.get('stagnation_distance_threshold', 20.0),
+        stagnation_penalty=reward_cfg.get('stagnation_penalty', -0.5),
     )
 
 
@@ -464,6 +473,7 @@ def run_inference(
     deterministic: bool = True,
     sources_csv: str = "Coordinate_Sorgenti_FaseII.csv",
     chunk_ids: List[int] = None,
+    save_videos: bool = True,
 ):
     """
     Esegue l'inferenza completa su 26 sorgenti held-out (SRC107-SRC132, 20% del totale 132) con chunk multipli per fonte.
@@ -476,11 +486,11 @@ def run_inference(
         n_episodes:   Episodi per sorgente e chunk
         deterministic: Policy deterministica o stocastica
         sources_csv:  File CSV con coordinate delle sorgenti
-        chunk_ids:    Lista di chunk_id da testare (default [0, 2] = Q1/4 e Q3/4)
-                     0 = spawn @1/4, 2 = spawn @3/4
+        chunk_ids:    Lista di chunk_id da testare (default [0, 1, 2] = Q1/4, Q1/2, Q3/4)
+                     0 = spawn @1/4, 1 = spawn @1/2, 2 = spawn @3/4
     """
     if chunk_ids is None:
-        chunk_ids = [0, 2]  # Default: Q1/4 e Q3/4
+        chunk_ids = [0, 1, 2]  # Default: Q1/4, Q1/2, Q3/4
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -505,8 +515,7 @@ def run_inference(
     all_sources = data_manager.get_discovered_sources()
     inference_sources = [s for s in all_sources if int(s[3:]) > 106]  # SRC107-SRC132 (26 file, ~20%)
     
-    # Mappa chunk_id a label (supportati: 0, 2)
-    chunk_labels = {0: "Q1/4", 2: "Q3/4"}
+    chunk_labels = {0: "Q1/4", 1: "Q1/2", 2: "Q3/4"}
     chunk_descriptions = ", ".join([
         f"{chunk_labels[cid]} (chunk_id={cid})" for cid in chunk_ids
     ])
@@ -554,9 +563,15 @@ def run_inference(
     # Accumulatori episodio-level (più robusti delle medie per scenario)
     episode_success_all: List[float] = []
     episode_success_by_version: Dict[str, List[float]] = {'V0': [], 'V1': [], 'V2': [], 'V3': []}
-    episode_success_by_chunk: Dict[str, List[float]] = {'Q1/4': [], 'Q3/4': []}
+    episode_success_by_chunk: Dict[str, List[float]] = {'Q1/4': [], 'Q1/2': [], 'Q3/4': []}
     initial_distances_all: List[float] = []
     success_steps_all: List[float] = []
+
+    # Accumulatore globale per selezione video showcase (usato a fine run)
+    all_results_global: List[EpisodeResult] = []
+
+    # Dati per-episodio (analisi quantitativa)
+    episodes_data: List[dict] = []
 
     for src_idx, source_id in enumerate(inference_sources, 1):
         if src_idx % 5 == 0:
@@ -634,7 +649,28 @@ def run_inference(
                         success_steps_all.append(float(result.steps))
 
                     episode_results.append(result)
+                    all_results_global.append(result)
                     vec_env.close()
+
+                    # Distanza dalla sorgente ad ogni step della traiettoria
+                    src_x, src_y = field.source_position
+                    dist_history = [
+                        float(np.sqrt((pos[0] - src_x)**2 + (pos[1] - src_y)**2))
+                        for pos in result.trajectory
+                    ]
+                    episodes_data.append({
+                        "source_id": source_id,
+                        "version": version,
+                        "chunk": chunk_label,
+                        "chunk_id": chunk_id,
+                        "episode": ep + 1,
+                        "success": result.success,
+                        "termination": result.termination,
+                        "initial_distance": result.initial_distance,
+                        "final_distance": result.final_distance,
+                        "steps": result.steps,
+                        "distance_history": dist_history,
+                    })
 
                     # Salva plot traiettoria
                     plot_path = version_dir / f"ep{ep+1:02d}_chunk{chunk_id}_trajectory.png"
@@ -670,7 +706,7 @@ def run_inference(
     }
     chunk_sr = {
         chunk: safe_mean(episode_success_by_chunk.get(chunk, []))
-        for chunk in ['Q1/4', 'Q3/4']
+        for chunk in ['Q1/4', 'Q1/2', 'Q3/4']
     }
 
     # Riepilogo globale
@@ -678,7 +714,7 @@ def run_inference(
         print(f"\n{'='*80}")
         print(f"RESULTS BY CHUNK (Time Instant)")
         print(f"{'='*80}")
-        for chunk_label in ['Q1/4', 'Q3/4']:
+        for chunk_label in ['Q1/4', 'Q1/2', 'Q3/4']:
             sr = chunk_sr.get(chunk_label)
             n_eps = len(episode_success_by_chunk.get(chunk_label, []))
             if sr is None:
@@ -725,63 +761,40 @@ def run_inference(
     )
     print(f"Summary log salvato in: {log_path}")
 
+    # Salva dati per-episodio per analisi quantitativa
+    import json
+    episodes_json_path = output_path / "episodes_data.json"
+    with open(episodes_json_path, "w") as f:
+        json.dump(episodes_data, f)
+    print(f"Dati per-episodio salvati in: {episodes_json_path}")
+
+    if save_videos:
+        generate_showcase_videos(all_results_global, data_manager, output_path)
+
     return all_stats
 
 
 def main():
-    parser = argparse.ArgumentParser(description="HYDRAS inference runner")
-    parser.add_argument(
-        "--chunk-ids",
-        type=int,
-        nargs="+",
-        choices=[0, 2],
-        default=[0, 2],
-        help="Chunk IDs da valutare: 0=Q1/4, 2=Q3/4 (es: 0 2)",
-    )
-    parser.add_argument(
-        "--episodes",
-        type=int,
-        default=5,
-        help="Numero episodi per scenario",
-    )
-    parser.add_argument(
-        "--stochastic",
-        action="store_true",
-        help="Usa policy stocastica invece di deterministica",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default="evaluations_v5",
-        help="Directory output valutazioni (relativa alla root progetto o assoluta)",
-    )
-    args = parser.parse_args()
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-    PROJECT_ROOT = Path(__file__).resolve().parent.parent  # Root del progetto (parent di src/)
-
-    # Carica da tutte le versioni disponibili (V0, V1, V2, V3)
     DATA_DIR    = str(PROJECT_ROOT / "data")
     CONFIG_PATH = str(PROJECT_ROOT / "utils" / "config.yaml")
-    output_dir_path = Path(args.output_dir)
-    if not output_dir_path.is_absolute():
-        output_dir_path = PROJECT_ROOT / output_dir_path
-    OUTPUT_DIR  = str(output_dir_path)
+    OUTPUT_DIR  = str(PROJECT_ROOT / "evaluations_v7")
 
     # Seleziona l'ultimo modello addestrato (directory più recente per nome)
     trained_dir = PROJECT_ROOT / "trained_models"
     run_dirs = sorted([d for d in trained_dir.iterdir() if d.is_dir() and d.name.startswith("ppo_")])
-    
+
     if not run_dirs:
         print("ERRORE: Nessuna directory di training trovata in trained_models/")
         sys.exit(1)
-    
-    latest_run = run_dirs[-1]  # L'ultima per ordine alfabetico (timestamp nel nome)
-    
-    # Cerca il modello nella directory: prima final_model, poi best_model
+
+    latest_run = run_dirs[-1]
+
     model_path = latest_run / "models" / "final_model.zip"
     if not model_path.exists():
         model_path = latest_run / "models" / "best" / "best_model.zip"
-    
+
     if not model_path.exists():
         print(f"ERRORE: Nessun modello trovato in {latest_run}/models/")
         sys.exit(1)
@@ -795,10 +808,10 @@ def main():
         config_path=CONFIG_PATH,
         data_dir=DATA_DIR,
         output_dir=OUTPUT_DIR,
-        n_episodes=args.episodes,
-        deterministic=not args.stochastic,
+        n_episodes=1,
+        deterministic=True,
         sources_csv="Coordinate_Sorgenti_FaseII.csv",
-        chunk_ids=args.chunk_ids,
+        chunk_ids=[0, 1, 2],
     )
 
 
