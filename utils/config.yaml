@@ -46,29 +46,32 @@ environment:
     land_proximity_penalty_max: -5.0  # penalità massima per vicinanza terra (aumentata)
     distance_threshold: 50  # m - distanza dalla sorgente per "trovato"
     distance_reward_multiplier: 1.0  # moltiplicatore per reward distanza
-    plume_reward_positive: 1.5  # reward binario dentro il plume (PRIORITARIO)
-    plume_reward_negative: -1.5  # penalità fuori dal plume (PRIORITARIO)
-    plume_stay_reward: 0.75  # bonus se resta nel plume da uno step al successivo
+    plume_reward_positive: 0.5  # reward binario dentro il plume (PRIORITARIO)
+    plume_reward_negative: -0.2  # penalità fuori dal plume
+    plume_stay_reward: 0.0  # bonus se resta nel plume da uno step al successivo
     plume_reentry_reward: 0.4  # bonus se rientra nel plume
-    plume_exit_penalty: -2.0  # penalità se esce dal plume
-    outside_plume_distance_reward_scale: 0.35  # attenua reward distanza positivo quando fuori plume
+    plume_exit_penalty: -0.5  # penalità se esce dal plume
+    outside_plume_distance_reward_scale: 1.0  # distance reward pieno fuori plume
     plume_threshold: 0.1  # soglia concentrazione per "dentro il plume"
     concentration_gradient_reward_positive: 0.05
     concentration_gradient_reward_negative: -0.05
     wind_alignment_reward: 0.05  # reward if moving upwind (against wind)
     wind_alignment_penalty: -0.05  # penalty if moving downwind (with wind)
+    current_alignment_reward: 0.05  # reward if moving against current (upstream)
+    current_alignment_penalty: -0.05  # penalty if moving with current (downstream)
+    stagnation_window: 20  # steps senza miglioramento distanza -> penalità
+    stagnation_distance_threshold: 20.0  # m - miglioramento minimo per evitare penalità
+    stagnation_penalty: -1.5  # penalità se distanza stagna (aumentata per forzare uscita trail secondaria)
 
   # Spawn constraints
   spawn:
-    min_distance: 500      # m - distanza minima dalla sorgente
-    max_distance: 1500  # m - distanza massima dalla sorgente
     min_land_distance: 50  # m - distanza minima dalla terra per spawn
     start_frame: 352  # frame di partenza (25% della simulazione, Chunk 0) - sovrascitto da chunk_id
     conc_threshold: 0.5  # soglia minima concentrazione
 
   # Normalization
   normalize_obs: true
-  normalize_reward: true  # Attivato per ridurre varianza reward
+  normalize_reward: false
 
 # Training configuration (PPO)
 training:
@@ -98,13 +101,20 @@ training:
 
   # Training loop
   total_timesteps: 1500000  # Fine-tuning: 1.5M timesteps aggiuntivi
-  eval_freq: 10000
-  n_eval_episodes: 35
-  chunk_ids: [0, 2]  # Chunk usati in training: 0=Q1/4, 2=Q3/4
-  eval_chunk_id: 0  # Chunk usato in eval fisso
-  resume_from: "trained_models/ppo_20260407_091232/models/best/best_model.zip"  # Baseline stabile (~90% SR) per fine-tuning
-  eval_source_id: "SRC001"  # scenario fisso per EvalCallback (sorgente)
-  eval_version: "V1"  # scenario fisso per EvalCallback (versione vento/corrente)
+  eval_freq: 50000
+  n_eval_episodes: 5
+  chunk_ids: [0, 1, 2]  # Chunk usati in training: 0=Q1/4, 1=Q1/2, 2=Q3/4
+  resume_from: "trained_models/ppo_20260423_182359/models/final_model.zip"
+  eval_scenarios:
+    - source: "SRC050"
+      version: "V2"
+      chunk_id: 2    # Q3/4 - plume sparso (caso difficile)
+    - source: "SRC050"
+      version: "V1"
+      chunk_id: 1    # Q1/2 - doppia scia + chunk nuovo
+    - source: "SRC001"
+      version: "V0"
+      chunk_id: 0    # Q1/4 - baseline
   save_freq: 50000
   progress_bar: true  # Mostra barra di avanzamento training
 
@@ -112,9 +122,9 @@ training:
   tensorboard_log: "./logs/tensorboard"
   verbose: 1
 
-# Curriculum learning - Fine-tuning su full training set (106 sorgenti x 4 scenari)
+# Curriculum learning - disabilitato per fine-tuning (modello già maturo, full dataset da step 0)
 curriculum:
-  enabled: true
+  enabled: false
   phases:
     - start: 0
       end: 1500000

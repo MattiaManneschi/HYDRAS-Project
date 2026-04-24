@@ -25,14 +25,12 @@ try:
     import torch
     from stable_baselines3 import PPO
     from stable_baselines3.common.callbacks import (
-        EvalCallback,
         CheckpointCallback,
         CallbackList,
         BaseCallback
     )
     from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize, sync_envs_normalization
     from stable_baselines3.common.monitor import Monitor
-    from stable_baselines3.common.evaluation import evaluate_policy
     STABLE_BASELINES_AVAILABLE = True
     
     # MaskablePPO per action masking (evita land collision)
@@ -184,26 +182,188 @@ class CurriculumCallback(BaseCallback):
         return True
 
 
-class SyncNormCallback(BaseCallback):
+class MultiScenarioEvalCallback(BaseCallback):
     """
-    Callback per sincronizzare le statistiche VecNormalize tra train_env e eval_env.
-    
-    Senza sincronizzazione, le running stats divergono durante il training
-    e l'EvalCallback valuta su statistiche diverse da quelle di training.
+    Valuta su N scenari (source, version, chunk_id) e salva il miglior modello
+    in base al success rate medio su tutti gli scenari.
+
+    Più rappresentativo di un EvalCallback fisso su un solo scenario.
     """
 
-    def __init__(self, train_env, eval_env, eval_freq: int, verbose: int = 0):
+    _CHUNK_LABEL = {0: 'Q1/4', 1: 'Q1/2', 2: 'Q3/4'}
+
+    def __init__(
+        self,
+        scenarios: List[Dict[str, Any]],
+        data_manager: 'DataManager',
+        config: Dict[str, Any],
+        train_vec_env,
+        wind_mapping: Dict[str, str],
+        current_mapping: Dict[str, str],
+        best_model_save_path: str,
+        eval_freq: int,
+        n_eval_episodes: int = 3,
+        verbose: int = 1,
+    ):
         super().__init__(verbose)
-        self.train_env = train_env
-        self.eval_env = eval_env
+        self.scenarios = scenarios
+        self.data_manager = data_manager
+        self.config = config
+        self.train_vec_env = train_vec_env
+        self.wind_mapping = wind_mapping
+        self.current_mapping = current_mapping
+        self.best_model_save_path = Path(best_model_save_path)
         self.eval_freq = eval_freq
+        self.n_eval_episodes = n_eval_episodes
+        self.best_mean_sr = -np.inf
+
+        # Pre-carica i field di concentrazione per ogni scenario
+        self._fields: Dict[str, Any] = {}
+        for s in scenarios:
+            key = f"{s['source']}_{s['version']}"
+            if key not in self._fields:
+                field = self._load_field(s['source'], s['version'])
+                if field is not None:
+                    self._fields[key] = field
+
+        print(f"[MultiScenarioEvalCallback] Scenari di eval ({len(scenarios)}):")
+        for s in scenarios:
+            key = f"{s['source']}_{s['version']}"
+            status = "OK" if key in self._fields else "NOT FOUND"
+            print(f"  - {s['source']} {s['version']} {self._CHUNK_LABEL[s['chunk_id']]} [{status}]")
+
+    def _load_field(self, source_id: str, version: str):
+        pattern = f"_{version}_{source_id}_"
+        candidates = [f for f in self.data_manager._nc_files
+                      if pattern in f.name and 'Conc' in f.name]
+        if not candidates:
+            print(f"  WARNING: nessun file trovato per {source_id}_{version}")
+            return None
+        field = self.data_manager._nc_loader.load(
+            str(sorted(candidates)[0]),
+            concentration_var="Concentration - component 1"
+        )
+        if field is None:
+            return None
+        field.run_id = f"{source_id}_{version}"
+        coords = self.data_manager.get_source_coordinates(source_id)
+        if coords:
+            field.source_position = coords
+        return field
+
+    def _build_eval_env(self, chunk_id: int, field):
+        env_config = self.config.get('environment', {})
+        agent_config = self.config.get('agent', {})
+        domain_config = self.config.get('domain', {})
+        reward_cfg = env_config.get('reward', {})
+        spawn_cfg = env_config.get('spawn', {})
+
+        env_kwargs = SourceSeekingConfig(
+            xmin=domain_config.get('xmin', 619000),
+            xmax=domain_config.get('xmax', 622000),
+            ymin=domain_config.get('ymin', 4794500),
+            ymax=domain_config.get('ymax', 4797000),
+            resolution=domain_config.get('grid_resolution', 10),
+            max_velocity=agent_config.get('max_velocity', 1.0),
+            memory_length=agent_config.get('memory_length', 9),
+            dt=env_config.get('dt', 10),
+            max_steps=env_config.get('max_episode_steps', 1080),
+            source_found_reward=reward_cfg.get('source_reached_bonus', 100),
+            step_penalty=reward_cfg.get('step_penalty', -0.1),
+            boundary_penalty=reward_cfg.get('boundary_penalty', -10),
+            source_distance_threshold=reward_cfg.get('distance_threshold', 50),
+            distance_reward_multiplier=reward_cfg.get('distance_reward_multiplier', 1.0),
+            land_proximity_threshold=reward_cfg.get('land_proximity_threshold', 10.0),
+            land_proximity_penalty_max=reward_cfg.get('land_proximity_penalty_max', -5.0),
+            n_discrete_actions=agent_config.get('n_discrete_actions', 8),
+            spawn_min_land_distance=spawn_cfg.get('min_land_distance', 50.0),
+            spawn_start_frame=spawn_cfg.get('start_frame', 1440),
+            spawn_conc_threshold=spawn_cfg.get('conc_threshold', 0.5),
+            chunk_id=chunk_id,
+            plume_reward_positive=reward_cfg.get('plume_reward_positive', 0.5),
+            plume_reward_negative=reward_cfg.get('plume_reward_negative', -0.5),
+            plume_stay_reward=reward_cfg.get('plume_stay_reward', 0.5),
+            plume_reentry_reward=reward_cfg.get('plume_reentry_reward', 0.25),
+            plume_exit_penalty=reward_cfg.get('plume_exit_penalty', -1.5),
+            outside_plume_distance_reward_scale=reward_cfg.get('outside_plume_distance_reward_scale', 0.35),
+            plume_threshold=reward_cfg.get('plume_threshold', 0.1),
+            concentration_gradient_reward_positive=reward_cfg.get('concentration_gradient_reward_positive', 0.05),
+            concentration_gradient_reward_negative=reward_cfg.get('concentration_gradient_reward_negative', -0.05),
+            wind_alignment_reward=reward_cfg.get('wind_alignment_reward', 0.05),
+            wind_alignment_penalty=reward_cfg.get('wind_alignment_penalty', -0.05),
+            current_alignment_reward=reward_cfg.get('current_alignment_reward', 0.05),
+            current_alignment_penalty=reward_cfg.get('current_alignment_penalty', -0.05),
+            stagnation_window=reward_cfg.get('stagnation_window', 50),
+            stagnation_distance_threshold=reward_cfg.get('stagnation_distance_threshold', 20.0),
+            stagnation_penalty=reward_cfg.get('stagnation_penalty', -0.5),
+        )
+
+        raw_env = SourceSeekingEnv(
+            config=env_kwargs,
+            concentration_field=field,
+            data_manager=self.data_manager,
+            wind_mapping=self.wind_mapping,
+            current_mapping=self.current_mapping,
+        )
+        raw_env = Monitor(raw_env)
+        if MASKABLE_PPO_AVAILABLE:
+            raw_env = ActionMasker(raw_env, mask_fn)
+
+        vec_env = DummyVecEnv([lambda e=raw_env: e])
+        if isinstance(self.train_vec_env, VecNormalize):
+            vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=False, training=False)
+            sync_envs_normalization(self.train_vec_env, vec_env)
+        return vec_env
+
+    def _eval_scenario(self, scenario: Dict[str, Any]) -> float:
+        key = f"{scenario['source']}_{scenario['version']}"
+        field = self._fields.get(key)
+        if field is None:
+            return 0.0
+
+        vec_env = self._build_eval_env(scenario['chunk_id'], field)
+        successes = 0
+        for _ in range(self.n_eval_episodes):
+            obs = vec_env.reset()
+            done = False
+            while not done:
+                if MASKABLE_PPO_AVAILABLE:
+                    action, _ = self.model.predict(
+                        obs, deterministic=True,
+                        action_masks=vec_env.env_method('action_masks')[0]
+                    )
+                else:
+                    action, _ = self.model.predict(obs, deterministic=True)
+                obs, _, dones, infos = vec_env.step(action)
+                done = dones[0]
+                if done and infos[0].get('source_reached', False):
+                    successes += 1
+        vec_env.close()
+        return successes / self.n_eval_episodes
 
     def _on_step(self) -> bool:
-        # Sincronizza prima di ogni valutazione
-        if self.num_timesteps % self.eval_freq == 0 and self.num_timesteps > 0:
-            sync_envs_normalization(self.train_env, self.eval_env)
-            if self.verbose > 0:
-                print(f"[Step {self.num_timesteps}] Synced VecNormalize stats")
+        if self.num_timesteps % self.eval_freq != 0 or self.num_timesteps == 0:
+            return True
+
+        print(f"\n[Step {self.num_timesteps:,}] Multi-scenario evaluation:")
+        success_rates = []
+        for scenario in self.scenarios:
+            sr = self._eval_scenario(scenario)
+            label = f"{scenario['source']}_{scenario['version']}_{self._CHUNK_LABEL[scenario['chunk_id']]}"
+            self.logger.record(f'eval/{label}', sr)
+            success_rates.append(sr)
+            print(f"  {label}: {sr:.0%}")
+
+        mean_sr = float(np.mean(success_rates))
+        self.logger.record('eval/mean_success_rate', mean_sr)
+        print(f"  → Mean SR: {mean_sr:.1%}  (best so far: {self.best_mean_sr:.1%})")
+
+        if mean_sr > self.best_mean_sr:
+            self.best_mean_sr = mean_sr
+            self.best_model_save_path.mkdir(parents=True, exist_ok=True)
+            self.model.save(str(self.best_model_save_path / "best_model"))
+            print(f"  → New best model saved ({mean_sr:.1%})")
+
         return True
 
 
@@ -232,7 +392,7 @@ def create_env(
     Crea un'istanza dell'ambiente con i wrapper appropriati.
     
     Args:
-        chunk_id: 0 = spawn @1/4, 2 = spawn @3/4 della simulazione
+        chunk_id: 0 = spawn @1/4, 1 = spawn @1/2, 2 = spawn @3/4 della simulazione
         data_manager: DataManager per caricamenti dinamici (opzionale)
         wind_mapping: Dict con mappatura run_id -> wind_filename (opzionale)
         current_mapping: Dict con mappatura run_id -> current_filename (opzionale)
@@ -265,8 +425,6 @@ def create_env(
         land_proximity_penalty_max=env_config.get('reward', {}).get('land_proximity_penalty_max', -5.0),
         n_discrete_actions=agent_config.get('n_discrete_actions', 8),
         # Spawn constraints
-        spawn_min_distance=env_config.get('spawn', {}).get('min_distance', 500),
-        spawn_max_distance=env_config.get('spawn', {}).get('max_distance', 1500),
         spawn_min_land_distance=env_config.get('spawn', {}).get('min_land_distance', 50.0),
         spawn_start_frame=env_config.get('spawn', {}).get('start_frame', 1440),
         spawn_conc_threshold=env_config.get('spawn', {}).get('conc_threshold', 0.5),
@@ -285,6 +443,13 @@ def create_env(
         # Wind alignment reward
         wind_alignment_reward=env_config.get('reward', {}).get('wind_alignment_reward', 0.05),
         wind_alignment_penalty=env_config.get('reward', {}).get('wind_alignment_penalty', -0.05),
+        # Current alignment reward
+        current_alignment_reward=env_config.get('reward', {}).get('current_alignment_reward', 0.05),
+        current_alignment_penalty=env_config.get('reward', {}).get('current_alignment_penalty', -0.05),
+        # Stagnation penalty
+        stagnation_window=env_config.get('reward', {}).get('stagnation_window', 50),
+        stagnation_distance_threshold=env_config.get('reward', {}).get('stagnation_distance_threshold', 20.0),
+        stagnation_penalty=env_config.get('reward', {}).get('stagnation_penalty', -0.5),
     )
 
     print(f"  Success radius: {env_kwargs.source_distance_threshold}m")
@@ -340,7 +505,7 @@ def make_env_fn(
     Args:
         wind_data: Dati di vento (condivisi tra ambienti)
         current_data: Dati di corrente (condivisi tra ambienti)
-        chunk_id: 0 = spawn @1/4, 2 = spawn @3/4 della simulazione
+        chunk_id: 0 = spawn @1/4, 1 = spawn @1/2, 2 = spawn @3/4 della simulazione
         data_manager: DataManager per caricamenti dinamici
         wind_mapping: Dict con mappatura run_id -> wind_filename
         current_mapping: Dict con mappatura run_id -> current_filename
@@ -490,7 +655,7 @@ def train(
     # Crea ambienti vettorizzati
     raw_chunk_ids = training_config.get('chunk_ids', [0, 2])
     if not isinstance(raw_chunk_ids, list) or len(raw_chunk_ids) == 0:
-        raise ValueError("training.chunk_ids must be a non-empty list containing 0 and/or 2")
+        raise ValueError("training.chunk_ids must be a non-empty list containing values from [0, 1, 2]")
 
     chunk_ids: List[int] = []
     for cid in raw_chunk_ids:
@@ -498,16 +663,18 @@ def train(
             chunk_int = int(cid)
         except (TypeError, ValueError):
             continue
-        if chunk_int in [0, 2]:
+        if chunk_int in [0, 1, 2]:
             chunk_ids.append(chunk_int)
     chunk_ids = sorted(set(chunk_ids))
 
     if not chunk_ids:
-        raise ValueError("No valid chunk IDs provided. Allowed values are [0, 2]")
+        raise ValueError("No valid chunk IDs provided. Allowed values are [0, 1, 2]")
 
     chunk_desc = []
     if 0 in chunk_ids:
         chunk_desc.append("0=Q1/4")
+    if 1 in chunk_ids:
+        chunk_desc.append("1=Q1/2")
     if 2 in chunk_ids:
         chunk_desc.append("2=Q3/4")
 
@@ -567,62 +734,6 @@ def train(
                 norm_reward=norm_reward_enabled,
                 clip_obs=10.0
             )
-
-    # Eval scenario fisso e riproducibile (source+version), con run_id valorizzato
-    # per garantire mapping coerente Conc/Wind/Current in EvalCallback.
-    eval_source_id = training_config.get('eval_source_id', 'SRC001')
-    eval_version = training_config.get('eval_version', 'V1')
-    eval_pattern = f"_{eval_version}_{eval_source_id}_"
-    eval_candidates = [
-        f for f in data_manager._nc_files
-        if eval_pattern in f.name and 'Conc' in f.name
-    ]
-
-    if eval_candidates:
-        eval_file = sorted(eval_candidates)[0]
-        eval_concentration_field = data_manager._nc_loader.load(
-            str(eval_file),
-            concentration_var="Concentration - component 1"
-        )
-        eval_concentration_field.run_id = f"{eval_source_id}_{eval_version}"
-        eval_coords = data_manager.get_source_coordinates(eval_source_id)
-        if eval_coords:
-            eval_concentration_field.source_position = eval_coords
-        print(f"  Eval scenario fisso: {eval_source_id}_{eval_version} ({eval_file.name})")
-    else:
-        # Fallback robusto: usa get_concentration_field (ora preserva run_id)
-        eval_concentration_field = data_manager.get_concentration_field(source_id=eval_source_id)
-        print(f"  Eval scenario fallback: {eval_source_id} (versione da field.run_id)")
-
-    # Chunk di eval (default 0 = Q1/4). Se non valido, fallback a 0.
-    eval_chunk_id = training_config.get('eval_chunk_id', 0)
-    try:
-        eval_chunk_id = int(eval_chunk_id)
-    except (TypeError, ValueError):
-        eval_chunk_id = 0
-    if eval_chunk_id not in [0, 2]:
-        eval_chunk_id = 0
-
-    # Crea ambiente di valutazione (usa file NC reale, non random)
-    eval_env = DummyVecEnv([
-        make_env_fn(
-            config, eval_concentration_field, wind_data, current_data, 0, eval_chunk_id,
-            seed + 1000, data_dir, False,
-            data_manager=data_manager,
-            wind_mapping=wind_mapping,
-            current_mapping=current_mapping,
-            allowed_sources=discovered_sources  # Passa le sorgenti disponibili anche all'eval
-        )
-    ])
-    if use_vec_normalize and isinstance(vec_env, VecNormalize):
-        eval_env = VecNormalize(
-            eval_env,
-            norm_obs=True,
-            norm_reward=False,
-            training=False
-        )
-        # Sincronizza le running stats dall'env di training
-        sync_envs_normalization(vec_env, eval_env)
 
     # Configura policy network
     policy_kwargs = training_config.get('policy_kwargs', {})
@@ -703,32 +814,22 @@ def train(
         )
         callbacks.append(curriculum_callback)
 
-    # Evaluation callback
-    # Le frequenze in config sono espresse in timesteps globali.
-    # SB3 le interpreta in step del VecEnv, quindi dividiamo per il numero
-    # reale di ambienti paralleli (2 chunk per worker).
+    # Multi-scenario eval callback
     eval_freq = max(1, training_config.get('eval_freq', 10000) // n_parallel_envs)
-    eval_callback = EvalCallback(
-        eval_env,
+    eval_scenarios = training_config.get('eval_scenarios', [])
+    eval_callback = MultiScenarioEvalCallback(
+        scenarios=eval_scenarios,
+        data_manager=data_manager,
+        config=config,
+        train_vec_env=vec_env,
+        wind_mapping=wind_mapping,
+        current_mapping=current_mapping,
         best_model_save_path=str(model_dir / "best"),
-        log_path=str(log_dir / "eval"),
         eval_freq=eval_freq,
-        n_eval_episodes=training_config.get('n_eval_episodes', 10),
-        deterministic=True,
-        render=False
+        n_eval_episodes=training_config.get('n_eval_episodes', 3),
+        verbose=1,
     )
     callbacks.append(eval_callback)
-
-    # Sync normalization callback (sincronizza stats prima di ogni eval)
-    # BUG #14 FIX: Usa stessi step di EvalCallback (eval_freq), non moltiplicato
-    if config.get('environment', {}).get('normalize_obs', True):
-        sync_callback = SyncNormCallback(
-            train_env=vec_env,
-            eval_env=eval_env,
-            eval_freq=eval_freq,  # Stessi step di EvalCallback
-            verbose=0
-        )
-        callbacks.append(sync_callback)
 
     # Checkpoint callback
     checkpoint_callback = CheckpointCallback(
@@ -766,18 +867,6 @@ def train(
         vec_env.save(str(model_dir / "vec_normalize.pkl"))
         print(f"VecNormalize saved to: {model_dir / 'vec_normalize.pkl'}")
 
-    # Valutazione finale
-    print("\n" + "=" * 60)
-    print("Final Evaluation")
-    print("=" * 60)
-
-    mean_reward, std_reward = evaluate_policy(
-        model, eval_env,
-        n_eval_episodes=training_config.get('n_eval_episodes', 10),
-        deterministic=True
-    )
-    print(f"Mean reward: {mean_reward:.2f} +/- {std_reward:.2f}")
-
     # --- Salva plot di Loss e Success Rate ---
     plots_dir = run_dir / "plots"
     plots_dir.mkdir(exist_ok=True)
@@ -811,7 +900,6 @@ def train(
 
     # Cleanup
     vec_env.close()
-    eval_env.close()
 
     print(f"\nTraining completed!")
     print(f"Results saved to: {run_dir}")
@@ -852,7 +940,7 @@ def main():
     train(
         config_path=config_path,
         output_dir=output_dir,
-        n_envs=2,
+        n_envs=1,
         seed=42,
         data_dir=data_dir,
         resume_from=resume_from,

@@ -53,11 +53,9 @@ class SourceSeekingConfig:
     max_steps: int = 1080  # 3 ore: 10800s / 10s = 1080 steps
 
     # Spawn
-    spawn_min_distance: float = 500.0  # m distanza minima dalla sorgente
-    spawn_max_distance: float = 1500.0  # m distanza massima dalla sorgente
     spawn_start_frame: int = 352  # frame di partenza (25% della simulazione, Chunk 0) - sovrascitto da chunk_id
     spawn_conc_threshold: float = 0.5  # soglia minima concentrazione per spawn
-    chunk_id: int = 0  # supportati: 0 = spawn @1/4, 2 = spawn @3/4 della simulazione
+    chunk_id: int = 0  # supportati: 0 = spawn @1/4, 1 = spawn @1/2, 2 = spawn @3/4 della simulazione
 
     # Reward
     source_distance_threshold: float = 50  # m (intorno di successo)
@@ -78,6 +76,13 @@ class SourceSeekingConfig:
     # Wind alignment reward (seguire il vento controcorrente verso sorgente)
     wind_alignment_reward: float = 0.05  # reward se movimento è controcorrente al vento
     wind_alignment_penalty: float = -0.05  # penalty se movimento è a favore del vento
+    # Current alignment reward (controcorrente = upstream = verso sorgente)
+    current_alignment_reward: float = 0.05
+    current_alignment_penalty: float = -0.05
+    # Stagnation penalty (scia sbagliata / esplorazione circolare)
+    stagnation_window: int = 50          # step da osservare
+    stagnation_distance_threshold: float = 20.0  # m - miglioramento minimo richiesto nella finestra
+    stagnation_penalty: float = -0.5    # penalità se nessun progresso nella finestra
 
     # Land avoidance
     land_proximity_threshold: float = 10.0  # m - distanza dalla terra per penalità progressiva
@@ -214,6 +219,13 @@ class SourceSeekingEnv(gym.Env):
         # Ogni elemento è una lista di 8 float (uno per direzione)
         self._directional_conc_memory: List[List[float]] = [[0.0] * 8 for _ in range(self.config.memory_length)]
 
+        # Cache wind/current components: popolata una volta per step, letta da _compute_reward e _get_observation
+        self._cached_wind_components: Optional[Tuple[float, float]] = None
+        self._cached_current_components: Optional[Tuple[float, float]] = None
+
+        # Buffer distanze per stagnation penalty
+        self._distance_history: List[float] = []
+
         # Allowed sources per curriculum learning (sarà impostato dal CurriculumCallback)
         # Default vuoto: richiede che sia impostato dal training script
         self.allowed_sources: List[str] = []
@@ -280,75 +292,58 @@ class SourceSeekingEnv(gym.Env):
         self.action_space = spaces.Discrete(self.config.n_discrete_actions)
 
     def _spawn_on_plume(self) -> Tuple[float, float]:
-        """Spawna SEMPRE dentro il plume con vincoli di distanza.
-        
-        Rilassa progressivamente i vincoli di distanza se necessario,
-        ma SEMPRE rimane dentro il plume (conc >= spawn_conc_threshold).
-        
-        Vincoli (in ordine di priorità decrescente):
+        """Spawna SEMPRE dentro il plume con vincoli di distanza a cascata.
+
+        Prova i ring di distanza in _SPAWN_DISTANCE_CASCADE in ordine decrescente.
+        Scende al ring successivo solo se nessun punto del plume rientra in quello corrente.
+        Fallback finale: ovunque nel plume (senza vincoli di distanza).
+
+        Vincoli (in ordine di priorità):
         1. Deve essere nel plume (conc >= spawn_conc_threshold) ← OBBLIGATORIO
-        2. Tra spawn_min_distance e spawn_max_distance dalla sorgente
+        2. Ring (min_dist, max_dist) dalla sorgente (cascata)
         3. Almeno spawn_min_land_distance dal bordo terra
         """
-
         # Imposta il timestep al frame configurato (quello calcolato dal chunk_id nel reset())
         if self.field.n_timesteps > 1:
-            # Usa self._start_time_idx che è stato impostato in reset() basato su chunk_id
             spawn_frame = getattr(self, '_start_time_idx', self.config.spawn_start_frame)
             self.field.set_time(spawn_frame)
 
-        # Ottieni il campo e crea una maschera binaria del plume
+        # Ottieni tutti i punti dentro il plume
         field_data = np.nan_to_num(self.field.get_current_field(), nan=0.0)
         plume_mask = field_data > self.config.spawn_conc_threshold
-
         valid_indices = np.where(plume_mask)
 
         if len(valid_indices[0]) == 0:
-            # Se non c'è plume esitente, lancia eccezione (non deve succedere in inference)
             raise ValueError(
-                f"No plume found at spawn frame {spawn_frame} with threshold {self.config.spawn_conc_threshold}. "
-                f"Lower spawn_conc_threshold in config.yaml"
+                f"No plume found at spawn frame {spawn_frame} "
+                f"with threshold {self.config.spawn_conc_threshold}."
             )
 
-        # Converti indici in coordinate
+        # Coordinate di tutti i punti nel plume e distanze dalla sorgente
         y_coords = self.field.y_coords[valid_indices[0]]
         x_coords = self.field.x_coords[valid_indices[1]]
-
-        # Applica vincoli di distanza dalla sorgente
         distances = np.sqrt(
             (x_coords - self.source_position[0])**2 +
             (y_coords - self.source_position[1])**2
         )
-        active_min_distance = self.config.spawn_min_distance
-        active_max_distance = self.config.spawn_max_distance
-        distance_mask = (
-            (distances >= active_min_distance) &
-            (distances <= active_max_distance)
-        )
-        
-        valid_x = x_coords[distance_mask]
-        valid_y = y_coords[distance_mask]
 
-        # Se non ci sono punti nei vincoli ristretti, rilassa progressivamente i limiti
-        # MA rimani sempre nel plume
-        if len(valid_x) == 0:
-            relaxation_steps = [
-                (self.config.spawn_min_distance, np.inf),
-                (self.config.spawn_min_distance * 0.75, np.inf),
-                (self.config.spawn_min_distance * 0.5, np.inf),
-                (0.0, np.inf),
-            ]
-            for min_dist, max_dist in relaxation_steps:
-                relaxed_mask = (distances >= min_dist) & (distances <= max_dist)
-                valid_x = x_coords[relaxed_mask]
-                valid_y = y_coords[relaxed_mask]
-                if len(valid_x) > 0:
-                    active_min_distance = float(min_dist)
-                    active_max_distance = float(max_dist)
-                    break
+        # Cascata di ring: prova dal più lontano al più vicino
+        active_min_distance = 0.0
+        active_max_distance = np.inf
+        valid_x = np.array([], dtype=float)
+        valid_y = np.array([], dtype=float)
 
+        for min_dist, max_dist in self._SPAWN_DISTANCE_CASCADE:
+            ring_mask = (distances >= min_dist) & (distances <= max_dist)
+            if np.any(ring_mask):
+                valid_x = x_coords[ring_mask]
+                valid_y = y_coords[ring_mask]
+                active_min_distance = float(min_dist)
+                active_max_distance = float(max_dist)
+                break
+
+        # Fallback finale: ovunque nel plume
         if len(valid_x) == 0:
-            # Fallback finale: ovunque nel plume
             valid_x = x_coords
             valid_y = y_coords
             active_min_distance = 0.0
@@ -359,50 +354,36 @@ class SourceSeekingEnv(gym.Env):
             self._min_distance_to_land(valid_x[i], valid_y[i]) >= self.config.spawn_min_land_distance
             for i in range(len(valid_x))
         ])
-
         enforce_land_constraint = bool(np.any(land_safe_mask))
         if enforce_land_constraint:
             valid_x = valid_x[land_safe_mask]
             valid_y = valid_y[land_safe_mask]
 
         def is_valid_spawn_position(x: float, y: float) -> bool:
-            in_domain = (
-                self.config.xmin <= x <= self.config.xmax and
-                self.config.ymin <= y <= self.config.ymax
-            )
-            if not in_domain:
+            if not (self.config.xmin <= x <= self.config.xmax and
+                    self.config.ymin <= y <= self.config.ymax):
                 return False
-
-            conc = self.field.get_concentration(x, y)
-            if conc < self.config.spawn_conc_threshold:
+            if self.field.get_concentration(x, y) < self.config.spawn_conc_threshold:
                 return False
-
-            distance = np.sqrt(
-                (x - self.source_position[0])**2 +
-                (y - self.source_position[1])**2
-            )
-            if distance < active_min_distance or distance > active_max_distance:
+            dist = np.sqrt((x - self.source_position[0])**2 + (y - self.source_position[1])**2)
+            if dist < active_min_distance or dist > active_max_distance:
                 return False
-
-            if enforce_land_constraint:
-                if self._min_distance_to_land(x, y) < self.config.spawn_min_land_distance:
-                    return False
-
+            if enforce_land_constraint and self._min_distance_to_land(x, y) < self.config.spawn_min_land_distance:
+                return False
             return True
 
+        # Primo tentativo: punto random con piccola perturbazione
         for _ in range(20):
             idx = int(self.np_random.integers(len(valid_x)))
-            base_x = float(valid_x[idx])
-            base_y = float(valid_y[idx])
-            x = base_x + float(self.np_random.uniform(-5, 5))
-            y = base_y + float(self.np_random.uniform(-5, 5))
+            x = float(valid_x[idx]) + float(self.np_random.uniform(-5, 5))
+            y = float(valid_y[idx]) + float(self.np_random.uniform(-5, 5))
             if is_valid_spawn_position(x, y):
                 return (x, y)
 
+        # Secondo tentativo: punto esatto dalla griglia
         for _ in range(20):
             idx = int(self.np_random.integers(len(valid_x)))
-            x = float(valid_x[idx])
-            y = float(valid_y[idx])
+            x, y = float(valid_x[idx]), float(valid_y[idx])
             if is_valid_spawn_position(x, y):
                 return (x, y)
 
@@ -464,7 +445,10 @@ class SourceSeekingEnv(gym.Env):
             obs.extend(timestep_sensors)
 
         # Vento corrente (u, v)
-        if self.wind_data is not None:
+        if self._cached_wind_components is not None:
+            obs.append(self._cached_wind_components[0])
+            obs.append(self._cached_wind_components[1])
+        elif self.wind_data is not None:
             wind_u, wind_v = self.wind_data.get_wind_components()
             obs.append(wind_u)
             obs.append(wind_v)
@@ -473,7 +457,10 @@ class SourceSeekingEnv(gym.Env):
             obs.append(0.0)
 
         # Corrente corrente (u, v)
-        if self.current_data is not None:
+        if self._cached_current_components is not None:
+            obs.append(self._cached_current_components[0])
+            obs.append(self._cached_current_components[1])
+        elif self.current_data is not None:
             current_u, current_v = self.current_data.get_current_components(x, y)
             obs.append(current_u)
             obs.append(current_v)
@@ -510,6 +497,18 @@ class SourceSeekingEnv(gym.Env):
     # Mappa azioni discrete: 8 direzioni (4 cardinali + 4 diagonali)
     # Usa cos(45°) = sin(45°) = 1/√2 ≈ 0.7071 per normalizzazione corretta
     _DIAG = 1.0 / np.sqrt(2.0)
+    # Cascata di ring (min_dist, max_dist) provati in ordine per lo spawn.
+    # Si scende al ring successivo solo se nessun punto del plume rientra in quello corrente.
+    _SPAWN_DISTANCE_CASCADE: List[Tuple[float, float]] = [
+        (2000, 2500),
+        (1500, 2000),
+        (1000, 1500),
+        (500,  1000),
+        (250,   500),
+        (50,    250),
+        (0,      50),
+    ]
+
     _ACTION_MAP = {
         0: (0.0,   1.0),       # Nord  (+y)
         1: (0.0,  -1.0),       # Sud   (-y)
@@ -732,20 +731,12 @@ class SourceSeekingEnv(gym.Env):
         # 4. REWARD DISTANZA (PRIORITARIO)
         # ============================================================
         distance_improvement = self.prev_distance - current_distance
-        distance_reward = distance_improvement * 5.0 * self.config.distance_reward_multiplier
-        outside_plume_scale = float(np.clip(self.config.outside_plume_distance_reward_scale, 0.0, 1.0))
+        distance_reward = distance_improvement * 0.05 * self.config.distance_reward_multiplier
+        outside_plume_scale = float(np.clip(self.config.outside_plume_distance_reward_scale, 0.0, 10.0))
 
-        # Fuori plume, attenua il reward distanza positivo per evitare scorciatoie
-        # geometriche che fanno perdere il plume vicino alla sorgente.
         if not in_plume and distance_reward > 0:
             distance_reward *= outside_plume_scale
-        
-        # Applica distance reward sempre, ma annulla solo il component negativo fuori dal plume
-        if not in_plume and distance_reward < 0:
-            # Se sei fuori dal plume E ti stai allontanando, annulla la penalità
-            # Incoraggia l'esplorazione per rientrare nel plume
-            distance_reward = 0.0
-        
+
         reward += distance_reward
         info['distance_reward'] = distance_reward
         info['outside_plume_distance_scale'] = outside_plume_scale
@@ -761,7 +752,45 @@ class SourceSeekingEnv(gym.Env):
             reward += self.config.concentration_gradient_reward_negative
             info['conc_gradient_reward'] = self.config.concentration_gradient_reward_negative
 
-        # Wind/current sono già in input alla rete neurale — non serve reward esplicito
+        # ============================================================
+        # 5b. REWARD ALLINEAMENTO VENTO (controvento = upwind = verso sorgente)
+        # ============================================================
+        if self._cached_wind_components is not None:
+            wind_u, wind_v = self._cached_wind_components
+            wind_norm = np.sqrt(wind_u ** 2 + wind_v ** 2)
+            if wind_norm > 1e-6:
+                alignment = (self.state.vx * wind_u + self.state.vy * wind_v) / wind_norm
+                if alignment < 0:
+                    reward += self.config.wind_alignment_reward
+                    info['wind_alignment_reward'] = self.config.wind_alignment_reward
+                elif alignment > 0:
+                    reward += self.config.wind_alignment_penalty
+                    info['wind_alignment_reward'] = self.config.wind_alignment_penalty
+            else:
+                info['wind_alignment_reward'] = 0.0
+        else:
+            info['wind_alignment_reward'] = 0.0
+
+        # ============================================================
+        # 5c. REWARD ALLINEAMENTO CORRENTE (controcorrente = upstream = verso sorgente)
+        # ============================================================
+        if self._cached_current_components is not None:
+            current_u, current_v = self._cached_current_components
+            current_norm = np.sqrt(current_u ** 2 + current_v ** 2)
+            if current_norm > 1e-6:
+                # dot product tra direzione movimento e direzione corrente
+                # negativo = controcorrente (upstream) = reward
+                alignment = (self.state.vx * current_u + self.state.vy * current_v) / current_norm
+                if alignment < 0:
+                    reward += self.config.current_alignment_reward
+                    info['current_alignment_reward'] = self.config.current_alignment_reward
+                elif alignment > 0:
+                    reward += self.config.current_alignment_penalty
+                    info['current_alignment_reward'] = self.config.current_alignment_penalty
+            else:
+                info['current_alignment_reward'] = 0.0
+        else:
+            info['current_alignment_reward'] = 0.0
 
         # ============================================================
         # 6. PENALITÀ TEMPO (time efficiency)
@@ -781,6 +810,25 @@ class SourceSeekingEnv(gym.Env):
             )
             reward += proximity_penalty
             info['land_proximity_penalty'] = proximity_penalty
+
+        # ============================================================
+        # 8. STAGNATION PENALTY (nessun progresso nella finestra → scia sbagliata)
+        # ============================================================
+        self._distance_history.append(current_distance)
+        if len(self._distance_history) > self.config.stagnation_window:
+            self._distance_history.pop(0)
+
+        if len(self._distance_history) == self.config.stagnation_window:
+            window_start = self._distance_history[0]
+            window_best = min(self._distance_history)
+            improvement = window_start - window_best  # positivo = si è avvicinato
+            if improvement < self.config.stagnation_distance_threshold:
+                reward += self.config.stagnation_penalty
+                info['stagnation_penalty'] = self.config.stagnation_penalty
+            else:
+                info['stagnation_penalty'] = 0.0
+        else:
+            info['stagnation_penalty'] = 0.0
 
         # Aggiorna valori precedenti
         self.prev_concentration = current_conc
@@ -854,11 +902,14 @@ class SourceSeekingEnv(gym.Env):
 
         # Determina spawn_start_frame: usa chunk_id
         # chunk_id=0: spawn a 1/4 della simulazione (inizio plume)
+        # chunk_id=1: spawn a 1/2 della simulazione (plume maturo)
         # chunk_id=2: spawn a 3/4 della simulazione (plume tardi/disperso)
         spawn_frame = self.config.spawn_start_frame
-        if self.field.n_timesteps > 1 and self.config.chunk_id in [0, 2]:
+        if self.field.n_timesteps > 1 and self.config.chunk_id in [0, 1, 2]:
             if self.config.chunk_id == 0:
                 spawn_frame = self.field.n_timesteps // 4      # Q1/4
+            elif self.config.chunk_id == 1:
+                spawn_frame = self.field.n_timesteps // 2      # Q1/2
             else:  # chunk_id == 2
                 spawn_frame = (self.field.n_timesteps * 3) // 4  # Q3/4
 
@@ -902,6 +953,9 @@ class SourceSeekingEnv(gym.Env):
 
         # Reset memoria concentrazioni direzionali passate (9 timestep x 8 direzioni)
         self._directional_conc_memory = [[0.0] * 8 for _ in range(self.config.memory_length)]
+
+        # Reset buffer distanze per stagnation penalty
+        self._distance_history = []
 
         # Sincronizza vento e corrente al timestep di start usando TEMPO REALE (minuti)
         # dt_conc = 2 min/frame, dt_wind = 60 min/frame, dt_current = 2 min/frame
@@ -987,6 +1041,13 @@ class SourceSeekingEnv(gym.Env):
             
             if self.current_data is not None:
                 self.current_data.set_time_from_minutes(time_minutes)
+
+        # Cache wind/current components una volta per step (riusati da _compute_reward e _get_observation)
+        self._cached_wind_components = self.wind_data.get_wind_components() if self.wind_data is not None else None
+        self._cached_current_components = (
+            self.current_data.get_current_components(self.state.x, self.state.y)
+            if self.current_data is not None else None
+        )
 
         # Calcola reward
         reward, reward_info = self._compute_reward(action)
