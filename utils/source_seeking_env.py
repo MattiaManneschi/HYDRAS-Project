@@ -62,14 +62,7 @@ class SourceSeekingConfig:
     source_found_reward: float = 100.0
     step_penalty: float = -0.1
     boundary_penalty: float = -10.0
-    distance_reward_multiplier: float = 1.0  # Moltiplicatore per reward distanza
-    plume_reward_positive: float = 0.5  # reward binario dentro il plume
-    plume_reward_negative: float = -0.5  # penalità fuori dal plume
-    plume_threshold: float = 0.1  # soglia concentrazione per "dentro il plume"
-    plume_stay_reward: float = 0.5  # bonus se resta nel plume tra step consecutivi
-    plume_reentry_reward: float = 0.25  # bonus se rientra nel plume
-    plume_exit_penalty: float = -1.5  # penalità se esce dal plume
-    outside_plume_distance_reward_scale: float = 0.35  # riduce reward distanza positivo fuori plume
+    distance_reward_multiplier: float = 100.0  # Moltiplicatore per reward distanza (scala per potenziale quadratico)
     concentration_gradient_reward_positive: float = 0.05  # reward per aumento concentrazione
     concentration_gradient_reward_negative: float = -0.05  # penalty per diminuzione concentrazione
     
@@ -83,10 +76,17 @@ class SourceSeekingConfig:
     stagnation_window: int = 50          # step da osservare
     stagnation_distance_threshold: float = 20.0  # m - miglioramento minimo richiesto nella finestra
     stagnation_penalty: float = -0.5    # penalità se nessun progresso nella finestra
+    # Stagnation penalty direzionale (oscillazione ripetuta sullo stesso asse)
+    directional_stagnation_threshold: float = 0.15  # efficienza < soglia → oscillazione
+    directional_stagnation_penalty: float = -1.0    # penalità per oscillazione direzionale
+
+    # Retreat penalty multiplier: allontanarsi dalla sorgente costa N× di più che avvicinarsi
+    # (nella stessa zona di distanza). Scoraggia il bypass della sorgente.
+    retreat_penalty_multiplier: float = 3.0
 
     # Land avoidance
-    land_proximity_threshold: float = 10.0  # m - distanza dalla terra per penalità progressiva
-    land_proximity_penalty_max: float = -5.0  # penalità massima per vicinanza terra (aumentata)
+    land_proximity_threshold: float = 30.0  # m - distanza dalla terra per penalità progressiva
+    land_proximity_penalty_max: float = -15.0  # penalità massima per vicinanza terra
     spawn_min_land_distance: float = 50.0  # m - distanza minima dalla terra per spawn
 
     # Action
@@ -494,6 +494,19 @@ class SourceSeekingEnv(gym.Env):
         
         return conc_sensors
 
+    @staticmethod
+    def _distance_zone_multiplier(distance: float) -> float:
+        """Moltiplicatore inversamente proporzionale alla distanza dalla sorgente.
+
+        mult = max(1.0, 2000 / distance)
+
+        Cresce in modo continuo e senza cap: più l'agente è vicino,
+        più il reward di approccio (e la penalità di retreat) aumentano.
+        Flat a 1.0× oltre i 2000 m; a 100 m vale 20×, a 50 m vale 40×.
+        """
+        d = max(distance, 1.0)  # evita divisione per zero
+        return float(max(1.0, 2000.0 / d))
+
     # Mappa azioni discrete: 8 direzioni (4 cardinali + 4 diagonali)
     # Usa cos(45°) = sin(45°) = 1/√2 ≈ 0.7071 per normalizzazione corretta
     _DIAG = 1.0 / np.sqrt(2.0)
@@ -658,13 +671,12 @@ class SourceSeekingEnv(gym.Env):
         Calcola il reward basato su:
         1. Bonus sorgente raggiunta (terminale dominante)
         2. Penalità terra e bordi (terminale)
-        3. Reward distanza (segnale dominante continuo)
-        4. Reward binario plume (+0.3 dentro, -0.3 fuori)
-        4b. Reward transizione plume (stay/re-entry/exit)
-        5. Reward gradiente concentrazione (+0.1 aumento, -0.1 diminuzione)
-        5b. Reward allineamento vento (controcorrente = reward, a favore = penalty)
+        3. Reward distanza zone-based + retreat asymmetry (segnale dominante)
+        4. Reward gradiente concentrazione (hint ±0.05)
+        5. Reward allineamento vento/corrente (hint ±0.05)
         6. Penalità tempo (-0.1 per step)
         7. Penalità progressiva avvicinamento terra
+        8. Stagnation penalty (sospesa entro 250m dalla sorgente)
         """
         reward = 0.0
         info = {}
@@ -703,43 +715,35 @@ class SourceSeekingEnv(gym.Env):
             info['boundary'] = self.config.boundary_penalty
 
         # ============================================================
-        # 3. REWARD BINARIO PLUME (PRIORITARIO)
+        # 4. REWARD DISTANZA — ZONE-BASED + RETREAT ASYMMETRY
+        #
+        # Potenziale quadratico Φ(d) = (max_d - d)²
+        # Zone multiplier: aumenta progressivamente avvicinandosi (1× → 2.5×).
+        # Retreat factor: allontanarsi costa retreat_penalty_multiplier× di più
+        # che avvicinarsi nella stessa zona. Scoraggia il bypass della sorgente.
         # ============================================================
-        in_plume = current_conc > self.config.plume_threshold
-        if in_plume:
-            reward += self.config.plume_reward_positive
-            info['plume_reward'] = self.config.plume_reward_positive
+        _QUAD_MAX = 3000.0  # approssimazione diagonale del dominio (m)
+        raw_delta = (
+            (_QUAD_MAX - current_distance) ** 2 - (_QUAD_MAX - self.prev_distance) ** 2
+        ) / (_QUAD_MAX ** 2)
+
+        zone_mult = self._distance_zone_multiplier(current_distance)
+        approaching = current_distance <= self.prev_distance
+
+        if approaching:
+            distance_reward = raw_delta * zone_mult * self.config.distance_reward_multiplier
         else:
-            reward += self.config.plume_reward_negative
-            info['plume_reward'] = self.config.plume_reward_negative
-        info['in_plume'] = in_plume
-
-        prev_in_plume = self.prev_concentration > self.config.plume_threshold
-        plume_transition_reward = 0.0
-        if in_plume and prev_in_plume:
-            plume_transition_reward = self.config.plume_stay_reward
-        elif in_plume and not prev_in_plume:
-            plume_transition_reward = self.config.plume_reentry_reward
-        elif not in_plume and prev_in_plume:
-            plume_transition_reward = self.config.plume_exit_penalty
-
-        reward += plume_transition_reward
-        info['plume_transition_reward'] = plume_transition_reward
-        info['prev_in_plume'] = prev_in_plume
-
-        # ============================================================
-        # 4. REWARD DISTANZA (PRIORITARIO)
-        # ============================================================
-        distance_improvement = self.prev_distance - current_distance
-        distance_reward = distance_improvement * 0.05 * self.config.distance_reward_multiplier
-        outside_plume_scale = float(np.clip(self.config.outside_plume_distance_reward_scale, 0.0, 10.0))
-
-        if not in_plume and distance_reward > 0:
-            distance_reward *= outside_plume_scale
+            # Retreat: moltiplicatore zona + fattore penalità (raw_delta < 0)
+            distance_reward = (
+                raw_delta * zone_mult
+                * self.config.retreat_penalty_multiplier
+                * self.config.distance_reward_multiplier
+            )
 
         reward += distance_reward
         info['distance_reward'] = distance_reward
-        info['outside_plume_distance_scale'] = outside_plume_scale
+        info['zone_multiplier'] = zone_mult
+        info['approaching'] = approaching
 
         # ============================================================
         # 5. REWARD GRADIENTE CONCENTRAZIONE
@@ -813,12 +817,15 @@ class SourceSeekingEnv(gym.Env):
 
         # ============================================================
         # 8. STAGNATION PENALTY (nessun progresso nella finestra → scia sbagliata)
+        # Sospesa entro 250m dalla sorgente: l'agente deve poter cercare
+        # localmente senza essere penalizzato per non progredire linearmente.
         # ============================================================
         self._distance_history.append(current_distance)
         if len(self._distance_history) > self.config.stagnation_window:
             self._distance_history.pop(0)
 
-        if len(self._distance_history) == self.config.stagnation_window:
+        near_source_search = current_distance < 250.0
+        if not near_source_search and len(self._distance_history) == self.config.stagnation_window:
             window_start = self._distance_history[0]
             window_best = min(self._distance_history)
             improvement = window_start - window_best  # positivo = si è avvicinato
@@ -829,6 +836,28 @@ class SourceSeekingEnv(gym.Env):
                 info['stagnation_penalty'] = 0.0
         else:
             info['stagnation_penalty'] = 0.0
+
+        # ============================================================
+        # 8b. STAGNATION PENALTY DIREZIONALE (oscillazione ripetuta)
+        # Efficienza = |spostamento netto| / distanza totale percorsa
+        # Sospesa entro 250m dalla sorgente (stessa logica di 8).
+        # ============================================================
+        if not near_source_search and self.steps >= self.config.memory_length:
+            dxs = [d[0] for d in self._displacement_memory]
+            dys = [d[1] for d in self._displacement_memory]
+            net_disp = np.sqrt(sum(dxs) ** 2 + sum(dys) ** 2)
+            total_traveled = sum(np.sqrt(dx ** 2 + dy ** 2) for dx, dy in self._displacement_memory)
+            if total_traveled > 1e-6:
+                efficiency = net_disp / total_traveled
+                if efficiency < self.config.directional_stagnation_threshold:
+                    reward += self.config.directional_stagnation_penalty
+                    info['directional_stagnation_penalty'] = self.config.directional_stagnation_penalty
+                else:
+                    info['directional_stagnation_penalty'] = 0.0
+            else:
+                info['directional_stagnation_penalty'] = 0.0
+        else:
+            info['directional_stagnation_penalty'] = 0.0
 
         # Aggiorna valori precedenti
         self.prev_concentration = current_conc
