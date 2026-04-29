@@ -244,13 +244,6 @@ def make_env_config(config: dict, chunk_id: int = 0) -> SourceSeekingConfig:
         spawn_start_frame=spawn_cfg.get('start_frame', 1440),
         spawn_conc_threshold=spawn_cfg.get('conc_threshold', 0.5),
         chunk_id=chunk_id,
-        plume_reward_positive=reward_cfg.get('plume_reward_positive', 0.5),
-        plume_reward_negative=reward_cfg.get('plume_reward_negative', -0.5),
-        plume_stay_reward=reward_cfg.get('plume_stay_reward', 0.5),
-        plume_reentry_reward=reward_cfg.get('plume_reentry_reward', 0.25),
-        plume_exit_penalty=reward_cfg.get('plume_exit_penalty', -1.5),
-        outside_plume_distance_reward_scale=reward_cfg.get('outside_plume_distance_reward_scale', 0.35),
-        plume_threshold=reward_cfg.get('plume_threshold', 0.1),
         concentration_gradient_reward_positive=reward_cfg.get('concentration_gradient_reward_positive', 0.05),
         concentration_gradient_reward_negative=reward_cfg.get('concentration_gradient_reward_negative', -0.05),
         wind_alignment_reward=reward_cfg.get('wind_alignment_reward', 0.05),
@@ -779,7 +772,7 @@ def main():
 
     DATA_DIR    = str(PROJECT_ROOT / "data")
     CONFIG_PATH = str(PROJECT_ROOT / "utils" / "config.yaml")
-    OUTPUT_DIR  = str(PROJECT_ROOT / "evaluations_v7")
+    OUTPUT_DIR  = str(PROJECT_ROOT / "evaluations_v8")
 
     # Seleziona l'ultimo modello addestrato (directory più recente per nome)
     trained_dir = PROJECT_ROOT / "trained_models"
@@ -808,7 +801,7 @@ def main():
         config_path=CONFIG_PATH,
         data_dir=DATA_DIR,
         output_dir=OUTPUT_DIR,
-        n_episodes=1,
+        n_episodes=5,
         deterministic=True,
         sources_csv="Coordinate_Sorgenti_FaseII.csv",
         chunk_ids=[0, 1, 2],
