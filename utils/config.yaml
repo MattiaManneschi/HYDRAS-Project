@@ -42,26 +42,22 @@ environment:
     source_reached_bonus: 100.0
     step_penalty: -0.1
     boundary_penalty: -10.0
-    land_proximity_threshold: 10.0  # m - distanza dalla terra per penalità progressiva
-    land_proximity_penalty_max: -5.0  # penalità massima per vicinanza terra (aumentata)
+    land_proximity_threshold: 30.0  # m - distanza dalla terra per penalità progressiva (estesa)
+    land_proximity_penalty_max: -15.0  # penalità massima per vicinanza terra (aumentata 3×)
     distance_threshold: 50  # m - distanza dalla sorgente per "trovato"
-    distance_reward_multiplier: 1.0  # moltiplicatore per reward distanza
-    plume_reward_positive: 0.5  # reward binario dentro il plume (PRIORITARIO)
-    plume_reward_negative: -0.2  # penalità fuori dal plume
-    plume_stay_reward: 0.0  # bonus se resta nel plume da uno step al successivo
-    plume_reentry_reward: 0.4  # bonus se rientra nel plume
-    plume_exit_penalty: -0.5  # penalità se esce dal plume
-    outside_plume_distance_reward_scale: 1.0  # distance reward pieno fuori plume
-    plume_threshold: 0.1  # soglia concentrazione per "dentro il plume"
+    distance_reward_multiplier: 100.0  # scala per potenziale quadratico (Φ(d)=(max_d-d)²)
+    retreat_penalty_multiplier: 3.0  # allontanarsi costa 3× di più che avvicinarsi (stessa zona)
     concentration_gradient_reward_positive: 0.05
     concentration_gradient_reward_negative: -0.05
     wind_alignment_reward: 0.05  # reward if moving upwind (against wind)
     wind_alignment_penalty: -0.05  # penalty if moving downwind (with wind)
     current_alignment_reward: 0.05  # reward if moving against current (upstream)
     current_alignment_penalty: -0.05  # penalty if moving with current (downstream)
-    stagnation_window: 20  # steps senza miglioramento distanza -> penalità
+    stagnation_window: 15  # steps senza miglioramento distanza -> penalità
     stagnation_distance_threshold: 20.0  # m - miglioramento minimo per evitare penalità
-    stagnation_penalty: -1.5  # penalità se distanza stagna (aumentata per forzare uscita trail secondaria)
+    stagnation_penalty: -1.5  # penalità se distanza stagna
+    directional_stagnation_threshold: 0.15  # efficienza < soglia → oscillazione direzionale
+    directional_stagnation_penalty: -0.5    # penalità per oscillazione direzionale (dimezzata per ridurre shock)
 
   # Spawn constraints
   spawn:
@@ -79,7 +75,7 @@ training:
   algorithm: "PPO"
 
   # Hyperparameters
-  learning_rate: 0.00002  # Fine-tuning: LR ridotto per stabilizzare su 106 sorgenti
+  learning_rate: 0.00001  # Fine-tuning: LR ulteriormente ridotto per reward scale più alta (1/d uncapped)
   n_steps: 4096  # Aumentato per avere ~4 episodi completi per batch
   batch_size: 128
   n_epochs: 5
@@ -100,21 +96,29 @@ training:
     activation_fn: "tanh"
 
   # Training loop
-  total_timesteps: 1500000  # Fine-tuning: 1.5M timesteps aggiuntivi
+  total_timesteps: 2000000  # Fine-tuning: 2M timesteps per adattamento più graduale
   eval_freq: 50000
   n_eval_episodes: 5
   chunk_ids: [0, 1, 2]  # Chunk usati in training: 0=Q1/4, 1=Q1/2, 2=Q3/4
-  resume_from: "trained_models/ppo_20260423_182359/models/final_model.zip"
+
+  # Fine-tuning targetizzato: 80% degli env su V2 (plume complessi), 20% mixed anti-forgetting
+  targeted_versions: ["V2"]       # versioni target (problematiche con bypass)
+  targeted_chunk_ids: [1, 2]      # Q1/2 e Q3/4 per V2 (plume maturo e tardivo)
+  n_targeted_per_chunk: 2         # env V2 per chunk → 2×2=4 targeted + 1 mixed = 80/20
+  resume_from: "trained_models/ppo_20260429_105639/models/final_model.zip"  # modello 93.6% - bypass del secondo finetuning (regressione)
   eval_scenarios:
     - source: "SRC050"
       version: "V2"
-      chunk_id: 2    # Q3/4 - plume sparso (caso difficile)
+      chunk_id: 2    # Q3/4 - V2 caso difficile
+    - source: "SRC107"
+      version: "V2"
+      chunk_id: 2    # Q3/4 - V2 caso osservato con oscillazione costiera
     - source: "SRC050"
       version: "V1"
-      chunk_id: 1    # Q1/2 - doppia scia + chunk nuovo
+      chunk_id: 1    # Q1/2 - baseline V1
     - source: "SRC001"
       version: "V0"
-      chunk_id: 0    # Q1/4 - baseline
+      chunk_id: 0    # Q1/4 - baseline V0
   save_freq: 50000
   progress_bar: true  # Mostra barra di avanzamento training
 

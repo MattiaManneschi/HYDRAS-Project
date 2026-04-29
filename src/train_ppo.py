@@ -280,13 +280,6 @@ class MultiScenarioEvalCallback(BaseCallback):
             spawn_start_frame=spawn_cfg.get('start_frame', 1440),
             spawn_conc_threshold=spawn_cfg.get('conc_threshold', 0.5),
             chunk_id=chunk_id,
-            plume_reward_positive=reward_cfg.get('plume_reward_positive', 0.5),
-            plume_reward_negative=reward_cfg.get('plume_reward_negative', -0.5),
-            plume_stay_reward=reward_cfg.get('plume_stay_reward', 0.5),
-            plume_reentry_reward=reward_cfg.get('plume_reentry_reward', 0.25),
-            plume_exit_penalty=reward_cfg.get('plume_exit_penalty', -1.5),
-            outside_plume_distance_reward_scale=reward_cfg.get('outside_plume_distance_reward_scale', 0.35),
-            plume_threshold=reward_cfg.get('plume_threshold', 0.1),
             concentration_gradient_reward_positive=reward_cfg.get('concentration_gradient_reward_positive', 0.05),
             concentration_gradient_reward_negative=reward_cfg.get('concentration_gradient_reward_negative', -0.05),
             wind_alignment_reward=reward_cfg.get('wind_alignment_reward', 0.05),
@@ -296,6 +289,9 @@ class MultiScenarioEvalCallback(BaseCallback):
             stagnation_window=reward_cfg.get('stagnation_window', 50),
             stagnation_distance_threshold=reward_cfg.get('stagnation_distance_threshold', 20.0),
             stagnation_penalty=reward_cfg.get('stagnation_penalty', -0.5),
+            retreat_penalty_multiplier=reward_cfg.get('retreat_penalty_multiplier', 3.0),
+            directional_stagnation_threshold=reward_cfg.get('directional_stagnation_threshold', 0.15),
+            directional_stagnation_penalty=reward_cfg.get('directional_stagnation_penalty', -0.5),
         )
 
         raw_env = SourceSeekingEnv(
@@ -429,14 +425,6 @@ def create_env(
         spawn_start_frame=env_config.get('spawn', {}).get('start_frame', 1440),
         spawn_conc_threshold=env_config.get('spawn', {}).get('conc_threshold', 0.5),
         chunk_id=chunk_id,
-        # Plume reward
-        plume_reward_positive=env_config.get('reward', {}).get('plume_reward_positive', 0.5),
-        plume_reward_negative=env_config.get('reward', {}).get('plume_reward_negative', -0.5),
-        plume_stay_reward=env_config.get('reward', {}).get('plume_stay_reward', 0.5),
-        plume_reentry_reward=env_config.get('reward', {}).get('plume_reentry_reward', 0.25),
-        plume_exit_penalty=env_config.get('reward', {}).get('plume_exit_penalty', -1.5),
-        outside_plume_distance_reward_scale=env_config.get('reward', {}).get('outside_plume_distance_reward_scale', 0.35),
-        plume_threshold=env_config.get('reward', {}).get('plume_threshold', 0.1),
         # Concentration gradient reward
         concentration_gradient_reward_positive=env_config.get('reward', {}).get('concentration_gradient_reward_positive', 0.05),
         concentration_gradient_reward_negative=env_config.get('reward', {}).get('concentration_gradient_reward_negative', -0.05),
@@ -450,6 +438,11 @@ def create_env(
         stagnation_window=env_config.get('reward', {}).get('stagnation_window', 50),
         stagnation_distance_threshold=env_config.get('reward', {}).get('stagnation_distance_threshold', 20.0),
         stagnation_penalty=env_config.get('reward', {}).get('stagnation_penalty', -0.5),
+        # Retreat penalty multiplier
+        retreat_penalty_multiplier=env_config.get('reward', {}).get('retreat_penalty_multiplier', 3.0),
+        # Directional stagnation
+        directional_stagnation_threshold=env_config.get('reward', {}).get('directional_stagnation_threshold', 0.15),
+        directional_stagnation_penalty=env_config.get('reward', {}).get('directional_stagnation_penalty', -0.5),
     )
 
     print(f"  Success radius: {env_kwargs.source_distance_threshold}m")
@@ -684,18 +677,72 @@ def train(
 
     timesteps = total_timesteps or training_config.get('total_timesteps', 6000000)
 
-    # Crea environments per ogni worker su tutti i chunk configurati.
-    env_fns = [
-        make_env_fn(
-            config, concentration_field, wind_data, current_data, i, chunk_id, 
-            seed, data_dir, randomize_field,
-            data_manager=data_manager,
-            wind_mapping=wind_mapping,
-            current_mapping=current_mapping,
-            allowed_sources=discovered_sources  # Passa le sorgenti disponibili
-        )
-        for i in range(n_envs) for chunk_id in chunk_ids
-    ]
+    # Crea environments.
+    # Se targeted_versions è definito: 80% env su versioni target (V2, chunk 1+2),
+    # 20% env mixed (tutte versioni, chunk 0) per anti-forgetting.
+    targeted_versions   = training_config.get('targeted_versions', [])
+    targeted_chunk_ids  = training_config.get('targeted_chunk_ids', chunk_ids)
+    n_targeted_per_chunk = int(training_config.get('n_targeted_per_chunk', n_envs))
+
+    if targeted_versions:
+        import copy as _copy
+        # DataManager con solo file delle versioni target
+        dm_targeted = _copy.copy(data_manager)
+        dm_targeted._nc_files = [
+            f for f in data_manager._nc_files
+            if any(f'_{v}_' in f.name for v in targeted_versions)
+        ]
+        n_targeted_files = len(dm_targeted._nc_files)
+        print(f"\nTargeted fine-tuning: versioni {targeted_versions}")
+        print(f"  File target: {n_targeted_files} / {len(data_manager._nc_files)} totali")
+        print(f"  Chunk target: {targeted_chunk_ids}")
+
+        # Env targetizzati (80%): n_targeted_per_chunk per ogni chunk V2
+        env_fns_targeted = [
+            make_env_fn(
+                config, concentration_field, wind_data, current_data,
+                rank, chunk_id, seed, data_dir, randomize_field,
+                data_manager=dm_targeted,
+                wind_mapping=wind_mapping,
+                current_mapping=current_mapping,
+                allowed_sources=discovered_sources,
+            )
+            for chunk_id in targeted_chunk_ids
+            for rank in range(n_targeted_per_chunk)
+        ]
+
+        # Env misto (20%): 1 env per chunk 0 con tutte le versioni
+        env_fns_mixed = [
+            make_env_fn(
+                config, concentration_field, wind_data, current_data,
+                rank, 0, seed + 500, data_dir, randomize_field,
+                data_manager=data_manager,
+                wind_mapping=wind_mapping,
+                current_mapping=current_mapping,
+                allowed_sources=discovered_sources,
+            )
+            for rank in range(n_envs)
+        ]
+
+        env_fns = env_fns_targeted + env_fns_mixed
+        n_targeted = len(env_fns_targeted)
+        n_mixed    = len(env_fns_mixed)
+        print(f"  Env targeted: {n_targeted} | Env mixed: {n_mixed} "
+              f"| Ratio: {n_targeted/(n_targeted+n_mixed):.0%}/{n_mixed/(n_targeted+n_mixed):.0%}")
+    else:
+        # Training standard: tutti i chunk, tutte le versioni
+        env_fns = [
+            make_env_fn(
+                config, concentration_field, wind_data, current_data, i, chunk_id,
+                seed, data_dir, randomize_field,
+                data_manager=data_manager,
+                wind_mapping=wind_mapping,
+                current_mapping=current_mapping,
+                allowed_sources=discovered_sources,
+            )
+            for i in range(n_envs) for chunk_id in chunk_ids
+        ]
+
     n_parallel_envs = len(env_fns)
 
     # DummyVecEnv sempre (necessario per accesso diretto agli env)
@@ -907,15 +954,21 @@ def train(
     return model, run_dir
 
 
+def find_latest_model(output_dir: str) -> Optional[str]:
+    """Trova automaticamente il final_model.zip più recente in output_dir."""
+    candidates = sorted(Path(output_dir).glob("ppo_*/models/final_model.zip"))
+    return str(candidates[-1]) if candidates else None
+
+
 def main():
-    """Avvia il training con configurazione di default o fine-tuning da modello esistente."""
+    """Avvia il training con fine-tuning automatico dall'ultimo modello disponibile."""
     import os
     os.chdir(PROJECT_ROOT)  # Assicura CWD = root del progetto
 
     config_path = str(PROJECT_ROOT / "utils" / "config.yaml")
     config = load_config(config_path)
     output_dir = str(PROJECT_ROOT / "trained_models")
-    data_dir = str(PROJECT_ROOT / "data")  # Carica da tutte le versioni (V0, V2, V3 tramite filtro)
+    data_dir = str(PROJECT_ROOT / "data")
 
     if not Path(data_dir).exists():
         raise FileNotFoundError(
@@ -923,7 +976,7 @@ def main():
             f"Scarica i file .nc di simulazione MIKE21 nella cartella 'data/'"
         )
 
-    # Optional resume path da config per fine-tuning
+    # Priorità: 1) resume_from esplicito nel config  2) auto-detect ultimo modello  3) from scratch
     resume_from = config.get('training', {}).get('resume_from')
     if resume_from:
         resume_path = Path(resume_from)
@@ -932,10 +985,13 @@ def main():
         if not resume_path.exists():
             raise FileNotFoundError(f"Modello per resume non trovato: {resume_path}")
         resume_from = str(resume_path)
-        print(f"Fine-tuning from checkpoint: {resume_from}\n")
+        print(f"Fine-tuning from checkpoint (config): {resume_from}\n")
     else:
-        resume_from = None
-        print(f"Training from scratch on all 80% training set (V0+V1+V2+V3)\n")
+        resume_from = find_latest_model(output_dir)
+        if resume_from:
+            print(f"Fine-tuning from latest model (auto-detected): {resume_from}\n")
+        else:
+            print(f"No existing model found — training from scratch\n")
     
     train(
         config_path=config_path,
