@@ -1,8 +1,9 @@
 """
 Generazione video showcase per inferenza HYDRAS.
 
-Seleziona automaticamente 4 successi (uno per versione vento V0-V3,
-step più vicini alla mediana) + 1 fallimento (distanza finale minima),
+Seleziona automaticamente 8 successi (2 per versione vento V0-V3:
+step più vicino alla mediana + step più vicino al 25° percentile)
++ 2 fallimenti (distanza finale minima e massima tra i peggiori),
 poi genera video MP4 animati ricaricando i field dal disco.
 """
 
@@ -17,8 +18,9 @@ from matplotlib.colors import ListedColormap
 
 def select_showcase_episodes(all_results: list) -> list:
     """
-    Seleziona 4 successi (uno per V0/V1/V2/V3, step più vicino alla mediana)
-    e 1 fallimento (distanza finale dalla sorgente minima).
+    Seleziona 8 successi (2 per V0/V1/V2/V3: step più vicino alla mediana
+    e step più vicino al 25° percentile) e 2 fallimenti (distanza finale
+    minima e massima tra i fallimenti con dist > mediana fallimenti).
 
     Il formato di result.scenario è "V1_SRC109_Q1/4".
     """
@@ -37,13 +39,27 @@ def select_showcase_episodes(all_results: list) -> list:
         eps = successes_by_version.get(version, [])
         if not eps:
             continue
-        median_steps = float(np.median([e.steps for e in eps]))
-        best = min(eps, key=lambda e: abs(e.steps - median_steps))
-        selected.append(best)
+        steps_list = [e.steps for e in eps]
+        median_steps = float(np.median(steps_list))
+        p25_steps = float(np.percentile(steps_list, 25))
 
+        # Episodio più vicino alla mediana (tipico)
+        ep_median = min(eps, key=lambda e: abs(e.steps - median_steps))
+        selected.append(ep_median)
+
+        # Episodio più vicino al 25° percentile (veloce), diverso dal primo
+        remaining = [e for e in eps if e is not ep_median]
+        if remaining:
+            ep_fast = min(remaining, key=lambda e: abs(e.steps - p25_steps))
+            selected.append(ep_fast)
+
+    # 2 fallimenti: quello con distanza finale minima (quasi-successo)
+    # e quello con distanza finale massima (fallimento totale)
     if failures:
-        best_fail = min(failures, key=lambda e: e.final_distance)
-        selected.append(best_fail)
+        fail_sorted = sorted(failures, key=lambda e: e.final_distance)
+        selected.append(fail_sorted[0])   # più vicino alla sorgente
+        if len(fail_sorted) > 1:
+            selected.append(fail_sorted[-1])  # più lontano dalla sorgente
 
     return selected
 
@@ -136,7 +152,8 @@ def generate_showcase_videos(
     fps: int = 15,
 ):
     """
-    Seleziona i 5 episodi showcase tra tutti i risultati dell'inferenza
+    Seleziona i 10 episodi showcase tra tutti i risultati dell'inferenza
+    (8 successi: 2 per versione V0-V3; 2 fallimenti: distanza minima e massima)
     e genera i video MP4 corrispondenti ricaricando i field dal disco.
 
     Args:
@@ -154,7 +171,7 @@ def generate_showcase_videos(
     videos_dir.mkdir(exist_ok=True)
 
     print(f"\n{'='*60}")
-    print(f"Generazione video showcase — {len(selected)} episodi selezionati")
+    print(f"Generazione video showcase — {len(selected)} episodi selezionati (target: 10)")
     print(f"{'='*60}")
     for r in selected:
         label = "SUCCESSO" if r.success else "FALLIMENTO"
