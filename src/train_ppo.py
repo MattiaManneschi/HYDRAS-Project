@@ -292,6 +292,7 @@ class MultiScenarioEvalCallback(BaseCallback):
             retreat_penalty_multiplier=reward_cfg.get('retreat_penalty_multiplier', 3.0),
             directional_stagnation_threshold=reward_cfg.get('directional_stagnation_threshold', 0.15),
             directional_stagnation_penalty=reward_cfg.get('directional_stagnation_penalty', -0.5),
+            last_plume_contact_threshold=reward_cfg.get('last_plume_contact_threshold', 0.5),
         )
 
         raw_env = SourceSeekingEnv(
@@ -443,6 +444,7 @@ def create_env(
         # Directional stagnation
         directional_stagnation_threshold=env_config.get('reward', {}).get('directional_stagnation_threshold', 0.15),
         directional_stagnation_penalty=env_config.get('reward', {}).get('directional_stagnation_penalty', -0.5),
+        last_plume_contact_threshold=env_config.get('reward', {}).get('last_plume_contact_threshold', 0.5),
     )
 
     print(f"  Success radius: {env_kwargs.source_distance_threshold}m")

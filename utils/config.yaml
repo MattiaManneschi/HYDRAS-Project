@@ -47,6 +47,7 @@ environment:
     distance_threshold: 50  # m - distanza dalla sorgente per "trovato"
     distance_reward_multiplier: 100.0  # scala per potenziale quadratico (Φ(d)=(max_d-d)²)
     retreat_penalty_multiplier: 3.0  # allontanarsi costa 3× di più che avvicinarsi (stessa zona)
+    last_plume_contact_threshold: 0.5  # soglia conc per aggiornare ultima pos plume nell'obs
     concentration_gradient_reward_positive: 0.05
     concentration_gradient_reward_negative: -0.05
     wind_alignment_reward: 0.05  # reward if moving upwind (against wind)
@@ -96,7 +97,7 @@ training:
     activation_fn: "tanh"
 
   # Training loop
-  total_timesteps: 2000000  # Fine-tuning: 2M timesteps per adattamento più graduale
+  total_timesteps: 5000000  # Training da zero: obs space cambiato (112→114), serve full training
   eval_freq: 50000
   n_eval_episodes: 5
   chunk_ids: [0, 1, 2]  # Chunk usati in training: 0=Q1/4, 1=Q1/2, 2=Q3/4
@@ -105,7 +106,7 @@ training:
   targeted_versions: ["V2"]       # versioni target (problematiche con bypass)
   targeted_chunk_ids: [1, 2]      # Q1/2 e Q3/4 per V2 (plume maturo e tardivo)
   n_targeted_per_chunk: 2         # env V2 per chunk → 2×2=4 targeted + 1 mixed = 80/20
-  resume_from: "trained_models/ppo_20260429_105639/models/final_model.zip"  # modello 93.6% - bypass del secondo finetuning (regressione)
+  resume_from: null  # obs space cambiato (112→114): training da zero, checkpoint precedenti incompatibili
   eval_scenarios:
     - source: "SRC050"
       version: "V2"

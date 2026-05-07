@@ -265,6 +265,7 @@ def make_env_config(config: dict, chunk_id: int = 0) -> SourceSeekingConfig:
         stagnation_window=reward_cfg.get('stagnation_window', 50),
         stagnation_distance_threshold=reward_cfg.get('stagnation_distance_threshold', 20.0),
         stagnation_penalty=reward_cfg.get('stagnation_penalty', -0.5),
+        last_plume_contact_threshold=reward_cfg.get('last_plume_contact_threshold', 0.5),
     )
 
 

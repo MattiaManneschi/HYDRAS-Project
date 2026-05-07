@@ -84,6 +84,10 @@ class SourceSeekingConfig:
     # (nella stessa zona di distanza). Scoraggia il bypass della sorgente.
     retreat_penalty_multiplier: float = 3.0
 
+    # Soglia di concentrazione per aggiornare l'ultima posizione di contatto col plume.
+    # Usata nell'obs space per guidare il recupero in mare aperto.
+    last_plume_contact_threshold: float = 0.5
+
     # Land avoidance
     land_proximity_threshold: float = 30.0  # m - distanza dalla terra per penalità progressiva
     land_proximity_penalty_max: float = -15.0  # penalità massima per vicinanza terra
@@ -226,6 +230,10 @@ class SourceSeekingEnv(gym.Env):
         # Buffer distanze per stagnation penalty
         self._distance_history: List[float] = []
 
+        # Ultima posizione in cui è stata rilevata concentrazione >= last_plume_contact_threshold.
+        # Inizializzato a spawn; aggiornato ad ogni step in cui si è dentro il plume.
+        self._last_plume_position: np.ndarray = np.zeros(2)
+
         # Allowed sources per curriculum learning (sarà impostato dal CurriculumCallback)
         # Default vuoto: richiede che sia impostato dal training script
         self.allowed_sources: List[str] = []
@@ -256,8 +264,8 @@ class SourceSeekingEnv(gym.Env):
 
     def _setup_observation_space(self):
         """Configura lo spazio delle osservazioni.
-        
-        Osservazione (112 valori):
+
+        Osservazione (114 valori):
         - 1 concentrazione corrente
         - 9 concentrazioni passate (memory_length)
         - 9 * 2 spostamenti passati (Δx, Δy) normalizzati
@@ -265,9 +273,10 @@ class SourceSeekingEnv(gym.Env):
         - 9 * 8 = 72 sensori concentrazione passati @ 20m (9 timestep x 8 direzioni)
         - 2 componenti vento corrente (u, v)
         - 2 componenti corrente corrente (u, v)
+        - 2 displacement verso ultima posizione plume (Δx, Δy) rispetto a pos corrente
         """
-        obs_dim = 1 + self.config.memory_length + self.config.memory_length * 2 + 8 + (self.config.memory_length * 8) + 2 + 2
-        # = 1 + 9 + 18 + 8 + 72 + 2 + 2 = 112
+        obs_dim = 1 + self.config.memory_length + self.config.memory_length * 2 + 8 + (self.config.memory_length * 8) + 2 + 2 + 2
+        # = 1 + 9 + 18 + 8 + 72 + 2 + 2 + 2 = 114
 
         self.observation_space = spaces.Box(
             low=-np.inf,
@@ -467,6 +476,12 @@ class SourceSeekingEnv(gym.Env):
         else:
             obs.append(0.0)
             obs.append(0.0)
+
+        # Displacement verso ultima posizione di contatto col plume (Δx, Δy).
+        # In plume: ≈ (0, 0). In mare aperto: vettore non nullo che punta al
+        # punto dove l'agente ha perso il segnale chimico.
+        obs.append(self._last_plume_position[0] - x)
+        obs.append(self._last_plume_position[1] - y)
 
         return np.array(obs, dtype=np.float32)
 
@@ -986,6 +1001,9 @@ class SourceSeekingEnv(gym.Env):
         # Reset buffer distanze per stagnation penalty
         self._distance_history = []
 
+        # Reset ultima posizione di contatto plume: lo spawn è sempre dentro il plume
+        self._last_plume_position = np.array([spawn_pos[0], spawn_pos[1]], dtype=np.float64)
+
         # Sincronizza vento e corrente al timestep di start usando TEMPO REALE (minuti)
         # dt_conc = 2 min/frame, dt_wind = 60 min/frame, dt_current = 2 min/frame
         # set_time_from_minutes() converte automaticamente: time_idx = time_minutes / dt
@@ -1089,6 +1107,10 @@ class SourceSeekingEnv(gym.Env):
         # Aggiorna memoria concentrazioni (FIFO: rimuovi più vecchio, aggiungi attuale)
         self._concentration_memory.pop(0)
         self._concentration_memory.append(conc_now)
+
+        # Aggiorna ultima posizione di contatto col plume
+        if conc_now >= self.config.last_plume_contact_threshold:
+            self._last_plume_position = self.state.position.copy()
 
         # Aggiorna memoria concentrazioni direzionali (FIFO: 9 timestep x 8 direzioni)
         directional_conc = self._compute_directional_sensors()
