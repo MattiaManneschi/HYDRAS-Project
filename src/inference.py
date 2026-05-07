@@ -51,10 +51,19 @@ def plot_trajectory(trajectory: np.ndarray, field, ax=None, title: str = "",
     
     # Usa il frame corrente del field (impostato dall'env)
     conc = field.get_current_field()  # [y, x]
-    extent = [field.x_coords.min(), field.x_coords.max(), field.y_coords.min(), field.y_coords.max()]
+    # Le coordinate NetCDF sono centri cella; imshow interpreta extent come bordi.
+    # Correzione di mezzo passo (half-pixel) per allineare correttamente i pixel
+    # ai centri cella: la cornice del plot coincide col dominio MIKE21 e il
+    # dato all'ultima riga/colonna non viene tagliato.
+    dx = float(field.x_coords[1] - field.x_coords[0]) if len(field.x_coords) > 1 else 10.0
+    dy = float(field.y_coords[1] - field.y_coords[0]) if len(field.y_coords) > 1 else 10.0
+    extent = [
+        float(field.x_coords[0])  - dx / 2, float(field.x_coords[-1]) + dx / 2,
+        float(field.y_coords[0])  - dy / 2, float(field.y_coords[-1]) + dy / 2,
+    ]
     
     # 1) Sfondo: azzurro uniforme su tutto il plot
-    ax.set_facecolor('#87CEEB')  # Azzurro cielo
+    ax.set_facecolor('#87CEEB')
     
     # 2) Terra bianca
     if field.land_mask is not None:
@@ -97,13 +106,9 @@ def plot_trajectory(trajectory: np.ndarray, field, ax=None, title: str = "",
     ax.set_title(title)
     ax.legend(loc='upper right')
     ax.set_aspect('equal')
-
-    # imshow imposta i limiti degli assi esattamente all'extent (margins=0).
-    # Il padding esplicito evita che dati sul bordo del dominio MIKE21
-    # appaiano tagliati dal canvas.
-    pad = 100  # m
-    ax.set_xlim(extent[0] - pad, extent[1] + pad)
-    ax.set_ylim(extent[2] - pad, extent[3] + pad)
+    # Ripristina i limiti al dominio esatto (i centri cella, non i bordi pixel)
+    ax.set_xlim(float(field.x_coords[0]), float(field.x_coords[-1]))
+    ax.set_ylim(float(field.y_coords[0]), float(field.y_coords[-1]))
 
     return ax
 
