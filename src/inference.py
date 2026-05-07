@@ -97,7 +97,14 @@ def plot_trajectory(trajectory: np.ndarray, field, ax=None, title: str = "",
     ax.set_title(title)
     ax.legend(loc='upper right')
     ax.set_aspect('equal')
-    
+
+    # imshow imposta i limiti degli assi esattamente all'extent (margins=0).
+    # Il padding esplicito evita che dati sul bordo del dominio MIKE21
+    # appaiano tagliati dal canvas.
+    pad = 100  # m
+    ax.set_xlim(extent[0] - pad, extent[1] + pad)
+    ax.set_ylim(extent[2] - pad, extent[3] + pad)
+
     return ax
 
 
