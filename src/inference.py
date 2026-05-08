@@ -228,45 +228,7 @@ def load_model(model_path: str):
 
 
 def make_env_config(config: dict, chunk_id: int = 0) -> SourceSeekingConfig:
-    env_cfg = config.get('environment', {})
-    agent_cfg = config.get('agent', {})
-    domain_cfg = config.get('domain', {})
-    reward_cfg = env_cfg.get('reward', {})
-    spawn_cfg = env_cfg.get('spawn', {})
-
-    return SourceSeekingConfig(
-        xmin=domain_cfg.get('xmin', 619000),
-        xmax=domain_cfg.get('xmax', 622000),
-        ymin=domain_cfg.get('ymin', 4794500),
-        ymax=domain_cfg.get('ymax', 4797000),
-        resolution=domain_cfg.get('grid_resolution', 10),
-        max_velocity=agent_cfg.get('max_velocity', 1.0),
-        memory_length=agent_cfg.get('memory_length', 9),
-        dt=env_cfg.get('dt', 10),
-        max_steps=env_cfg.get('max_episode_steps', 1080),
-        source_distance_threshold=reward_cfg.get('distance_threshold', 50),
-        source_found_reward=reward_cfg.get('source_reached_bonus', 100),
-        step_penalty=reward_cfg.get('step_penalty', -0.1),
-        boundary_penalty=reward_cfg.get('boundary_penalty', -10),
-        distance_reward_multiplier=reward_cfg.get('distance_reward_multiplier', 1.0),
-        land_proximity_threshold=reward_cfg.get('land_proximity_threshold', 10.0),
-        land_proximity_penalty_max=reward_cfg.get('land_proximity_penalty_max', -5.0),
-        n_discrete_actions=agent_cfg.get('n_discrete_actions', 8),
-        spawn_min_land_distance=spawn_cfg.get('min_land_distance', 50.0),
-        spawn_start_frame=spawn_cfg.get('start_frame', 1440),
-        spawn_conc_threshold=spawn_cfg.get('conc_threshold', 0.5),
-        chunk_id=chunk_id,
-        concentration_gradient_reward_positive=reward_cfg.get('concentration_gradient_reward_positive', 0.05),
-        concentration_gradient_reward_negative=reward_cfg.get('concentration_gradient_reward_negative', -0.05),
-        wind_alignment_reward=reward_cfg.get('wind_alignment_reward', 0.05),
-        wind_alignment_penalty=reward_cfg.get('wind_alignment_penalty', -0.05),
-        current_alignment_reward=reward_cfg.get('current_alignment_reward', 0.05),
-        current_alignment_penalty=reward_cfg.get('current_alignment_penalty', -0.05),
-        stagnation_window=reward_cfg.get('stagnation_window', 50),
-        stagnation_distance_threshold=reward_cfg.get('stagnation_distance_threshold', 20.0),
-        stagnation_penalty=reward_cfg.get('stagnation_penalty', -0.5),
-        last_plume_contact_threshold=reward_cfg.get('last_plume_contact_threshold', 0.5),
-    )
+    return SourceSeekingConfig.from_config(config, chunk_id=chunk_id)
 
 
 def mask_fn(env) -> np.ndarray:
@@ -470,6 +432,7 @@ def save_trajectory_plot(result: EpisodeResult, field, output_path: Path, thresh
 
 # ─── Main ────────────────────────────────────────────────────────────────────
 
+
 def run_inference(
     model_path: str,
     config_path: str,
@@ -480,6 +443,7 @@ def run_inference(
     sources_csv: str = "Coordinate_Sorgenti_FaseII.csv",
     chunk_ids: List[int] = None,
     save_videos: bool = True,
+    config_override: Optional[dict] = None,
 ):
     """
     Esegue l'inferenza completa su 26 sorgenti held-out (SRC107-SRC132, 20% del totale 132) con chunk multipli per fonte.
@@ -500,13 +464,10 @@ def run_inference(
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    # Carica config e modello
-    config = load_config(config_path)
+    config = config_override if config_override is not None else load_config(config_path)
     model = load_model(model_path)
-    env_cfg = make_env_config(config)
-    success_threshold = config.get('environment', {}).get('reward', {}).get('distance_threshold', 50)
-
     vec_norm_path = Path(model_path).parent / "vec_normalize.pkl"
+    success_threshold = config.get('environment', {}).get('reward', {}).get('distance_threshold', 50)
     
     # Inizializza DataManager con auto-discovery di 132 sorgenti
     data_manager = DataManager(
@@ -556,86 +517,56 @@ def run_inference(
     }
     print(f"Current mapping (versions V0-V3): {len(current_mapping)} file")
     
-    # NON precarichiamo vento/corrente - l'environment li caricherà dinamicamente
-    # durante reset() in base alla versione del file NC
-    wind_data = None
-    current_data = None
-    
-    # Get dt from config
     dt_seconds = config.get('environment', {}).get('dt', 10)
     
     all_stats: List[ScenarioStats] = []
-
-    # Accumulatori episodio-level (più robusti delle medie per scenario)
     episode_success_all: List[float] = []
     episode_success_by_version: Dict[str, List[float]] = {'V0': [], 'V1': [], 'V2': [], 'V3': []}
     episode_success_by_chunk: Dict[str, List[float]] = {'Q1/4': [], 'Q1/2': [], 'Q3/4': []}
     initial_distances_all: List[float] = []
     success_steps_all: List[float] = []
-
-    # Accumulatore globale per selezione video showcase (usato a fine run)
     all_results_global: List[EpisodeResult] = []
-
-    # Dati per-episodio (analisi quantitativa)
     episodes_data: List[dict] = []
 
     for src_idx, source_id in enumerate(inference_sources, 1):
         if src_idx % 5 == 0:
             print(f"\n[Progress: {src_idx}/{len(inference_sources)} sources]\n")
-            
-        source_dir = output_path / source_id
-        source_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Itera su tutte le 4 versioni
+
         for version in ['V0', 'V1', 'V2', 'V3']:
-            # Filtra file per questa sorgente e versione
-            version_files = [f for f in data_manager._nc_files 
-                           if version in f.name and source_id in f.name]
+            version_files = [f for f in data_manager._nc_files
+                             if version in f.name and source_id in f.name]
             if not version_files:
-                continue  # Sorgente non disponibile in questa versione
-            
-            version_file = version_files[0]  # Una sola per versione+sorgente
-            version_dir = source_dir / version
+                continue
+
+            version_dir = output_path / source_id / version
             version_dir.mkdir(parents=True, exist_ok=True)
-            
-            for chunk_id in chunk_ids:  # Itera su chunk_ids specificati
+
+            try:
+                field = data_manager._nc_loader.load(
+                    str(version_files[0]),
+                    concentration_var="Concentration - component 1"
+                )
+                if field is None:
+                    continue
+                coords = data_manager.get_source_coordinates(source_id)
+                if coords:
+                    field.source_position = coords
+                field.run_id = f"{source_id}_{version}"
+            except Exception as e:
+                print(f"  [SKIP] {version}_{source_id}: {e}")
+                continue
+
+            for chunk_id in chunk_ids:
                 chunk_label = chunk_labels[chunk_id]
                 scenario_label = f"{version}_{source_id}_{chunk_label}"
-                
                 episode_results: List[EpisodeResult] = []
-                
-                # CARICA IL FIELD UNA SOLA VOLTA per tutti gli episodi di questo scenario
-                field = None
-                try:
-                    field = data_manager._nc_loader.load(
-                        str(version_file),
-                        concentration_var="Concentration - component 1"
-                    )
-                    if field is None:
-                        print(f"\n  [SKIP] Could not load field for {version}_{source_id}")
-                        continue
-                    
-                    # Imposta source_position dalle coordinate CSV
-                    coords = data_manager.get_source_coordinates(source_id)
-                    if coords:
-                        field.source_position = coords
-                    
-                    # Imposta run_id con versione per caricamento dinamico vento durante reset()
-                    field.run_id = f"{source_id}_{version}"
-                    
-                except Exception as e:
-                    print(f"\n  [SKIP] Error loading field for {version}_{source_id}: {e}")
-                    continue
 
                 for ep in range(n_episodes):
-                    # Crea env config con chunk_id appropriato
                     env_cfg_ep = make_env_config(config, chunk_id=chunk_id)
-
                     vec_env = build_env(env_cfg_ep, field, vec_norm_path,
                                        use_masking=MASKABLE_PPO_AVAILABLE,
                                        data_manager=data_manager,
-                                       wind_data=wind_data,
-                                       current_data=current_data,
+                                       wind_data=None, current_data=None,
                                        wind_mapping=wind_mapping,
                                        current_mapping=current_mapping)
 
@@ -643,61 +574,45 @@ def run_inference(
                     result.scenario = scenario_label
                     result.source_id = source_id
                     result.episode = ep
+                    vec_env.close()
 
-                    success_value = 1.0 if result.success else 0.0
-                    episode_success_all.append(success_value)
-                    if version in episode_success_by_version:
-                        episode_success_by_version[version].append(success_value)
-                    if chunk_label in episode_success_by_chunk:
-                        episode_success_by_chunk[chunk_label].append(success_value)
+                    sv = 1.0 if result.success else 0.0
+                    episode_success_all.append(sv)
+                    episode_success_by_version[version].append(sv)
+                    episode_success_by_chunk[chunk_label].append(sv)
                     initial_distances_all.append(result.initial_distance)
                     if result.success:
                         success_steps_all.append(float(result.steps))
-
                     episode_results.append(result)
                     all_results_global.append(result)
-                    vec_env.close()
 
-                    # Distanza dalla sorgente ad ogni step della traiettoria
                     src_x, src_y = field.source_position
                     dist_history = [
-                        float(np.sqrt((pos[0] - src_x)**2 + (pos[1] - src_y)**2))
+                        float(np.sqrt((pos[0]-src_x)**2 + (pos[1]-src_y)**2))
                         for pos in result.trajectory
                     ]
                     episodes_data.append({
-                        "source_id": source_id,
-                        "version": version,
-                        "chunk": chunk_label,
-                        "chunk_id": chunk_id,
-                        "episode": ep + 1,
-                        "success": result.success,
+                        "source_id": source_id, "version": version,
+                        "chunk": chunk_label, "chunk_id": chunk_id,
+                        "episode": ep + 1, "success": result.success,
                         "termination": result.termination,
                         "initial_distance": result.initial_distance,
                         "final_distance": result.final_distance,
-                        "steps": result.steps,
-                        "distance_history": dist_history,
+                        "steps": result.steps, "distance_history": dist_history,
                     })
 
-                    # Salva plot traiettoria
                     plot_path = version_dir / f"ep{ep+1:02d}_chunk{chunk_id}_trajectory.png"
                     save_trajectory_plot(result, field, plot_path, success_threshold)
-                    
-                    # Log episodio
+
                     init_dist = f"{result.initial_distance:.0f}m"
                     if result.success:
                         time_mins = (result.steps * dt_seconds) / 60
-                        print(f"  {version}_{source_id}_{chunk_label} Ep{ep+1}: spawn_dist={init_dist:>5s} → SUCCESS in {result.steps:3d} steps ({time_mins:5.1f}m)")
+                        print(f"  {scenario_label} Ep{ep+1}: spawn_dist={init_dist:>5s} → SUCCESS in {result.steps:3d} steps ({time_mins:5.1f}m)")
                     else:
-                        print(
-                            f"  {version}_{source_id}_{chunk_label} Ep{ep+1}: "
-                            f"spawn_dist={init_dist:>5s} → {result.termination.upper()} "
-                            f"at {result.steps:4d} steps (final_dist={result.final_distance:6.1f}m)"
-                        )
+                        print(f"  {scenario_label} Ep{ep+1}: spawn_dist={init_dist:>5s} → {result.termination.upper()} at {result.steps:4d} steps (final_dist={result.final_distance:6.1f}m)")
 
                 if episode_results:
-                    # Statistiche scenario
-                    stats = compute_scenario_stats(episode_results, scenario_label, source_id)
-                    all_stats.append(stats)
+                    all_stats.append(compute_scenario_stats(episode_results, scenario_label, source_id))
 
     def safe_mean(values: List[float]) -> Optional[float]:
         return float(np.mean(values)) if values else None
@@ -780,45 +695,112 @@ def run_inference(
     return all_stats
 
 
+def find_model_for_sensor_range(trained_dir: Path, sensor_range: float) -> Optional[Path]:
+    """Trova il modello più recente addestrato con il dato sensor_range."""
+    candidates = []
+    for run_dir in sorted(trained_dir.glob("ppo_*")):
+        cfg_path = run_dir / "config.yaml"
+        if not cfg_path.exists():
+            continue
+        try:
+            cfg = load_config(str(cfg_path))
+            if cfg.get('agent', {}).get('sensor_range') == sensor_range:
+                model_zip = run_dir / "models" / "final_model.zip"
+                if model_zip.exists():
+                    candidates.append(model_zip)
+        except Exception:
+            continue
+    return candidates[-1] if candidates else None
+
+
 def main():
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
     DATA_DIR    = str(PROJECT_ROOT / "data")
     CONFIG_PATH = str(PROJECT_ROOT / "utils" / "config.yaml")
-    OUTPUT_DIR  = str(PROJECT_ROOT / "evaluations_v8")
-
-    # Seleziona l'ultimo modello addestrato (directory più recente per nome)
     trained_dir = PROJECT_ROOT / "trained_models"
-    run_dirs = sorted([d for d in trained_dir.iterdir() if d.is_dir() and d.name.startswith("ppo_")])
 
-    if not run_dirs:
-        print("ERRORE: Nessuna directory di training trovata in trained_models/")
-        sys.exit(1)
+    config = load_config(CONFIG_PATH)
+    sweep = config.get('training', {}).get('sensor_range_sweep', [])
 
-    latest_run = run_dirs[-1]
+    if sweep:
+        BASE_VERSION = 8  # evaluations_v8 → v8+len(sweep)-1
+        print(f"\nInference sweep: sensor_range {sweep} m → evaluations_v{BASE_VERSION}–v{BASE_VERSION+len(sweep)-1}\n")
 
-    model_path = latest_run / "models" / "final_model.zip"
-    if not model_path.exists():
-        model_path = latest_run / "models" / "best" / "best_model.zip"
+        for i, sr in enumerate(sweep):
+            model_path = find_model_for_sensor_range(trained_dir, sr)
+            if model_path is None:
+                print(f"[SKIP] Nessun modello trovato per sensor_range={sr}m in {trained_dir}")
+                continue
 
-    if not model_path.exists():
-        print(f"ERRORE: Nessun modello trovato in {latest_run}/models/")
-        sys.exit(1)
+            output_dir = str(PROJECT_ROOT / "evaluations" / f"evaluations_v{BASE_VERSION + i}")
 
-    MODEL_PATH = str(model_path)
-    print(f"Modello selezionato: {MODEL_PATH}")
-    print(f"Output valutazioni: {OUTPUT_DIR}")
+            cfg_override = load_config(CONFIG_PATH)
+            cfg_override['agent']['sensor_range'] = sr
 
-    run_inference(
-        model_path=MODEL_PATH,
-        config_path=CONFIG_PATH,
-        data_dir=DATA_DIR,
-        output_dir=OUTPUT_DIR,
-        n_episodes=5,
-        deterministic=True,
-        sources_csv="Coordinate_Sorgenti_FaseII.csv",
-        chunk_ids=[0, 1, 2],
-    )
+            print(f"\n{'='*70}")
+            print(f"Inference  sensor_range={sr}m  →  evaluations_v{BASE_VERSION + i}")
+            print(f"Modello: {model_path}")
+            print(f"{'='*70}\n")
+
+            run_inference(
+                model_path=str(model_path),
+                config_path=CONFIG_PATH,
+                config_override=cfg_override,
+                data_dir=DATA_DIR,
+                output_dir=output_dir,
+                n_episodes=5,
+                deterministic=True,
+                sources_csv="Coordinate_Sorgenti_FaseII.csv",
+                chunk_ids=[0, 1, 2],
+            )
+
+        print(f"\nInference sweep completato. Output: evaluations_v{BASE_VERSION}–v{BASE_VERSION+len(sweep)-1}")
+
+    else:
+        # Fallback: usa l'ultimo modello disponibile
+        run_dirs = sorted([d for d in trained_dir.iterdir() if d.is_dir() and d.name.startswith("ppo_")])
+        if not run_dirs:
+            print("ERRORE: Nessuna directory di training trovata in trained_models/")
+            sys.exit(1)
+
+        latest_run = run_dirs[-1]
+        model_path = latest_run / "models" / "final_model.zip"
+        if not model_path.exists():
+            model_path = latest_run / "models" / "best" / "best_model.zip"
+        if not model_path.exists():
+            print(f"ERRORE: Nessun modello trovato in {latest_run}/models/")
+            sys.exit(1)
+
+        # Leggi sensor_range dal config salvato nel run
+        cfg_override = load_config(CONFIG_PATH)
+        run_cfg_path = latest_run / "config.yaml"
+        if run_cfg_path.exists():
+            run_cfg = load_config(str(run_cfg_path))
+            sr = run_cfg.get('agent', {}).get('sensor_range', cfg_override['agent'].get('sensor_range', 20))
+            cfg_override['agent']['sensor_range'] = sr
+            print(f"sensor_range dal modello: {sr}m")
+
+        # Determina output dir: prossima evaluations_vN disponibile
+        evals_dir = PROJECT_ROOT / "evaluations"
+        existing = sorted(evals_dir.glob("evaluations_v*")) if evals_dir.exists() else []
+        next_v = max((int(d.name.replace("evaluations_v", "")) for d in existing if d.name.replace("evaluations_v", "").isdigit()), default=7) + 1
+        output_dir = str(evals_dir / f"evaluations_v{next_v}")
+
+        print(f"Modello selezionato: {model_path}")
+        print(f"Output valutazioni: {output_dir}")
+
+        run_inference(
+            model_path=str(model_path),
+            config_path=CONFIG_PATH,
+            config_override=cfg_override,
+            data_dir=DATA_DIR,
+            output_dir=output_dir,
+            n_episodes=5,
+            deterministic=True,
+            sources_csv="Coordinate_Sorgenti_FaseII.csv",
+            chunk_ids=[0, 1, 2],
+        )
 
 
 if __name__ == "__main__":
