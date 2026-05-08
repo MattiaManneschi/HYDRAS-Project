@@ -4,6 +4,7 @@ Gestisce il caricamento dei dati NetCDF dalle simulazioni MIKE21,
 supporta multi-versione (V0-V3) e fornisce setup per training robusto.
 """
 
+import logging
 import numpy as np
 import warnings
 from pathlib import Path
@@ -11,6 +12,8 @@ from typing import Optional, Tuple, Dict, List, Union
 from dataclasses import dataclass
 from scipy.interpolate import RegularGridInterpolator
 from scipy.ndimage import distance_transform_edt
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -823,7 +826,7 @@ class DataManager:
                     break
         
         self._discovered_sources = sorted(sources)
-        print(f"Discovered {len(self._discovered_sources)} sources: {self._discovered_sources[:5]}... (e altri)")
+        logger.debug(f"Discovered {len(self._discovered_sources)} sources: {self._discovered_sources[:5]}...")
 
     def _load_source_coordinates(self, csv_filename: str):
         """
@@ -848,10 +851,9 @@ class DataManager:
                 csv_path = candidate
                 break
         if csv_path is None:
-            print(f"WARNING: File coordinate sorgenti non trovato")
-            print("Continuo senza coordinate da CSV (userò quelle estratte dai filename)")
+            logger.warning("File coordinate sorgenti non trovato, uso coordinate dai filename")
             return
-        
+
         try:
             with open(csv_path, 'r') as f:
                 for line in f:
@@ -865,18 +867,17 @@ class DataManager:
                         source_num = int(parts[0])
                         x = float(parts[1])
                         y = float(parts[2])
-                        # Mappa con formato SRC###
                         source_id = f"SRC{source_num:03d}"
                         self._source_coordinates[source_id] = (x, y)
                     except (ValueError, IndexError):
                         continue
-            
+
             if self._source_coordinates:
-                print(f"Loaded coordinates for {len(self._source_coordinates)} sources from {csv_filename}")
+                logger.debug(f"Loaded coordinates for {len(self._source_coordinates)} sources from {csv_filename}")
             else:
-                print(f"WARNING: No valid coordinates found in {csv_filename}")
+                logger.warning(f"No valid coordinates found in {csv_filename}")
         except Exception as e:
-            print(f"ERROR loading source coordinates: {e}")
+            logger.error(f"Error loading source coordinates: {e}")
 
 
     def _load_wind_data(self):
@@ -895,17 +896,14 @@ class DataManager:
             wind_path = self.data_dir / self.wind_filename
         
         if not wind_path.exists():
-            print(f"WARNING: File di vento non trovato in:")
-            print(f"  - {self.data_dir / 'Vento_V0-V3' / self.wind_filename}")
-            print(f"  - {self.data_dir.parent / 'Vento_V0-V3' / self.wind_filename}")
-            print(f"  - {self.data_dir / self.wind_filename}")
+            logger.warning(f"Wind file not found: {self.wind_filename}")
             return
-        
+
         try:
             self._wind_data = self.load_wind_data(self.wind_filename)
-            print(f"Wind data loaded: {self.wind_filename} ({len(self._wind_data.speed)} timesteps)")
+            logger.debug(f"Wind data loaded: {self.wind_filename} ({len(self._wind_data.speed)} timesteps)")
         except Exception as e:
-            print(f"ERROR loading wind data: {e}")
+            logger.error(f"Error loading wind data: {e}")
 
     def _load_current_data(self):
         """Carica il file di corrente una sola volta."""
@@ -919,7 +917,6 @@ class DataManager:
                 return
         
         try:
-            # Carica direttamente dal percorso completo trovato
             import netCDF4 as nc
             with nc.Dataset(current_path, 'r') as ds:
                 if 'u_velocity' in ds.variables and 'v_velocity' in ds.variables:
@@ -927,13 +924,13 @@ class DataManager:
                 else:
                     u_var, v_var = 'u', 'v'
             self._current_data = CurrentDataLoader.load_from_nc(current_path, u_var=u_var, v_var=v_var)
-            print(f"Current data loaded: {current_path.name} ({self._current_data.n_timesteps} timesteps)")
+            logger.debug(f"Current data loaded: {current_path.name} ({self._current_data.n_timesteps} timesteps)")
         except Exception as e:
-            print(f"ERROR loading current data: {e}")
+            logger.error(f"Error loading current data: {e}")
 
     def _preload_all_files(self):
         """Precarica tutti i file NC in memoria."""
-        print("Preloading all NC files...")
+        logger.debug("Preloading all NC files...")
         for nc_file in self._nc_files:
             try:
                 field = self._nc_loader.load(
@@ -943,10 +940,10 @@ class DataManager:
                 source_id = self._extract_source_id(nc_file.stem)
                 self._preloaded_fields[nc_file.stem] = field
                 if len(self._preloaded_fields) % 10 == 0:
-                    print(f"  Loaded: {len(self._preloaded_fields)} files (max conc: {field.max_concentration:.2f})")
+                    logger.debug(f"  Loaded: {len(self._preloaded_fields)} files (max conc: {field.max_concentration:.2f})")
             except Exception as e:
-                print(f"  Failed to load {nc_file.name}: {e}")
-        print(f"Preloaded {len(self._preloaded_fields)} files ({len(self._discovered_sources)} sources)")
+                logger.warning(f"Failed to load {nc_file.name}: {e}")
+        logger.debug(f"Preloaded {len(self._preloaded_fields)} files ({len(self._discovered_sources)} sources)")
 
     def _preload_all_versions_cache(self):
         """
@@ -973,17 +970,16 @@ class DataManager:
                 if wind_file not in self._cached_wind_data:
                     wind_data = self.load_wind_data(wind_file)
                     self._cached_wind_data[wind_file] = wind_data
-                    print(f"  Cached wind: {wind_file}")
-                
-                # Carica current
+                    logger.debug(f"Cached wind: {wind_file}")
+
                 if current_file not in self._cached_current_data:
                     current_data = self.load_current_data_internal(current_file)
                     self._cached_current_data[current_file] = current_data
-                    print(f"  Cached current: {current_file}")
+                    logger.debug(f"Cached current: {current_file}")
             except Exception as e:
-                print(f"  Warning: Failed to preload {version}: {e}")
-        
-        print(f"✓ Cache initialized with {len(self._cached_wind_data)} wind + {len(self._cached_current_data)} current files")
+                logger.warning(f"Failed to preload {version}: {e}")
+
+        logger.debug(f"Cache initialized: {len(self._cached_wind_data)} wind + {len(self._cached_current_data)} current files")
 
     def get_random_field(self) -> Tuple[ConcentrationField, str]:
         """
