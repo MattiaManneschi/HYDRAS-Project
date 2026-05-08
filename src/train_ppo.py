@@ -29,7 +29,7 @@ try:
         CallbackList,
         BaseCallback
     )
-    from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize, sync_envs_normalization
+    from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize, sync_envs_normalization
     from stable_baselines3.common.monitor import Monitor
     STABLE_BASELINES_AVAILABLE = True
     
@@ -216,6 +216,7 @@ class MultiScenarioEvalCallback(BaseCallback):
         self.eval_freq = eval_freq
         self.n_eval_episodes = n_eval_episodes
         self.best_mean_sr = -np.inf
+        self._next_eval_step = eval_freq
 
         # Pre-carica i field di concentrazione per ogni scenario
         self._fields: Dict[str, Any] = {}
@@ -251,62 +252,30 @@ class MultiScenarioEvalCallback(BaseCallback):
             field.source_position = coords
         return field
 
-    def _build_eval_env(self, chunk_id: int, field):
-        env_config = self.config.get('environment', {})
-        agent_config = self.config.get('agent', {})
-        domain_config = self.config.get('domain', {})
-        reward_cfg = env_config.get('reward', {})
-        spawn_cfg = env_config.get('spawn', {})
+    def _build_eval_env_parallel(self, chunk_id: int, field, n_envs: int):
+        import copy as _copy
 
-        env_kwargs = SourceSeekingConfig(
-            xmin=domain_config.get('xmin', 619000),
-            xmax=domain_config.get('xmax', 622000),
-            ymin=domain_config.get('ymin', 4794500),
-            ymax=domain_config.get('ymax', 4797000),
-            resolution=domain_config.get('grid_resolution', 10),
-            max_velocity=agent_config.get('max_velocity', 1.0),
-            memory_length=agent_config.get('memory_length', 9),
-            dt=env_config.get('dt', 10),
-            max_steps=env_config.get('max_episode_steps', 1080),
-            source_found_reward=reward_cfg.get('source_reached_bonus', 100),
-            step_penalty=reward_cfg.get('step_penalty', -0.1),
-            boundary_penalty=reward_cfg.get('boundary_penalty', -10),
-            source_distance_threshold=reward_cfg.get('distance_threshold', 50),
-            distance_reward_multiplier=reward_cfg.get('distance_reward_multiplier', 1.0),
-            land_proximity_threshold=reward_cfg.get('land_proximity_threshold', 10.0),
-            land_proximity_penalty_max=reward_cfg.get('land_proximity_penalty_max', -5.0),
-            n_discrete_actions=agent_config.get('n_discrete_actions', 8),
-            spawn_min_land_distance=spawn_cfg.get('min_land_distance', 50.0),
-            spawn_start_frame=spawn_cfg.get('start_frame', 1440),
-            spawn_conc_threshold=spawn_cfg.get('conc_threshold', 0.5),
-            chunk_id=chunk_id,
-            concentration_gradient_reward_positive=reward_cfg.get('concentration_gradient_reward_positive', 0.05),
-            concentration_gradient_reward_negative=reward_cfg.get('concentration_gradient_reward_negative', -0.05),
-            wind_alignment_reward=reward_cfg.get('wind_alignment_reward', 0.05),
-            wind_alignment_penalty=reward_cfg.get('wind_alignment_penalty', -0.05),
-            current_alignment_reward=reward_cfg.get('current_alignment_reward', 0.05),
-            current_alignment_penalty=reward_cfg.get('current_alignment_penalty', -0.05),
-            stagnation_window=reward_cfg.get('stagnation_window', 50),
-            stagnation_distance_threshold=reward_cfg.get('stagnation_distance_threshold', 20.0),
-            stagnation_penalty=reward_cfg.get('stagnation_penalty', -0.5),
-            retreat_penalty_multiplier=reward_cfg.get('retreat_penalty_multiplier', 3.0),
-            directional_stagnation_threshold=reward_cfg.get('directional_stagnation_threshold', 0.15),
-            directional_stagnation_penalty=reward_cfg.get('directional_stagnation_penalty', -0.5),
-            last_plume_contact_threshold=reward_cfg.get('last_plume_contact_threshold', 0.5),
-        )
+        def _make_single(f):
+            env_kwargs = SourceSeekingConfig.from_config(self.config, chunk_id=chunk_id)
+            raw = SourceSeekingEnv(
+                config=env_kwargs,
+                concentration_field=f,
+                data_manager=self.data_manager,
+                wind_mapping=self.wind_mapping,
+                current_mapping=self.current_mapping,
+            )
+            raw = Monitor(raw)
+            if MASKABLE_PPO_AVAILABLE:
+                raw = ActionMasker(raw, mask_fn)
+            return raw
 
-        raw_env = SourceSeekingEnv(
-            config=env_kwargs,
-            concentration_field=field,
-            data_manager=self.data_manager,
-            wind_mapping=self.wind_mapping,
-            current_mapping=self.current_mapping,
-        )
-        raw_env = Monitor(raw_env)
-        if MASKABLE_PPO_AVAILABLE:
-            raw_env = ActionMasker(raw_env, mask_fn)
+        env_fns = [lambda f=_copy.deepcopy(field): _make_single(f) for _ in range(n_envs)]
 
-        vec_env = DummyVecEnv([lambda e=raw_env: e])
+        if n_envs > 1:
+            vec_env = SubprocVecEnv(env_fns, start_method='fork')
+        else:
+            vec_env = DummyVecEnv(env_fns)
+
         if isinstance(self.train_vec_env, VecNormalize):
             vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=False, training=False)
             sync_envs_normalization(self.train_vec_env, vec_env)
@@ -318,29 +287,32 @@ class MultiScenarioEvalCallback(BaseCallback):
         if field is None:
             return 0.0
 
-        vec_env = self._build_eval_env(scenario['chunk_id'], field)
-        successes = 0
-        for _ in range(self.n_eval_episodes):
-            obs = vec_env.reset()
-            done = False
-            while not done:
-                if MASKABLE_PPO_AVAILABLE:
-                    action, _ = self.model.predict(
-                        obs, deterministic=True,
-                        action_masks=vec_env.env_method('action_masks')[0]
-                    )
-                else:
-                    action, _ = self.model.predict(obs, deterministic=True)
-                obs, _, dones, infos = vec_env.step(action)
-                done = dones[0]
-                if done and infos[0].get('source_reached', False):
-                    successes += 1
+        n = self.n_eval_episodes
+        vec_env = self._build_eval_env_parallel(scenario['chunk_id'], field, n_envs=n)
+
+        obs = vec_env.reset()
+        episode_done = [False] * n
+        episode_results = []
+
+        while not all(episode_done):
+            if MASKABLE_PPO_AVAILABLE:
+                masks = np.array(vec_env.env_method('action_masks'))
+                action, _ = self.model.predict(obs, deterministic=True, action_masks=masks)
+            else:
+                action, _ = self.model.predict(obs, deterministic=True)
+            obs, _, dones, infos = vec_env.step(action)
+            for i, (done, info) in enumerate(zip(dones, infos)):
+                if done and not episode_done[i]:
+                    episode_results.append(bool(info.get('source_reached', False)))
+                    episode_done[i] = True
+
         vec_env.close()
-        return successes / self.n_eval_episodes
+        return sum(episode_results) / n
 
     def _on_step(self) -> bool:
-        if self.num_timesteps % self.eval_freq != 0 or self.num_timesteps == 0:
+        if self.num_timesteps < self._next_eval_step:
             return True
+        self._next_eval_step += self.eval_freq
 
         print(f"\n[Step {self.num_timesteps:,}] Multi-scenario evaluation:")
         success_rates = []
@@ -394,58 +366,7 @@ def create_env(
         wind_mapping: Dict con mappatura run_id -> wind_filename (opzionale)
         current_mapping: Dict con mappatura run_id -> current_filename (opzionale)
     """
-    # Estrai configurazioni
-    env_config = config.get('environment', {})
-    agent_config = config.get('agent', {})
-    domain_config = config.get('domain', {})
-
-    # Crea config ambiente
-    env_kwargs = SourceSeekingConfig(
-        # Domain
-        xmin=domain_config.get('xmin', 619000),
-        xmax=domain_config.get('xmax', 622000),
-        ymin=domain_config.get('ymin', 4794500),
-        ymax=domain_config.get('ymax', 4797000),
-        resolution=domain_config.get('grid_resolution', 10),
-        # Agent
-        max_velocity=agent_config.get('max_velocity', 1.0),
-        memory_length=agent_config.get('memory_length', 9),
-        dt=env_config.get('dt', 10),
-        max_steps=env_config.get('max_episode_steps', 1080),
-        source_found_reward=env_config.get('reward', {}).get('source_reached_bonus', 100),
-        step_penalty=env_config.get('reward', {}).get('step_penalty', -0.1),
-        boundary_penalty=env_config.get('reward', {}).get('boundary_penalty', -10),
-        source_distance_threshold=env_config.get('reward', {}).get('distance_threshold', 50),
-        distance_reward_multiplier=env_config.get('reward', {}).get('distance_reward_multiplier', 1.0),
-        # Land avoidance
-        land_proximity_threshold=env_config.get('reward', {}).get('land_proximity_threshold', 10.0),
-        land_proximity_penalty_max=env_config.get('reward', {}).get('land_proximity_penalty_max', -5.0),
-        n_discrete_actions=agent_config.get('n_discrete_actions', 8),
-        # Spawn constraints
-        spawn_min_land_distance=env_config.get('spawn', {}).get('min_land_distance', 50.0),
-        spawn_start_frame=env_config.get('spawn', {}).get('start_frame', 1440),
-        spawn_conc_threshold=env_config.get('spawn', {}).get('conc_threshold', 0.5),
-        chunk_id=chunk_id,
-        # Concentration gradient reward
-        concentration_gradient_reward_positive=env_config.get('reward', {}).get('concentration_gradient_reward_positive', 0.05),
-        concentration_gradient_reward_negative=env_config.get('reward', {}).get('concentration_gradient_reward_negative', -0.05),
-        # Wind alignment reward
-        wind_alignment_reward=env_config.get('reward', {}).get('wind_alignment_reward', 0.05),
-        wind_alignment_penalty=env_config.get('reward', {}).get('wind_alignment_penalty', -0.05),
-        # Current alignment reward
-        current_alignment_reward=env_config.get('reward', {}).get('current_alignment_reward', 0.05),
-        current_alignment_penalty=env_config.get('reward', {}).get('current_alignment_penalty', -0.05),
-        # Stagnation penalty
-        stagnation_window=env_config.get('reward', {}).get('stagnation_window', 50),
-        stagnation_distance_threshold=env_config.get('reward', {}).get('stagnation_distance_threshold', 20.0),
-        stagnation_penalty=env_config.get('reward', {}).get('stagnation_penalty', -0.5),
-        # Retreat penalty multiplier
-        retreat_penalty_multiplier=env_config.get('reward', {}).get('retreat_penalty_multiplier', 3.0),
-        # Directional stagnation
-        directional_stagnation_threshold=env_config.get('reward', {}).get('directional_stagnation_threshold', 0.15),
-        directional_stagnation_penalty=env_config.get('reward', {}).get('directional_stagnation_penalty', -0.5),
-        last_plume_contact_threshold=env_config.get('reward', {}).get('last_plume_contact_threshold', 0.5),
-    )
+    env_kwargs = SourceSeekingConfig.from_config(config, chunk_id=chunk_id)
 
     print(f"  Success radius: {env_kwargs.source_distance_threshold}m")
 
@@ -747,8 +668,12 @@ def train(
 
     n_parallel_envs = len(env_fns)
 
-    # DummyVecEnv sempre (necessario per accesso diretto agli env)
-    base_vec_env = DummyVecEnv(env_fns)
+    # SubprocVecEnv per training parallelo su più core (curriculum disabilitato → nessun accesso diretto agli env)
+    # Fallback a DummyVecEnv se un solo env (SubprocVecEnv con 1 processo non ha senso)
+    if len(env_fns) > 1:
+        base_vec_env = SubprocVecEnv(env_fns, start_method='fork')
+    else:
+        base_vec_env = DummyVecEnv(env_fns)
     vec_env = base_vec_env
 
     # Normalizzazione
@@ -864,7 +789,7 @@ def train(
         callbacks.append(curriculum_callback)
 
     # Multi-scenario eval callback
-    eval_freq = max(1, training_config.get('eval_freq', 10000) // n_parallel_envs)
+    eval_freq = training_config.get('eval_freq', 100000)
     eval_scenarios = training_config.get('eval_scenarios', [])
     eval_callback = MultiScenarioEvalCallback(
         scenarios=eval_scenarios,
@@ -978,31 +903,71 @@ def main():
             f"Scarica i file .nc di simulazione MIKE21 nella cartella 'data/'"
         )
 
-    # Priorità: 1) resume_from esplicito nel config  2) auto-detect ultimo modello  3) from scratch
-    resume_from = config.get('training', {}).get('resume_from')
-    if resume_from:
-        resume_path = Path(resume_from)
-        if not resume_path.is_absolute():
-            resume_path = (PROJECT_ROOT / resume_path).resolve()
-        if not resume_path.exists():
-            raise FileNotFoundError(f"Modello per resume non trovato: {resume_path}")
-        resume_from = str(resume_path)
-        print(f"Fine-tuning from checkpoint (config): {resume_from}\n")
+    # Priorità:
+    # 1) resume_from: <path>  nel config  → fine-tune da quel checkpoint
+    # 2) resume_from: null    nel config  → training da zero (nessun auto-detect)
+    # 3) chiave assente                   → auto-detect ultimo modello disponibile
+    training_cfg = config.get('training', {})
+    if 'resume_from' in training_cfg:
+        resume_from = training_cfg['resume_from']
+        if resume_from:
+            resume_path = Path(resume_from)
+            if not resume_path.is_absolute():
+                resume_path = (PROJECT_ROOT / resume_path).resolve()
+            if not resume_path.exists():
+                raise FileNotFoundError(f"Modello per resume non trovato: {resume_path}")
+            resume_from = str(resume_path)
+            print(f"Fine-tuning from checkpoint (config): {resume_from}\n")
+        else:
+            resume_from = None
+            print("Training from scratch (resume_from: null in config)\n")
     else:
         resume_from = find_latest_model(output_dir)
         if resume_from:
             print(f"Fine-tuning from latest model (auto-detected): {resume_from}\n")
         else:
-            print(f"No existing model found — training from scratch\n")
+            print("No existing model found — training from scratch\n")
     
-    train(
-        config_path=config_path,
-        output_dir=output_dir,
-        n_envs=1,
-        seed=42,
-        data_dir=data_dir,
-        resume_from=resume_from,
-    )
+    sweep = training_cfg.get('sensor_range_sweep', [])
+
+    if sweep:
+        # Ogni fine-tuning parte sempre dal modello base (no catena)
+        base_resume = resume_from
+        print(f"Sensor range sweep: {sweep} m")
+        print(f"Base model (fisso per tutti gli step): {base_resume}\n")
+        for sr in sweep:
+            print(f"\n{'='*60}")
+            print(f"  Fine-tuning sensor_range = {sr}m")
+            print(f"  Resume from: {base_resume}")
+            print(f"{'='*60}\n")
+
+            # Aggiorna sensor_range nel config su disco prima di ogni run
+            cfg = load_config(config_path)
+            cfg['agent']['sensor_range'] = sr
+            with open(config_path, 'w') as f:
+                yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False)
+
+            _, run_dir = train(
+                config_path=config_path,
+                output_dir=output_dir,
+                n_envs=2,
+                seed=42,
+                data_dir=data_dir,
+                resume_from=base_resume,
+            )
+
+            print(f"\n  → sr={sr}m completato. Modello in: {run_dir / 'models' / 'final_model.zip'}")
+
+        print(f"\nSweep completato. Modelli in: {output_dir}")
+    else:
+        train(
+            config_path=config_path,
+            output_dir=output_dir,
+            n_envs=2,
+            seed=42,
+            data_dir=data_dir,
+            resume_from=resume_from,
+        )
 
 
 if __name__ == "__main__":
