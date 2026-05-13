@@ -561,20 +561,19 @@ def run_inference(
                 scenario_label = f"{version}_{source_id}_{chunk_label}"
                 episode_results: List[EpisodeResult] = []
 
-                for ep in range(n_episodes):
-                    env_cfg_ep = make_env_config(config, chunk_id=chunk_id)
-                    vec_env = build_env(env_cfg_ep, field, vec_norm_path,
-                                       use_masking=MASKABLE_PPO_AVAILABLE,
-                                       data_manager=data_manager,
-                                       wind_data=None, current_data=None,
-                                       wind_mapping=wind_mapping,
-                                       current_mapping=current_mapping)
+                env_cfg = make_env_config(config, chunk_id=chunk_id)
+                vec_env = build_env(env_cfg, field, vec_norm_path,
+                                   use_masking=MASKABLE_PPO_AVAILABLE,
+                                   data_manager=data_manager,
+                                   wind_data=None, current_data=None,
+                                   wind_mapping=wind_mapping,
+                                   current_mapping=current_mapping)
 
+                for ep in range(n_episodes):
                     result = run_episode(model, vec_env, deterministic=deterministic)
                     result.scenario = scenario_label
                     result.source_id = source_id
                     result.episode = ep
-                    vec_env.close()
 
                     sv = 1.0 if result.success else 0.0
                     episode_success_all.append(sv)
@@ -610,6 +609,8 @@ def run_inference(
                         print(f"  {scenario_label} Ep{ep+1}: spawn_dist={init_dist:>5s} → SUCCESS in {result.steps:3d} steps ({time_mins:5.1f}m)")
                     else:
                         print(f"  {scenario_label} Ep{ep+1}: spawn_dist={init_dist:>5s} → {result.termination.upper()} at {result.steps:4d} steps (final_dist={result.final_distance:6.1f}m)")
+
+                vec_env.close()
 
                 if episode_results:
                     all_stats.append(compute_scenario_stats(episode_results, scenario_label, source_id))
@@ -781,11 +782,7 @@ def main():
             cfg_override['agent']['sensor_range'] = sr
             print(f"sensor_range dal modello: {sr}m")
 
-        # Determina output dir: prossima evaluations_vN disponibile
-        evals_dir = PROJECT_ROOT / "evaluations"
-        existing = sorted(evals_dir.glob("evaluations_v*")) if evals_dir.exists() else []
-        next_v = max((int(d.name.replace("evaluations_v", "")) for d in existing if d.name.replace("evaluations_v", "").isdigit()), default=7) + 1
-        output_dir = str(evals_dir / f"evaluations_v{next_v}")
+        output_dir = str(PROJECT_ROOT / "evaluations" / "evaluations_v12")
 
         print(f"Modello selezionato: {model_path}")
         print(f"Output valutazioni: {output_dir}")
