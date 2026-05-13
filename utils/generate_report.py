@@ -1144,18 +1144,41 @@ class HydrasReportGenerator:
         self.story.append(PageBreak())
         self.story.append(Paragraph("5. Analisi Quantitativa dei Risultati", self.styles['SectionHeading']))
 
-        n_success = len([e for e in episodes if e['success']])
-        n_fail = len([e for e in episodes if not e['success']])
         eval_version = data_path.parent.name  # es. "evaluations_v12"
-        model_label = "ppo_20260513" if "v12" in eval_version else "ppo_20260429"
-        intro = f"""
-        Analisi dettagliata condotta su <b>{len(episodes)} episodi</b> raccolti durante l'inferenza
-        del modello <b>{model_label}</b> ({eval_version})
-        ({n_success} successi, {n_fail} fallimenti).
-        I dati provengono da: <i>{data_path.parent.name}/{data_path.name}</i>.
-        """
-        self.story.append(Paragraph(intro, self.styles['Normal']))
-        self.story.append(Spacer(1, 0.2*cm))
+
+        # ── Tabella riepilogativa da log.txt ──────────────────────────────────
+        metrics = self._parse_logs()
+        if metrics.get('success_rate') is not None:
+            wr = metrics.get('wind_rates', {})
+            cr = metrics.get('chunk_rates', {})
+            def pct(v): return f"{v:.0f}%" if v is not None else "n/d"
+            log_data = [
+                ['Metrica', 'Valore'],
+                ['Success Rate Globale', pct(metrics.get('success_rate'))],
+                ['SR per Vento',
+                 f"V0: {pct(wr.get('V0'))}  |  V1: {pct(wr.get('V1'))}  |  V2: {pct(wr.get('V2'))}  |  V3: {pct(wr.get('V3'))}"],
+                ['SR per Chunk',
+                 f"Q1/4: {pct(cr.get('Q1/4'))}  |  Q1/2: {pct(cr.get('Q1/2'))}  |  Q3/4: {pct(cr.get('Q3/4'))}"],
+                ['Distanza media di spawn', f"{metrics['mean_initial_distance']:.1f} m"
+                 if metrics.get('mean_initial_distance') else "n/d"],
+                ['Passi medi (successi)', f"{metrics['mean_steps']:.1f}  (~{metrics['mean_minutes']:.1f} min sim.)"
+                 if metrics.get('mean_steps') else "n/d"],
+                ['Configurazioni / Episodi totali',
+                 f"{metrics.get('scenarios_total', 'n/d')} config. (26 sorgenti x 4 venti x 3 chunk)"
+                 f"  |  {metrics.get('episodes_total', 'n/d')} episodi totali"],
+            ]
+            log_table = Table(log_data, colWidths=[5*cm, 12*cm])
+            log_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#ADD8E6')),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, -1), 9),
+                ('ALIGN', (0, 0), (0, -1), 'LEFT'),
+                ('ALIGN', (1, 0), (1, -1), 'LEFT'),
+                ('GRID', (0, 0), (-1, -1), 1, colors.grey),
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#eeeeee')]),
+            ]))
+            self.story.append(log_table)
+            self.story.append(Spacer(1, 0.3*cm))
 
         analysis_dir = self.project_root.parent / "evaluations" / eval_version / "analysis"
         plot_paths = self._generate_analysis_plots(episodes, analysis_dir)
@@ -1188,7 +1211,7 @@ class HydrasReportGenerator:
         if plot_paths.get('sr_analysis') and plot_paths['sr_analysis'].exists():
             self.story.append(Image(str(plot_paths['sr_analysis']), width=17*cm, height=6.5*cm))
 
-        self.story.append(PageBreak())
+        self.story.append(Spacer(1, 0.3*cm))
 
         # ── 6.3 Distanza dalla sorgente nel tempo ─────────────────────────────
         self.story.append(Paragraph("5.3 Distanza dalla Sorgente nel Tempo", self.styles['SubHeading']))
