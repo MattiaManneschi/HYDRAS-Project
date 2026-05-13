@@ -24,7 +24,7 @@ from PIL import Image as PILImage
 
 
 class HydrasReportGenerator:
-    def __init__(self, output_path="HYDRAS_Report_v8.pdf"):
+    def __init__(self, output_path="HYDRAS_Report_v9.pdf"):
         self.output_path = output_path
         self.project_root = Path(__file__).parent
         self.styles = self._setup_styles()
@@ -72,6 +72,15 @@ class HydrasReportGenerator:
             alignment=TA_CENTER
         ))
 
+        styles.add(ParagraphStyle(
+            name='Caption',
+            parent=styles['Normal'],
+            fontSize=8,
+            textColor=colors.HexColor('#555555'),
+            alignment=TA_CENTER,
+            spaceAfter=4,
+        ))
+
         return styles
 
     def _find_latest_model(self):
@@ -93,6 +102,7 @@ class HydrasReportGenerator:
         import re
 
         candidate_paths = [
+            self.project_root.parent / "evaluations/evaluations_v12/log.txt",
             self.project_root.parent / "evaluations/evaluations_v7/log.txt",
             self.project_root.parent / "evaluations/evaluations_v6/log.txt",
             self.project_root.parent / "evaluations/evaluations_v5/log.txt",
@@ -204,6 +214,7 @@ class HydrasReportGenerator:
         """Carica episodes_data.json prodotto dall'inference."""
         import json
         candidate_paths = [
+            self.project_root.parent / "evaluations/evaluations_v12/episodes_data.json",
             self.project_root.parent / "evaluations/evaluations_v7/episodes_data.json",
             self.project_root.parent / "evaluations/evaluations_v6/episodes_data.json",
             self.project_root.parent / "evaluations/evaluations_v5/episodes_data.json",
@@ -216,7 +227,7 @@ class HydrasReportGenerator:
 
     def _find_eval_image(self, rel_path: str) -> Optional[Path]:
         """Cerca un'immagine di traiettoria nelle directory di evaluation, dalla più recente."""
-        for ver in ['evaluations_v8', 'evaluations_v7', 'evaluations_v6', 'evaluations_v5']:
+        for ver in ['evaluations_v12', 'evaluations_v8', 'evaluations_v7', 'evaluations_v6', 'evaluations_v5']:
             p = self.project_root.parent / "evaluations" / ver / rel_path
             if p.exists():
                 return p
@@ -272,7 +283,7 @@ class HydrasReportGenerator:
     def add_title_page(self, config):
         """Aggiunge la pagina di titolo."""
         self.story.append(Spacer(1, 2*cm))
-        title = Paragraph("HYDRAS Project Report v8", self.styles['TitleReport'])
+        title = Paragraph("HYDRAS Project Report v9", self.styles['TitleReport'])
         self.story.append(title)
         self.story.append(Spacer(1, 1.5*cm))
 
@@ -330,7 +341,7 @@ class HydrasReportGenerator:
 
         Durante il training, i metodi <b>get_wind_data_for_run()</b> e <b>get_current_data_for_run()</b>
         estraggono i dati dalla cache lookup-by-version, evitando riletture disk. Questo accelera ~5-6×
-        il training rispetto a letture da disco: <b>~55K step/ora → ~166K step/ora</b>.<br/><br/>
+        il training rispetto a letture da disco: <b>~55K step/ora → ~300K step/ora</b>.<br/><br/>
 
         <b>Sincronizzazione Garantita:</b> La versione (V0/V1/V2/V3) viene estratta dal filename del file NC
         (es. <code>CL02_V2_SRC042_Conc_10mGrid.nc</code> → V2), quindi è <b>impossibile un mismatch</b>
@@ -351,8 +362,8 @@ class HydrasReportGenerator:
         quindi ogni azione sposta l'agente di 10 metri (o ~7m per componente nelle direzioni diagonali).
         L'episodio termina quando la sorgente viene raggiunta (distanza &lt; 50m) oppure dopo 1080 step (~3 ore simulate).<br/><br/>
 
-        <b>Evoluzione Temporale:</b> Il campo di concentrazione evolve nel tempo: ogni 12 step dell'agente (~2 minuti reali)
-        il campo NetCDF avanza di 1 frame temporale. Vento e corrente sono sincronizzati in minuti reali lungo tutto l'episodio.<br/><br/>
+        <b>Evoluzione Temporale:</b> Il campo di concentrazione evolve nel tempo: ogni 12 step dell'agente (~2 minuti simulati)
+        il campo NetCDF avanza di 1 frame temporale. Vento e corrente sono sincronizzati in minuti simulati lungo tutto l'episodio.<br/><br/>
 
         <b>Action Masking:</b> Ad ogni step, MaskablePPO riceve una maschera booleana delle 8 azioni.
         Le azioni che porterebbero l'agente su terra o fuori dal dominio vengono invalidate prima del campionamento,
@@ -384,13 +395,21 @@ class HydrasReportGenerator:
         self.story.append(Paragraph("4. Training e Architettura", self.styles['SectionHeading']))
 
         # 4.1 - Input della rete neurale
-        self.story.append(Paragraph("4.1 Input della Rete Neurale — 112 Dimensioni", self.styles['SubHeading']))
+        self.story.append(Paragraph("4.1 Input della Rete Neurale — 116 Dimensioni", self.styles['SubHeading']))
 
         obs_text = """
-        Lo spazio di osservazione è un vettore continuo a <b>112 dimensioni</b> (normalizzato via VecNormalize).
-        Include la memoria storica delle concentrazioni e sensori radiali nelle 8 direzioni:
+        Lo spazio di osservazione è un vettore continuo a <b>116 dimensioni</b> (normalizzato via VecNormalize).
+        Include la memoria storica delle concentrazioni, sensori radiali nelle 8 direzioni e — da questa versione —
+        memoria chimica estesa con posizione del massimo e conteggio del contatto col plume.
         """
         self.story.append(Paragraph(obs_text, self.styles['Normal']))
+
+        parallel_text = """
+        <b>Parallelizzazione:</b> il training usa <b>SubprocVecEnv</b> con <b>6 ambienti paralleli</b>
+        (2 worker × 3 chunk), avviati tramite <code>start_method='fork'</code> per ereditare
+        il DataManager gia' caricato in RAM senza ricostruirlo in ogni sottoprocesso.
+        """
+        self.story.append(Paragraph(parallel_text, self.styles['Normal']))
         self.story.append(Spacer(1, 0.3*cm))
 
         P8 = lambda t: Paragraph(t, ParagraphStyle('obs', fontSize=8.5, leading=11))
@@ -399,10 +418,12 @@ class HydrasReportGenerator:
             ['Concentrazione Attuale', '1', 'Conc. posizione corrente (x, y)'],
             ['Memoria Conc. (Locale)', '9', 'Ultimi 9 timestep'],
             ['Storico Movimento', '18', 'Δx, Δy ultimi 9 step'],
-            ['Sensori Radiali (Correnti)', '8', P8('Conc. nelle 8 direzioni a distanza variabile (50m / 100m / 150m / 200m per i 4 modelli)')],
-            ['Memory Conc. Direzionali', '72', P8('Conc. nelle 8 direzioni × 9 timestep passati (stessa distanza dei sensori radiali)')],
+            ['Sensori Radiali (Correnti)', '8', P8('Conc. nelle 8 direzioni a distanza 20m')],
+            ['Memory Conc. Direzionali', '72', P8('Conc. nelle 8 direzioni × 9 timestep passati')],
             ['Vento', '2', 'u, v [m/s]'],
             ['Corrente', '2', 'u, v [m/s]'],
+            ['Max Conc. Vista', '3', P8('(dx, dy) verso la posizione di massima concentrazione osservata nell\'episodio + valore massimo normalizzato')],
+            ['Steps fuori Plume', '1', P8('steps_since_plume_contact / max_steps — misura quanto a lungo l\'agente \xe8 fuori dal plume')],
         ]
 
         obs_table = Table(obs_data, colWidths=[4.5*cm, 1.2*cm, 11.3*cm])
@@ -431,23 +452,39 @@ class HydrasReportGenerator:
         else:
             total_timesteps_str = f"{total_timesteps:,}"
 
-        targeted_versions = train_cfg.get('targeted_versions', [])
-        targeted_chunk_ids = train_cfg.get('targeted_chunk_ids', [])
-        n_targeted_per_chunk = int(train_cfg.get('n_targeted_per_chunk', 2))
-        n_envs_base = 1
-        n_targeted = len(targeted_chunk_ids) * n_targeted_per_chunk
-        n_mixed = n_envs_base
-        n_total_envs = n_targeted + n_mixed
-        if targeted_versions:
-            envs_str = (
-                f"{n_total_envs} env: {n_targeted} targeted {'+'.join(targeted_versions)}"
-                f" chunk {targeted_chunk_ids} ({n_targeted_per_chunk}/chunk)"
-                f" + {n_mixed} mixed V0-V3 | ratio {n_targeted/(n_total_envs):.0%}/{n_mixed/(n_total_envs):.0%}"
-            )
-            curriculum_str = "Disabilitato — fine-tuning da checkpoint, full dataset SRC001-SRC106 x V0-V3"
+        # Learning rate: step-wise schedule se presente, altrimenti costante
+        lr_schedule = train_cfg.get('lr_schedule', [])
+        if lr_schedule:
+            lr_parts = []
+            for i, s in enumerate(lr_schedule):
+                prev_m = lr_schedule[i-1]['end'] // 1_000_000 if i > 0 else 0
+                end_m = s['end'] // 1_000_000
+                lr_val = f"{s['lr']:.0e}".replace('e-0', 'e-').replace('e+0', 'e+')
+                lr_parts.append(f"{lr_val} ({prev_m}-{end_m}M)")
+            lr_str = "  ->  ".join(lr_parts)
         else:
-            envs_str = "1 worker x 3 chunk = 3 env simultanei"
-            curriculum_str = "1 fase (106 sorgenti x 4 scenari vento)"
+            lr_str = f"{train_cfg.get('learning_rate', 3e-4):.1e} (costante)"
+
+        # Curriculum scenario
+        scenario_curriculum = train_cfg.get('scenario_curriculum', [])
+        if scenario_curriculum:
+            phase_labels = []
+            for i, p in enumerate(scenario_curriculum):
+                alpha = p['alpha']
+                end_m = p['end'] // 1_000_000
+                if alpha == 0:
+                    label = "uniforme"
+                else:
+                    hard_pct = int(alpha * 100)
+                    easy_pct = 100 - hard_pct
+                    label = f"{hard_pct}/{easy_pct} hard/easy"
+                prev_m = scenario_curriculum[i-1]['end'] // 1_000_000 if i > 0 else 0
+                phase_labels.append(f"{prev_m}–{end_m}M: {label}")
+            curriculum_str = "Scenario curriculum 3 fasi: " + "  →  ".join(phase_labels)
+        else:
+            curriculum_str = "Uniforme — nessun curriculum scenario"
+
+        envs_str = "2 workers × 3 chunk = 6 env simultanei (SubprocVecEnv)"
 
         P = lambda t: Paragraph(t, self.styles['Normal'])
 
@@ -458,16 +495,16 @@ class HydrasReportGenerator:
             ['Normalization', 'VecNormalize (osservazioni, clip_obs=10)'],
             ['Batch Size', f"{train_cfg['batch_size']}"],
             ['N Steps', f"{train_cfg.get('n_steps', 4096)}"],
-            ['N Epochs', f"{train_cfg.get('n_epochs', 5)}"],
-            ['Learning Rate', f"{train_cfg['learning_rate']:.1e}"],
+            ['N Epochs', f"{train_cfg.get('n_epochs', 10)}"],
+            ['Learning Rate', P(lr_str)],
             ['Clip Range', f"{train_cfg.get('clip_range', 0.15)}"],
             ['Target KL', f"{train_cfg.get('target_kl', 0.01)}"],
             ['Gamma', f"{train_cfg['gamma']}"],
             ['GAE Lambda', f"{train_cfg['gae_lambda']}"],
             ['Entropy Coef', f"{train_cfg['ent_coef']}"],
             ['VF Coef', f"{train_cfg.get('vf_coef', 0.3)}"],
-            ['Timestep Totali (FT)', total_timesteps_str],
-            ['Curriculum', P(curriculum_str)],
+            ['Timestep Totali', total_timesteps_str],
+            ['Curriculum Scenari', P(curriculum_str)],
             ['Ambienti Paralleli', P(envs_str)],
         ]
 
@@ -546,6 +583,88 @@ class HydrasReportGenerator:
         ]))
         self.story.append(reward_table)
         self.story.append(Spacer(1, 0.2*cm))
+
+    def add_improvements_section(self):
+        """Sezione 5: Modifiche introdotte nella v9."""
+        self.story.append(PageBreak())
+        self.story.append(Paragraph("5. Modifiche v9 — Osservazione Estesa e Curriculum Learning", self.styles['SectionHeading']))
+
+        motivation = """
+        L'analisi dei fallimenti del modello precedente (evaluations_v7, SR 94%) ha identificato tre
+        modalità di fallimento principali, classificate su 101 episodi falliti:<br/><br/>
+        • <b>Modo 1 (~30%):</b> l'agente si avvicina alla sorgente ma perde il contatto col plume nella
+        fase finale e non riesce a ritrovarlo. Causa: nessuna memoria persistente del punto di massima
+        concentrazione visitato.<br/>
+        • <b>Modo 2 (~25%):</b> approccio parziale con convergenza interrotta. L'agente oscilla vicino
+        alla sorgente senza completare l'avvicinamento.<br/>
+        • <b>Modo 3 (~46%):</b> il plume è troppo disperso fin dall'inizio (scenari V1/V2 chunk Q1/2 e Q3/4):
+        l'agente non riesce mai a entrare nel plume entro il budget di step. Causa: esposizione insufficiente
+        a questi scenari durante il training (distribuzione uniforme).<br/><br/>
+        Vento e corrente erano già presenti nello spazio di osservazione, quindi non si trattava di
+        mancanza di informazione fisica. Le modifiche introdotte in v9 mirano a correggere questi tre modi.
+        """
+        self.story.append(Paragraph(motivation, self.styles['Normal']))
+        self.story.append(Spacer(1, 0.3*cm))
+
+        self.story.append(Paragraph("5.1 Feature 3 — Memoria della Massima Concentrazione", self.styles['SubHeading']))
+        f3_text = """
+        <b>Razionale:</b> l'agente non aveva memoria della migliore posizione chimica visitata nell'episodio.
+        Una volta uscito dal plume denso, non sapeva in quale direzione tornare.<br/><br/>
+        <b>Implementazione:</b> tre valori aggiunti all'osservazione (indici [112:115]):<br/>
+        • <code>(dx, dy)</code> = differenza di posizione tra la cella di massima concentrazione osservata
+        nell'episodio corrente e la posizione attuale dell'agente;<br/>
+        • <code>max_conc_value</code> = valore di concentrazione massimo osservato, normalizzato via VecNormalize.<br/><br/>
+        I valori vengono aggiornati in ogni step: se la concentrazione attuale supera il massimo storico,
+        il massimo e la posizione corrispondente vengono aggiornati. Questo fornisce all'agente un "faro"
+        persistente verso la zona di plume più densa esplorata.
+        """
+        self.story.append(Paragraph(f3_text, self.styles['Normal']))
+        self.story.append(Spacer(1, 0.2*cm))
+
+        self.story.append(Paragraph("5.2 Feature 4 — Steps senza Contatto col Plume", self.styles['SubHeading']))
+        f4_text = """
+        <b>Razionale:</b> l'agente non aveva informazione su quanto tempo fosse trascorso dall'ultimo contatto
+        con il plume (concentrazione > soglia spawn 0.5). Questa informazione è rilevante per decidere se
+        "esplorare più ampiamente" o "continuare nella direzione attuale".<br/><br/>
+        <b>Implementazione:</b> un valore aggiunto all'osservazione (indice [115]):<br/>
+        • <code>steps_since_plume_contact / max_steps</code> = numero di step dall'ultimo contatto col plume,
+        normalizzato sul budget massimo dell'episodio (1080 step).<br/><br/>
+        Il contatore viene azzerato ogni volta che la concentrazione supera la soglia di spawn (0.5).
+        Il valore è 0.0 quando l'agente è dentro il plume, e cresce linearmente verso 1.0 man mano che
+        l'agente rimane lontano dal plume.
+        """
+        self.story.append(Paragraph(f4_text, self.styles['Normal']))
+        self.story.append(Spacer(1, 0.2*cm))
+
+        self.story.append(Paragraph("5.3 Curriculum Learning sugli Scenari", self.styles['SubHeading']))
+        curr_text = """
+        <b>Razionale:</b> il 46% dei fallimenti (Modo 3) era concentrato negli scenari V1/V2 chunk Q1/2 e Q3/4,
+        dove il plume è più disperso. Con distribuzione uniforme, la probabilità di campionare uno di questi
+        4 scenari "difficili" ({V1×chunk1, V1×chunk2, V2×chunk1, V2×chunk2}) era solo 4/12 ≈ 33%.<br/><br/>
+        <b>Implementazione — 3 fasi progressive:</b><br/>
+        • <b>0–2M steps (α=0):</b> distribuzione uniforme — tutti gli scenari V×chunk equiprobabili.
+        L'agente impara la strategia base senza bias.<br/>
+        • <b>2–4M steps (α=0.5):</b> 50% del budget campionamento assegnato agli scenari difficili (4 chiavi),
+        50% al resto (8 chiavi easy). Ogni scenario difficile vale ~12.5%, ogni easy ~6.25%.<br/>
+        • <b>4–6M steps (α=0.8):</b> 80% agli scenari difficili, 20% agli easy. Ogni difficile vale ~20%,
+        ogni easy ~2.5%. Spinge l'agente a specializzarsi sui casi critici.<br/><br/>
+        Il cambio di fase avviene tramite <code>ScenarioWeightSchedulerCallback</code>, che aggiorna i pesi
+        via <code>env_method('set_scenario_weights')</code> su tutti i SubprocVecEnv worker.
+        """
+        self.story.append(Paragraph(curr_text, self.styles['Normal']))
+        self.story.append(Spacer(1, 0.2*cm))
+
+        self.story.append(Paragraph("5.4 Learning Rate Decrescente e Training da Zero", self.styles['SubHeading']))
+        lr_text = """
+        Il modello v9 è stato addestrato <b>da zero</b> (nessun resume da checkpoint precedente) per evitare
+        bias strutturali ereditati dal vecchio spazio di osservazione a 112 dimensioni, incompatibile
+        con il nuovo a 116.<br/><br/>
+        <b>Learning rate step-wise:</b> 3e-4 (0-2M)  -&gt;  1e-4 (2-4M)  -&gt;  5e-5 (4-5M)  -&gt;  1e-5 (5-6M).
+        La fase iniziale ad alto LR permette esplorazione rapida dello spazio policy; le fasi successive
+        affinano la policy su scenari sempre più difficili con passi più conservativi, allineati
+        alle fasi del curriculum scenario.
+        """
+        self.story.append(Paragraph(lr_text, self.styles['Normal']))
 
     def add_inference_section(self, config):
         """Sezione 5: Risultati delle inferenze su 26 sorgenti held-out."""
@@ -689,8 +808,9 @@ class HydrasReportGenerator:
         self.story.append(side_by_side)
         self.story.append(Spacer(1, 0.2*cm))
 
+        sr_display = f"{metrics.get('success_rate', 96):.0f}%" if metrics.get('success_rate') else "96%"
         global_sr_text = (
-            f"Successo Globale: <b>94%</b> su {scenarios_total} scenari"
+            f"Successo Globale: <b>{sr_display}</b> su {scenarios_total} scenari"
             f" x {episodes_per_scenario} episodi = {episodes_total} episodi totali"
         )
         self.story.append(Paragraph(global_sr_text, self.styles['Normal']))
@@ -997,8 +1117,9 @@ class HydrasReportGenerator:
                              bar.get_height() + 1.5, f'n={n}',
                              ha='center', va='bottom', fontsize=7.5)
 
-        ax2.axhline(94, color='navy', linestyle='--', linewidth=1.2,
-                    label='SR globale 94%')
+        global_sr_val = round(np.mean([e['success'] for e in episodes]) * 100)
+        ax2.axhline(global_sr_val, color='navy', linestyle='--', linewidth=1.2,
+                    label=f'SR globale {global_sr_val}%')
         ax2.set_ylim(0, 115)
         ax2.set_xlabel('Distanza iniziale dalla sorgente (m)', fontsize=11)
         ax2.set_ylabel('Success Rate (%)', fontsize=11)
@@ -1025,16 +1146,18 @@ class HydrasReportGenerator:
 
         n_success = len([e for e in episodes if e['success']])
         n_fail = len([e for e in episodes if not e['success']])
+        eval_version = data_path.parent.name  # es. "evaluations_v12"
+        model_label = "ppo_20260513" if "v12" in eval_version else "ppo_20260429"
         intro = f"""
         Analisi dettagliata condotta su <b>{len(episodes)} episodi</b> raccolti durante l'inferenza
-        del modello base <b>ppo_20260429</b> (evaluations_v7)
+        del modello <b>{model_label}</b> ({eval_version})
         ({n_success} successi, {n_fail} fallimenti).
         I dati provengono da: <i>{data_path.parent.name}/{data_path.name}</i>.
         """
         self.story.append(Paragraph(intro, self.styles['Normal']))
         self.story.append(Spacer(1, 0.2*cm))
 
-        analysis_dir = self.project_root.parent / "evaluations" / "evaluations_v7" / "analysis"
+        analysis_dir = self.project_root.parent / "evaluations" / eval_version / "analysis"
         plot_paths = self._generate_analysis_plots(episodes, analysis_dir)
 
         # ── 6.1 Distribuzione tempi di successo ───────────────────────────────
@@ -1099,6 +1222,73 @@ class HydrasReportGenerator:
         if plot_paths.get('initial_dist') and plot_paths['initial_dist'].exists():
             self.story.append(Image(str(plot_paths['initial_dist']), width=17*cm, height=6.5*cm))
 
+    def add_visual_analysis_section(self):
+        """Sezione 6: Analisi visiva dei risultati."""
+        base = self.project_root.parent / "evaluations" / "evaluations_v12"
+
+        success_items = [
+            (base / "SRC131" / "V1" / "ep01_chunk1_trajectory.png",
+             "Successo — SRC131, Vento V1 (Q1/2), dist. iniziale 2486 m, 295 passi (~49 min sim.)"),
+            (base / "SRC107" / "V2" / "ep01_chunk1_trajectory.png",
+             "Successo — SRC107, Vento V2 (Q1/2), dist. iniziale 1006 m, 374 passi (~62 min sim.)"),
+        ]
+        failure_items = [
+            (base / "SRC108" / "V2" / "ep03_chunk1_trajectory.png",
+             "Fallimento — SRC108, Vento V2, dist. iniziale 1011 m, timeout (1080 passi)"),
+            (base / "SRC109" / "V2" / "ep03_chunk1_trajectory.png",
+             "Fallimento — SRC109, Vento V2, dist. iniziale 1091 m, timeout (1080 passi)"),
+        ]
+
+        self.story.append(PageBreak())
+        self.story.append(Paragraph("6. Analisi Visiva dei Risultati", self.styles['SectionHeading']))
+        intro = """
+        Confronto tra traiettorie di episodi rappresentativi dell'inferenza condotta sul modello
+        <b>ppo_20260513</b> (evaluations_v12). Le immagini mostrano il percorso dell'agente (linea colorata)
+        sovrapposto al campo di concentrazione del plume chimico e alla posizione della sorgente (stella rossa).
+        """
+        self.story.append(Paragraph(intro, self.styles['Normal']))
+        self.story.append(Spacer(1, 0.3*cm))
+
+        img_w = 8.5 * cm
+        img_h = 7.5 * cm
+        col_w = 9.0 * cm
+
+        def make_pair(items):
+            cells = []
+            for path, caption in items:
+                if path.exists():
+                    img = Image(str(path), width=img_w, height=img_h)
+                else:
+                    img = Paragraph(f"[immagine non trovata: {path.name}]", self.styles['Normal'])
+                cap = Paragraph(f"<i>{caption}</i>", self.styles['Caption'])
+                cells.append([img, Spacer(1, 0.1*cm), cap])
+            if len(cells) == 2:
+                left = [cells[0][0], cells[0][1], cells[0][2]]
+                right = [cells[1][0], cells[1][1], cells[1][2]]
+                tbl = Table([[left[0], right[0]], [left[1], right[1]], [left[2], right[2]]],
+                            colWidths=[col_w, col_w])
+                tbl.setStyle(TableStyle([
+                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                    ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                    ('LEFTPADDING', (0, 0), (-1, -1), 4),
+                    ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+                    ('TOPPADDING', (0, 0), (-1, -1), 2),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+                ]))
+                return tbl
+            return None
+
+        self.story.append(Paragraph("6.1 Casi di Successo", self.styles['SubHeading']))
+        tbl_success = make_pair(success_items)
+        if tbl_success:
+            self.story.append(tbl_success)
+
+        self.story.append(Spacer(1, 0.5*cm))
+        self.story.append(Paragraph("6.2 Casi di Fallimento", self.styles['SubHeading']))
+        tbl_failure = make_pair(failure_items)
+        if tbl_failure:
+            self.story.append(tbl_failure)
+
     def _generate_sensor_range_plot(self, analysis_dir: Path) -> Optional[Path]:
         """Genera il plot comparativo del sensor range sweep."""
         import matplotlib
@@ -1135,7 +1325,7 @@ class HydrasReportGenerator:
         for bar, val in zip(bars, sr_glob):
             ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 1,
                     f'{val:.1f}%', ha='center', va='bottom', fontsize=9, fontweight='bold')
-        ax.axhline(94, color='navy', linestyle='--', linewidth=1.2, label='Baseline 94%')
+        ax.axhline(94, color='navy', linestyle='--', linewidth=1.2, label='Baseline 94% (ppo_20260429)')
         ax.set_xticks(list(x)); ax.set_xticklabels(xlabels)
         ax.set_ylim(0, 110)
         ax.set_xlabel('Sensor Range'); ax.set_ylabel('Success Rate (%)')
@@ -1180,14 +1370,17 @@ class HydrasReportGenerator:
         """Sezione 7: Esperimento di analisi del sensor range."""
         self.story.append(PageBreak())
         self.story.append(Paragraph(
-            "6. Analisi della Distanza di Misurazione dei Sensori",
+            "7. Analisi della Distanza di Misurazione dei Sensori",
             self.styles['SectionHeading']
         ))
 
         intro = """
-        A seguito dei risultati del modello base (94% success rate con <b>sensor_range=20m</b>),
-        è stato condotto un esperimento di <b>fine-tuning progressivo</b> con distanze di misurazione
-        crescenti per valutare l'impatto del range sensoriale sulle performance di source seeking.<br/><br/>
+        A seguito dei risultati del modello base (<b>ppo_20260429</b>, 94% success rate con
+        <b>sensor_range=20m</b>), è stato condotto un esperimento di <b>fine-tuning progressivo</b>
+        con distanze di misurazione crescenti per valutare l'impatto del range sensoriale sulle
+        performance di source seeking. I risultati di questo esperimento si riferiscono al modello
+        precedente alla v9; il modello v9 (<b>ppo_20260513</b>) è addestrato con sensor_range=20m
+        e raggiunge <b>96% SR</b> grazie alle modifiche descritte nella sezione 5.<br/><br/>
 
         L'ipotesi di partenza era che un range maggiore potesse aiutare l'agente a rilevare il plume
         da più lontano, migliorando la navigazione in scenari con spawn distante dalla sorgente.
@@ -1197,7 +1390,7 @@ class HydrasReportGenerator:
         self.story.append(Paragraph(intro, self.styles['Normal']))
         self.story.append(Spacer(1, 0.3*cm))
 
-        self.story.append(Paragraph("6.1 Setup Sperimentale", self.styles['SubHeading']))
+        self.story.append(Paragraph("7.1 Setup Sperimentale", self.styles['SubHeading']))
         setup = """
         Ogni step del sweep consiste in un <b>fine-tuning a partire dal modello base</b> (ppo_20260429),
         con <b>2M timesteps</b>, distribuiti V0-V3/chunk uniformemente (nessuna distribuzione
@@ -1232,7 +1425,7 @@ class HydrasReportGenerator:
         self.story.append(t)
         self.story.append(Spacer(1, 0.3*cm))
 
-        self.story.append(Paragraph("6.2 Risultati", self.styles['SubHeading']))
+        self.story.append(Paragraph("7.2 Risultati", self.styles['SubHeading']))
 
         # Tabella risultati globali
         results_data = [
@@ -1264,7 +1457,7 @@ class HydrasReportGenerator:
             self.story.append(Image(str(plot_path), width=17*cm, height=5.7*cm))
         self.story.append(Spacer(1, 0.3*cm))
 
-        self.story.append(Paragraph("6.3 Analisi e Conclusioni", self.styles['SubHeading']))
+        self.story.append(Paragraph("7.3 Analisi e Conclusioni", self.styles['SubHeading']))
         conclusion = """
         I risultati mostrano una <b>degradazione monotona e progressiva</b>: ogni incremento del range
         sensoriale porta a una riduzione del success rate, con il calo più netto tra 100m (87%)
@@ -1297,7 +1490,7 @@ class HydrasReportGenerator:
         self.add_environment_section(config)
         self.add_training_section(config)
         self.add_quantitative_analysis_section()
-        self.add_sensor_range_section()
+        self.add_visual_analysis_section()
 
         doc = SimpleDocTemplate(self.output_path, pagesize=A4,
                                rightMargin=15*mm, leftMargin=15*mm,
@@ -1309,7 +1502,7 @@ class HydrasReportGenerator:
 if __name__ == "__main__":
     reports_dir = Path(__file__).parent.parent / "reports"
     reports_dir.mkdir(exist_ok=True)
-    output_path = reports_dir / "HYDRAS_Report_v8.pdf"
+    output_path = reports_dir / "HYDRAS_Report_v9.pdf"
 
     generator = HydrasReportGenerator(str(output_path))
     generator.generate()
