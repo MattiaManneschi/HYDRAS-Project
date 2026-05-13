@@ -7,7 +7,7 @@ utilizzando Proximal Policy Optimization (PPO).
 import sys
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, Dict, Any, Callable, List
+from typing import Optional, Dict, Any, Callable, List, Tuple
 import yaml
 import numpy as np
 import matplotlib
@@ -47,7 +47,7 @@ except ImportError:
     MASKABLE_PPO_AVAILABLE = False
     print("WARNING: stable-baselines3 non installato. Alcune funzionalità non saranno disponibili.")
 
-from utils.source_seeking_env import SourceSeekingEnv, SourceSeekingConfig
+from utils.source_seeking_env import SourceSeekingEnv, SourceSeekingConfig, ScenarioWeightWrapper
 from utils.data_loader import ConcentrationField, DataManager, WindData, CurrentData
 
 
@@ -179,6 +179,59 @@ class CurriculumCallback(BaseCallback):
         
         self.logger.record('curriculum/n_sources', len(current_sources))
         
+        return True
+
+
+class ScenarioWeightSchedulerCallback(BaseCallback):
+    """
+    Curriculum learning sui pesi degli scenari.
+
+    Fasi (definite in config.yaml → training.scenario_curriculum):
+      - alpha=0.0  → uniform (scenario_weights=None, chunk fisso per env)
+      - alpha=0.5  → 50% hard (V1/V2 con chunk 1+2), 50% easy (resto)
+      - alpha=0.8  → 80% hard, 20% easy
+
+    Hard scenarios: V1_1, V1_2, V2_1, V2_2
+    """
+
+    _HARD = {'V1_1', 'V1_2', 'V2_1', 'V2_2'}
+    _ALL  = [f'V{v}_{c}' for v in range(4) for c in range(3)]
+
+    def __init__(self, phases: List[Dict[str, Any]], vec_env, verbose: int = 1):
+        super().__init__(verbose)
+        self.phases = phases          # [{'end': int, 'alpha': float}, ...]
+        self.vec_env = vec_env
+        self._current_phase_idx = -1
+
+    def _compute_weights(self, alpha: float) -> Optional[Dict[str, float]]:
+        if alpha == 0.0:
+            return None  # nessun weighting → campionamento uniforme di default
+        n_hard = len(self._HARD)
+        n_easy = len(self._ALL) - n_hard
+        return {
+            k: alpha / n_hard if k in self._HARD else (1.0 - alpha) / n_easy
+            for k in self._ALL
+        }
+
+    def _get_phase(self) -> Tuple[int, float]:
+        for i, p in enumerate(self.phases):
+            if self.num_timesteps < p['end']:
+                return i, p['alpha']
+        return len(self.phases) - 1, self.phases[-1]['alpha']
+
+    def _on_step(self) -> bool:
+        phase_idx, alpha = self._get_phase()
+        if phase_idx == self._current_phase_idx:
+            return True
+        self._current_phase_idx = phase_idx
+        weights = self._compute_weights(alpha)
+        try:
+            self.vec_env.env_method('set_scenario_weights', weights)
+            if self.verbose:
+                label = 'uniform' if alpha == 0.0 else f'{int(alpha*100)}/{int((1-alpha)*100)} hard/easy'
+                print(f"\n[Step {self.num_timesteps:,}] Scenario weights → phase {phase_idx+1}: {label}")
+        except Exception as e:
+            print(f"\n[WARNING] set_scenario_weights failed: {e}")
         return True
 
 
@@ -414,46 +467,42 @@ def make_env_fn(
     data_manager: Optional[DataManager] = None,
     wind_mapping: Optional[Dict[str, str]] = None,
     current_mapping: Optional[Dict[str, str]] = None,
-    allowed_sources: Optional[List[str]] = None
+    allowed_sources: Optional[List[str]] = None,
+    scenario_weights: Optional[Dict[str, float]] = None,
 ) -> Callable[[], gym.Env]:
-    """Factory function per la creazione di ambienti paralleli.
-    
-    Args:
-        wind_data: Dati di vento (condivisi tra ambienti)
-        current_data: Dati di corrente (condivisi tra ambienti)
-        chunk_id: 0 = spawn @1/4, 1 = spawn @1/2, 2 = spawn @3/4 della simulazione
-        data_manager: DataManager per caricamenti dinamici
-        wind_mapping: Dict con mappatura run_id -> wind_filename
-        current_mapping: Dict con mappatura run_id -> current_filename
-        allowed_sources: Lista di sorgenti disponibili (impostata prima del reset)
-    """
+    """Factory function per la creazione di ambienti paralleli."""
     def _init() -> gym.Env:
         env = create_env(
-            config, 
-            concentration_field, 
-            wind_data, 
-            current_data, 
-            data_dir, 
-            randomize_field, 
+            config,
+            concentration_field,
+            wind_data,
+            current_data,
+            data_dir,
+            randomize_field,
             chunk_id=chunk_id,
             data_manager=data_manager,
             wind_mapping=wind_mapping,
             current_mapping=current_mapping
         )
-        
-        # Imposta allowed_sources PRIMA del reset per evitare errori
+
+        inner = env
+        while hasattr(inner, 'env'):
+            inner = inner.env
+
         if allowed_sources is not None:
-            inner = env
-            while hasattr(inner, 'env'):
-                inner = inner.env
             inner.allowed_sources = list(allowed_sources)
-        
+
+        if scenario_weights is not None:
+            inner.scenario_weights = scenario_weights
+
         env.reset(seed=seed + rank)
-        
-        # Applica action masking se disponibile
+
         if use_action_masking and MASKABLE_PPO_AVAILABLE:
             env = ActionMasker(env, mask_fn)
-        
+
+        # Wrapper esterno per permettere env_method('set_scenario_weights') via SubprocVecEnv
+        env = ScenarioWeightWrapper(env)
+
         return env
     return _init
 
@@ -603,6 +652,7 @@ def train(
     # Crea environments.
     # Se targeted_versions è definito: 80% env su versioni target (V2, chunk 1+2),
     # 20% env mixed (tutte versioni, chunk 0) per anti-forgetting.
+    scenario_weights    = training_config.get('scenario_weights', None)
     targeted_versions   = training_config.get('targeted_versions', [])
     targeted_chunk_ids  = training_config.get('targeted_chunk_ids', chunk_ids)
     n_targeted_per_chunk = int(training_config.get('n_targeted_per_chunk', n_envs))
@@ -654,6 +704,9 @@ def train(
               f"| Ratio: {n_targeted/(n_targeted+n_mixed):.0%}/{n_mixed/(n_targeted+n_mixed):.0%}")
     else:
         # Training standard: tutti i chunk, tutte le versioni
+        # Se scenario_weights è definito, il campionamento dinamico è delegato all'env
+        if scenario_weights:
+            print(f"\nScenario weights attivi — campionamento dinamico (version × chunk) per episodio")
         env_fns = [
             make_env_fn(
                 config, concentration_field, wind_data, current_data, i, chunk_id,
@@ -662,6 +715,7 @@ def train(
                 wind_mapping=wind_mapping,
                 current_mapping=current_mapping,
                 allowed_sources=discovered_sources,
+                scenario_weights=scenario_weights,
             )
             for i in range(n_envs) for chunk_id in chunk_ids
         ]
@@ -709,6 +763,29 @@ def train(
                 clip_obs=10.0
             )
 
+    # Learning rate schedule: step-wise decay allineato alle fasi del curriculum
+    lr_schedule_config = training_config.get('lr_schedule', [])
+    if lr_schedule_config:
+        # Ogni entry ha {'end': timestep, 'lr': valore}
+        lr_steps = [(s['end'] / timesteps, float(s['lr'])) for s in lr_schedule_config]
+
+        def _make_lr_fn(steps):
+            def lr_fn(progress_remaining: float) -> float:
+                progress = 1.0 - progress_remaining
+                for frac, lr in steps:
+                    if progress <= frac:
+                        return lr
+                return steps[-1][1]
+            return lr_fn
+
+        learning_rate = _make_lr_fn(lr_steps)
+        print(f"\nLearning rate schedule ({len(lr_steps)} fasi):")
+        for s in lr_schedule_config:
+            print(f"  0 – {s['end']:,} steps → lr={s['lr']}")
+    else:
+        learning_rate = training_config.get('learning_rate', 3e-4)
+        print(f"\nLearning rate: {learning_rate} (costante)")
+
     # Configura policy network
     policy_kwargs = training_config.get('policy_kwargs', {})
     net_arch = policy_kwargs.get('net_arch', {'pi': [256, 256], 'vf': [256, 256]})
@@ -735,7 +812,7 @@ def train(
     model_kwargs = {
         'policy': training_config.get('policy', 'MlpPolicy'),
         'env': vec_env,
-        'learning_rate': training_config.get('learning_rate', 5e-5),
+        'learning_rate': learning_rate,
         'n_steps': training_config.get('n_steps', 4096),
         'batch_size': training_config.get('batch_size', 64),
         'n_epochs': training_config.get('n_epochs', 10),
@@ -777,6 +854,16 @@ def train(
 
     # Setup callbacks
     callbacks = []
+
+    # Scenario weight scheduler (curriculum hard/easy)
+    scenario_curriculum = training_config.get('scenario_curriculum', [])
+    if scenario_curriculum:
+        weight_scheduler = ScenarioWeightSchedulerCallback(
+            phases=scenario_curriculum,
+            vec_env=vec_env,
+            verbose=1,
+        )
+        callbacks.append(weight_scheduler)
 
     # Curriculum Learning callback (applica fasi progressive di sorgenti)
     # BUG #9 FIX: Solo aggiungere callback se curriculum è abilitato

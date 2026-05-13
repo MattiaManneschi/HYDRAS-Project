@@ -1073,6 +1073,27 @@ class DataManager:
         run_id = f"{source_id}_{version}"
         return field, run_id
 
+    def get_random_field_for_source_version(self, source_id: str, version: str) -> Tuple[ConcentrationField, str]:
+        """Ritorna un campo random per una sorgente e versione specifiche (es. 'V2').
+
+        Fallback a qualsiasi versione disponibile se la versione richiesta non ha file.
+        """
+        source_files = [
+            f for f in self._nc_files
+            if source_id in f.name and 'Conc' in f.name and f'_{version}_' in f.name
+        ]
+        if not source_files:
+            return self.get_random_field_for_source(source_id)
+
+        nc_file = np.random.choice(source_files)
+        field = self._nc_loader.load(str(nc_file), concentration_var="Concentration - component 1")
+        coords = self.get_source_coordinates(source_id)
+        if coords:
+            field.source_position = coords
+        version_found = self._extract_version(nc_file.stem)
+        run_id = f"{source_id}_{version_found}"
+        return field, run_id
+
     def _extract_source_id(self, filename_or_stem: str) -> str:
         """
         Estrae il source_id dal nome file o stem.

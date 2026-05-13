@@ -150,11 +150,17 @@ class SourceSeekingEnv(gym.Env):
     L'agente (AUV) deve navigare in un campo di concentrazione
     per trovare la sorgente dell'inquinante.
 
-    Observation Space (36 valori):
-        - 1 concentrazione corrente
-        - 9 concentrazioni passate
-        - 9 x (Δx, Δy) spostamenti passati in metri
-        - 8 sensori concentrazione @ 20m (navigazione locale)
+    Observation Space (116 valori):
+        - 1  concentrazione corrente
+        - 9  concentrazioni passate
+        - 18 spostamenti passati (Δx, Δy) in metri
+        - 8  sensori concentrazione @ sensor_range (8 direzioni)
+        - 72 sensori concentrazione passati (9 timestep x 8 direzioni)
+        - 2  componenti vento (u, v)
+        - 2  componenti corrente (u, v)
+        - 2  vettore (Δx, Δy) verso posizione di max concentrazione vista
+        - 1  valore di max concentrazione vista
+        - 1  step dall'ultimo contatto col plume (normalizzato)
         (normalizzazione delegata a VecNormalize)
 
     Action Space:
@@ -162,11 +168,11 @@ class SourceSeekingEnv(gym.Env):
 
     Reward:
         - Bonus sorgente raggiunta + time bonus (terminale dominante)
-        - Reward distanza (segnale dominante continuo)
-        - Reward binario plume (+0.3 dentro, -0.3 fuori)
-        - Reward gradiente concentrazione (+0.1 aumento, -0.1 diminuzione)
+        - Reward distanza zone-based con retreat asymmetry (segnale dominante)
+        - Reward gradiente concentrazione (±0.05)
+        - Reward allineamento vento/corrente (±0.05)
         - Penalità per step (-0.1)
-        - Penalità bordi (-10) e terra
+        - Penalità bordi (-10), terra, stagnation
     """
 
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 10}
@@ -275,9 +281,19 @@ class SourceSeekingEnv(gym.Env):
         # Buffer distanze per stagnation penalty
         self._distance_history: List[float] = []
 
+        # Feature 3: posizione e valore della concentrazione massima rilevata finora
+        self._max_concentration_seen: float = 0.0
+        self._max_conc_position: Tuple[float, float] = (0.0, 0.0)
+
+        # Feature 4: step dall'ultimo contatto con il plume
+        self._steps_since_plume_contact: int = 0
+
         # Allowed sources per curriculum learning (sarà impostato dal CurriculumCallback)
         # Default vuoto: richiede che sia impostato dal training script
         self.allowed_sources: List[str] = []
+
+        # Weighted scenario sampling: dict "V2_1" → probability (impostato dal training script)
+        self.scenario_weights: Optional[Dict[str, float]] = None
 
         # History per analisi
         self.trajectory: List[np.ndarray] = []
@@ -290,6 +306,10 @@ class SourceSeekingEnv(gym.Env):
         # Rendering
         self._fig = None
         self._ax = None
+
+    def set_scenario_weights(self, weights: Optional[Dict[str, float]]) -> None:
+        """Aggiorna i pesi per il campionamento scenari (chiamato dal callback di curriculum)."""
+        self.scenario_weights = weights
 
     def _init_field(self):
         """Inizializza il campo di concentrazione."""
@@ -306,7 +326,7 @@ class SourceSeekingEnv(gym.Env):
     def _setup_observation_space(self):
         """Configura lo spazio delle osservazioni.
 
-        Osservazione (112 valori):
+        Osservazione (116 valori):
         - 1 concentrazione corrente
         - 9 concentrazioni passate (memory_length)
         - 9 * 2 spostamenti passati (Δx, Δy) normalizzati
@@ -314,9 +334,12 @@ class SourceSeekingEnv(gym.Env):
         - 9 * 8 = 72 sensori concentrazione passati @ sensor_range (9 timestep x 8 direzioni)
         - 2 componenti vento corrente (u, v)
         - 2 componenti corrente corrente (u, v)
+        - 2 vettore (Δx, Δy) verso posizione di concentrazione massima vista
+        - 1 valore di concentrazione massima vista
+        - 1 step dall'ultimo contatto col plume (normalizzato)
         """
-        obs_dim = 1 + self.config.memory_length + self.config.memory_length * 2 + 8 + (self.config.memory_length * 8) + 2 + 2
-        # = 1 + 9 + 18 + 8 + 72 + 2 + 2 = 112
+        obs_dim = 1 + self.config.memory_length + self.config.memory_length * 2 + 8 + (self.config.memory_length * 8) + 2 + 2 + 4
+        # = 1 + 9 + 18 + 8 + 72 + 2 + 2 + 4 = 116
 
         self.observation_space = spaces.Box(
             low=-np.inf,
@@ -440,7 +463,7 @@ class SourceSeekingEnv(gym.Env):
 
 
     def _get_observation(self) -> np.ndarray:
-        """Costruisce il vettore di osservazione (112 valori) RAW.
+        """Costruisce il vettore di osservazione (116 valori) RAW.
 
         Struttura:
         - [0]       : concentrazione corrente
@@ -450,6 +473,9 @@ class SourceSeekingEnv(gym.Env):
         - [36:108]  : 9*8=72 sensori concentrazione passati @ sensor_range
         - [108:110] : vento corrente (u, v) in m/s
         - [110:112] : corrente corrente (u, v) in m/s
+        - [112:114] : (Δx, Δy) verso posizione di concentrazione massima vista (m)
+        - [114]     : valore di concentrazione massima vista
+        - [115]     : step dall'ultimo contatto col plume (normalizzato su max_steps)
         """
         obs = []
 
@@ -513,6 +539,14 @@ class SourceSeekingEnv(gym.Env):
         else:
             obs.append(0.0)
             obs.append(0.0)
+
+        # Feature 3: vettore verso posizione di concentrazione massima + valore massimo
+        obs.append(self._max_conc_position[0] - x)
+        obs.append(self._max_conc_position[1] - y)
+        obs.append(self._max_concentration_seen)
+
+        # Feature 4: step dall'ultimo contatto col plume (normalizzato)
+        obs.append(float(self._steps_since_plume_contact) / self.config.max_steps)
 
         return np.array(obs, dtype=np.float32)
 
@@ -941,12 +975,24 @@ class SourceSeekingEnv(gym.Env):
             # TRAINING MODE: randomizza sorgente e carica field random
             # Se allowed_sources non yet populated da curriculum, usa sorgenti reali dal DataManager
             available_sources = self.allowed_sources if self.allowed_sources else self._data_manager.get_discovered_sources()
-            
+
             if not available_sources:
                 raise ValueError("Nessuna sorgente disponibile da allowed_sources o DataManager")
-            
-            source = self.np_random.choice(available_sources)
-            self.field, self._current_run_id = self._data_manager.get_random_field_for_source(source)
+
+            # Weighted scenario sampling: campiona (version, chunk_id) dai pesi se configurato
+            if self.scenario_weights:
+                keys = list(self.scenario_weights.keys())
+                probs = np.array([self.scenario_weights[k] for k in keys], dtype=float)
+                probs /= probs.sum()
+                chosen_idx = int(self.np_random.choice(len(keys), p=probs))
+                chosen_key = keys[chosen_idx]
+                version_str, chunk_str = chosen_key.rsplit('_', 1)
+                self.config.chunk_id = int(chunk_str)
+                source = self.np_random.choice(available_sources)
+                self.field, self._current_run_id = self._data_manager.get_random_field_for_source_version(source, version_str)
+            else:
+                source = self.np_random.choice(available_sources)
+                self.field, self._current_run_id = self._data_manager.get_random_field_for_source(source)
             # Estrai source_id dal run_id (es. 'SRC042_V1' -> 'SRC042')
             self.source_id = self._current_run_id.split('_')[0]
             
@@ -1031,6 +1077,14 @@ class SourceSeekingEnv(gym.Env):
 
         # Reset buffer distanze per stagnation penalty
         self._distance_history = []
+
+        # Reset feature 3: inizializza max concentration alla posizione di spawn
+        spawn_conc = self.field.get_concentration(spawn_pos[0], spawn_pos[1])
+        self._max_concentration_seen = float(spawn_conc) if not np.isnan(spawn_conc) else 0.0
+        self._max_conc_position = (float(spawn_pos[0]), float(spawn_pos[1]))
+
+        # Reset feature 4
+        self._steps_since_plume_contact = 0
 
         # Sincronizza vento e corrente al timestep di start usando TEMPO REALE (minuti)
         # dt_conc = 2 min/frame, dt_wind = 60 min/frame, dt_current = 2 min/frame
@@ -1140,6 +1194,15 @@ class SourceSeekingEnv(gym.Env):
         directional_conc = self._compute_directional_sensors()
         self._directional_conc_memory.pop(0)
         self._directional_conc_memory.append(directional_conc)
+
+        # Aggiorna feature 3 e 4
+        if conc_now > self.config.spawn_conc_threshold:
+            self._steps_since_plume_contact = 0
+            if conc_now > self._max_concentration_seen:
+                self._max_concentration_seen = float(conc_now)
+                self._max_conc_position = (float(self.state.x), float(self.state.y))
+        else:
+            self._steps_since_plume_contact += 1
 
         # Controlla terminazione
         terminated = False
@@ -1295,6 +1358,23 @@ gym.register(
     id='SourceSeeking-v0',
     entry_point='utils.source_seeking_env:SourceSeekingEnv',
 )
+
+
+class ScenarioWeightWrapper(gym.Wrapper):
+    """Wrapper esterno che espone set_scenario_weights come metodo accessibile via SubprocVecEnv.env_method.
+
+    Gymnasium 1.2+ non ha __getattr__ delegation nei Wrapper, quindi env_method
+    non riesce a raggiungere metodi degli env interni. Questo wrapper li espone esplicitamente.
+    """
+
+    def set_scenario_weights(self, weights: Optional[Dict[str, float]]) -> None:
+        inner = self.env
+        while hasattr(inner, 'env'):
+            inner = inner.env
+        inner.scenario_weights = weights
+
+    def action_masks(self) -> np.ndarray:
+        return self.env.action_masks()
 
 
 if __name__ == "__main__":
