@@ -84,6 +84,13 @@ class SourceSeekingConfig:
     # (nella stessa zona di distanza). Scoraggia il bypass della sorgente.
     retreat_penalty_multiplier: float = 3.0
 
+    # Reward mode per ablation study:
+    #   "full"                 → reward completa (default, modello v9)
+    #   "base"                 → reward semplificata: rimuove zone_mult, retreat_asymmetry,
+    #                            stagnazione, stagnazione direzionale; distanza lineare
+    #   "base_no_wind_reward"  → come "base" ma senza wind/current alignment
+    reward_mode: str = "full"
+
     # Distanza di misurazione dei sensori direzionali (8 direzioni).
     # Variabile per lo sweep sperimentale; il modello base è trainato con 20m.
     sensor_range: float = 20.0
@@ -128,6 +135,7 @@ class SourceSeekingConfig:
             stagnation_penalty=reward.get('stagnation_penalty', -1.5),
             directional_stagnation_threshold=reward.get('directional_stagnation_threshold', 0.15),
             directional_stagnation_penalty=reward.get('directional_stagnation_penalty', -0.5),
+            reward_mode=reward.get('reward_mode', 'full'),
             spawn_min_land_distance=spawn.get('min_land_distance', 50.0),
             spawn_start_frame=spawn.get('start_frame', 352),
             spawn_conc_threshold=spawn.get('conc_threshold', 0.5),
@@ -795,34 +803,37 @@ class SourceSeekingEnv(gym.Env):
             info['boundary'] = self.config.boundary_penalty
 
         # ============================================================
-        # 4. REWARD DISTANZA — ZONE-BASED + RETREAT ASYMMETRY
-        #
-        # Potenziale quadratico Φ(d) = (max_d - d)²
-        # Zone multiplier: aumenta progressivamente avvicinandosi (1× → 2.5×).
-        # Retreat factor: allontanarsi costa retreat_penalty_multiplier× di più
-        # che avvicinarsi nella stessa zona. Scoraggia il bypass della sorgente.
+        # 4. REWARD DISTANZA
         # ============================================================
-        _QUAD_MAX = 3000.0  # approssimazione diagonale del dominio (m)
-        raw_delta = (
-            (_QUAD_MAX - current_distance) ** 2 - (_QUAD_MAX - self.prev_distance) ** 2
-        ) / (_QUAD_MAX ** 2)
-
-        zone_mult = self._distance_zone_multiplier(current_distance)
+        reward_mode = self.config.reward_mode
         approaching = current_distance <= self.prev_distance
 
-        if approaching:
-            distance_reward = raw_delta * zone_mult * self.config.distance_reward_multiplier
+        if reward_mode == "full":
+            # Potenziale quadratico + zone multiplier + retreat asymmetry
+            _QUAD_MAX = 3000.0
+            raw_delta = (
+                (_QUAD_MAX - current_distance) ** 2 - (_QUAD_MAX - self.prev_distance) ** 2
+            ) / (_QUAD_MAX ** 2)
+            zone_mult = self._distance_zone_multiplier(current_distance)
+            if approaching:
+                distance_reward = raw_delta * zone_mult * self.config.distance_reward_multiplier
+            else:
+                distance_reward = (
+                    raw_delta * zone_mult
+                    * self.config.retreat_penalty_multiplier
+                    * self.config.distance_reward_multiplier
+                )
+            info['zone_multiplier'] = zone_mult
         else:
-            # Retreat: moltiplicatore zona + fattore penalità (raw_delta < 0)
+            # Base: delta distanza lineare, simmetrico, niente zone multiplier
             distance_reward = (
-                raw_delta * zone_mult
-                * self.config.retreat_penalty_multiplier
-                * self.config.distance_reward_multiplier
+                (self.prev_distance - current_distance)
+                * self.config.distance_reward_multiplier / 3000.0
             )
+            info['zone_multiplier'] = 1.0
 
         reward += distance_reward
         info['distance_reward'] = distance_reward
-        info['zone_multiplier'] = zone_mult
         info['approaching'] = approaching
 
         # ============================================================
@@ -839,7 +850,10 @@ class SourceSeekingEnv(gym.Env):
         # ============================================================
         # 5b. REWARD ALLINEAMENTO VENTO (controvento = upwind = verso sorgente)
         # ============================================================
-        if self._cached_wind_components is not None:
+        if reward_mode == "base_no_wind_reward":
+            info['wind_alignment_reward'] = 0.0
+            info['current_alignment_reward'] = 0.0
+        elif self._cached_wind_components is not None:
             wind_u, wind_v = self._cached_wind_components
             wind_norm = np.sqrt(wind_u ** 2 + wind_v ** 2)
             if wind_norm > 1e-6:
@@ -858,7 +872,9 @@ class SourceSeekingEnv(gym.Env):
         # ============================================================
         # 5c. REWARD ALLINEAMENTO CORRENTE (controcorrente = upstream = verso sorgente)
         # ============================================================
-        if self._cached_current_components is not None:
+        if reward_mode == "base_no_wind_reward":
+            pass  # già azzerato nel blocco 5b
+        elif self._cached_current_components is not None:
             current_u, current_v = self._cached_current_components
             current_norm = np.sqrt(current_u ** 2 + current_v ** 2)
             if current_norm > 1e-6:
@@ -896,33 +912,32 @@ class SourceSeekingEnv(gym.Env):
             info['land_proximity_penalty'] = proximity_penalty
 
         # ============================================================
-        # 8. STAGNATION PENALTY (nessun progresso nella finestra → scia sbagliata)
-        # Sospesa entro 250m dalla sorgente: l'agente deve poter cercare
-        # localmente senza essere penalizzato per non progredire linearmente.
+        # 8. STAGNATION PENALTY — solo in reward_mode "full"
         # ============================================================
-        self._distance_history.append(current_distance)
-        if len(self._distance_history) > self.config.stagnation_window:
-            self._distance_history.pop(0)
-
         near_source_search = current_distance < 250.0
-        if not near_source_search and len(self._distance_history) == self.config.stagnation_window:
-            window_start = self._distance_history[0]
-            window_best = min(self._distance_history)
-            improvement = window_start - window_best  # positivo = si è avvicinato
-            if improvement < self.config.stagnation_distance_threshold:
-                reward += self.config.stagnation_penalty
-                info['stagnation_penalty'] = self.config.stagnation_penalty
+        if reward_mode == "full":
+            self._distance_history.append(current_distance)
+            if len(self._distance_history) > self.config.stagnation_window:
+                self._distance_history.pop(0)
+
+            if not near_source_search and len(self._distance_history) == self.config.stagnation_window:
+                window_start = self._distance_history[0]
+                window_best = min(self._distance_history)
+                improvement = window_start - window_best
+                if improvement < self.config.stagnation_distance_threshold:
+                    reward += self.config.stagnation_penalty
+                    info['stagnation_penalty'] = self.config.stagnation_penalty
+                else:
+                    info['stagnation_penalty'] = 0.0
             else:
                 info['stagnation_penalty'] = 0.0
         else:
             info['stagnation_penalty'] = 0.0
 
         # ============================================================
-        # 8b. STAGNATION PENALTY DIREZIONALE (oscillazione ripetuta)
-        # Efficienza = |spostamento netto| / distanza totale percorsa
-        # Sospesa entro 250m dalla sorgente (stessa logica di 8).
+        # 8b. STAGNATION PENALTY DIREZIONALE — solo in reward_mode "full"
         # ============================================================
-        if not near_source_search and self.steps >= self.config.memory_length:
+        if reward_mode == "full" and not near_source_search and self.steps >= self.config.memory_length:
             dxs = [d[0] for d in self._displacement_memory]
             dys = [d[1] for d in self._displacement_memory]
             net_disp = np.sqrt(sum(dxs) ** 2 + sum(dys) ** 2)

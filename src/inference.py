@@ -444,6 +444,8 @@ def run_inference(
     chunk_ids: List[int] = None,
     save_videos: bool = True,
     config_override: Optional[dict] = None,
+    save_plots: bool = True,
+    seed: Optional[int] = None,
 ):
     """
     Esegue l'inferenza completa su 26 sorgenti held-out (SRC107-SRC132, 20% del totale 132) con chunk multipli per fonte.
@@ -463,6 +465,11 @@ def run_inference(
         chunk_ids = [0, 1, 2]  # Default: Q1/4, Q1/2, Q3/4
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
+
+    if seed is not None:
+        np.random.seed(seed)
+        import random
+        random.seed(seed)
 
     config = config_override if config_override is not None else load_config(config_path)
     model = load_model(model_path)
@@ -600,8 +607,9 @@ def run_inference(
                         "steps": result.steps, "distance_history": dist_history,
                     })
 
-                    plot_path = version_dir / f"ep{ep+1:02d}_chunk{chunk_id}_trajectory.png"
-                    save_trajectory_plot(result, field, plot_path, success_threshold)
+                    if save_plots:
+                        plot_path = version_dir / f"ep{ep+1:02d}_chunk{chunk_id}_trajectory.png"
+                        save_trajectory_plot(result, field, plot_path, success_threshold)
 
                     init_dist = f"{result.initial_distance:.0f}m"
                     if result.success:
@@ -800,5 +808,56 @@ def main():
         )
 
 
+def main_ablation_inference():
+    """Inferenza sui 2 modelli ablation (penultimo=base, ultimo=base_no_wind_reward).
+    Nessun plot generato; spawn riproducibili con seed fisso.
+    """
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
+    DATA_DIR = str(PROJECT_ROOT / "data")
+    trained_dir = PROJECT_ROOT / "trained_models"
+
+    run_dirs = sorted([d for d in trained_dir.iterdir()
+                       if d.is_dir() and d.name.startswith("ppo_")])
+    if len(run_dirs) < 2:
+        print("ERRORE: Meno di 2 modelli trovati in trained_models/")
+        sys.exit(1)
+
+    ablation_runs = run_dirs[-2:]  # penultimo=base, ultimo=base_no_wind_reward
+    ablation_configs = [
+        str(PROJECT_ROOT / "utils" / "config_base.yaml"),
+        str(PROJECT_ROOT / "utils" / "config_base_no_wind_reward.yaml"),
+    ]
+    ablation_names = ["base", "base_no_wind_reward"]
+
+    for run_dir, config_path, name in zip(ablation_runs, ablation_configs, ablation_names):
+        model_path = run_dir / "models" / "final_model.zip"
+        if not model_path.exists():
+            model_path = run_dir / "models" / "best" / "best_model.zip"
+        if not model_path.exists():
+            print(f"ERRORE: Nessun modello trovato in {run_dir}/models/ — skip")
+            continue
+
+        output_dir = str(PROJECT_ROOT / "evaluations" / f"evaluations_ablation_{name}")
+
+        print(f"\n{'='*70}")
+        print(f"Ablation inference: reward_mode={name}")
+        print(f"Modello: {model_path}")
+        print(f"Output: {output_dir}")
+        print(f"{'='*70}\n")
+
+        run_inference(
+            model_path=str(model_path),
+            config_path=config_path,
+            data_dir=DATA_DIR,
+            output_dir=output_dir,
+            n_episodes=5,
+            deterministic=True,
+            sources_csv="Coordinate_Sorgenti_FaseII.csv",
+            chunk_ids=[0, 1, 2],
+            save_videos=False,
+            save_plots=False,
+        )
+
+
 if __name__ == "__main__":
-    main()
+    main_ablation_inference()

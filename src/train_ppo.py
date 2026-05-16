@@ -57,13 +57,19 @@ class SourceSeekingCallback(BaseCallback):
     Raccoglie loss e success_rate per i plot finali.
     """
 
-    def __init__(self, verbose: int = 0):
+    def __init__(self, reward_mode: str = "full", verbose: int = 0):
         super().__init__(verbose)
+        self.reward_mode = reward_mode
         self.success_rate = []
         self._loss_steps = []
         self._loss_values = []
         self._sr_steps = []
         self._sr_values = []
+
+    def _on_training_start(self) -> None:
+        _mode_id = {"full": 0, "base": 1, "base_no_wind_reward": 2}.get(self.reward_mode, -1)
+        self.logger.record("training/reward_mode_id", _mode_id)
+        print(f"[SourceSeekingCallback] reward_mode = {self.reward_mode} (id={_mode_id})")
 
     def _on_step(self) -> bool:
         # Raccogli info solo a fine episodio (dones=True)
@@ -554,10 +560,13 @@ def train(
     with open(run_dir / "config.yaml", 'w') as f:
         yaml.dump(config, f)
 
+    reward_mode = config.get('environment', {}).get('reward', {}).get('reward_mode', 'full')
+
     print(f"=" * 60)
     print(f"HYDRAS Source Seeking - PPO Training")
     print(f"=" * 60)
     print(f"Run name: {run_name}")
+    print(f"Reward mode: {reward_mode}")
     print(f"Output directory: {run_dir}")
     print(f"Number of parallel workers: {n_envs}")
 
@@ -901,7 +910,7 @@ def train(
     callbacks.append(checkpoint_callback)
 
     # Custom callback
-    custom_callback = SourceSeekingCallback(verbose=1)
+    custom_callback = SourceSeekingCallback(reward_mode=reward_mode, verbose=1)
     callbacks.append(custom_callback)
 
     callback = CallbackList(callbacks)
@@ -1014,11 +1023,10 @@ def main():
             print(f"Fine-tuning from latest model (auto-detected): {resume_from}\n")
         else:
             print("No existing model found — training from scratch\n")
-    
+
     sweep = training_cfg.get('sensor_range_sweep', [])
 
     if sweep:
-        # Ogni fine-tuning parte sempre dal modello base (no catena)
         base_resume = resume_from
         print(f"Sensor range sweep: {sweep} m")
         print(f"Base model (fisso per tutti gli step): {base_resume}\n")
@@ -1027,13 +1035,10 @@ def main():
             print(f"  Fine-tuning sensor_range = {sr}m")
             print(f"  Resume from: {base_resume}")
             print(f"{'='*60}\n")
-
-            # Aggiorna sensor_range nel config su disco prima di ogni run
             cfg = load_config(config_path)
             cfg['agent']['sensor_range'] = sr
             with open(config_path, 'w') as f:
                 yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False)
-
             _, run_dir = train(
                 config_path=config_path,
                 output_dir=output_dir,
@@ -1042,9 +1047,7 @@ def main():
                 data_dir=data_dir,
                 resume_from=base_resume,
             )
-
             print(f"\n  → sr={sr}m completato. Modello in: {run_dir / 'models' / 'final_model.zip'}")
-
         print(f"\nSweep completato. Modelli in: {output_dir}")
     else:
         train(
@@ -1057,5 +1060,55 @@ def main():
         )
 
 
+def main_ablation():
+    """Esegue sequenzialmente i training ablation (base e base_no_wind_reward)."""
+    import os
+    os.chdir(PROJECT_ROOT)
+
+    output_dir = str(PROJECT_ROOT / "trained_models")
+    data_dir   = str(PROJECT_ROOT / "data")
+
+    if not Path(data_dir).exists():
+        raise FileNotFoundError(
+            f"Cartella dati NC non trovata: {data_dir}\n"
+            f"Scarica i file .nc di simulazione MIKE21 nella cartella 'data/'"
+        )
+
+    ablation_configs = [
+        str(PROJECT_ROOT / "utils" / "config_base.yaml"),
+        str(PROJECT_ROOT / "utils" / "config_base_no_wind_reward.yaml"),
+    ]
+
+    for i, config_path in enumerate(ablation_configs, 1):
+        config = load_config(config_path)
+        reward_mode = config.get('environment', {}).get('reward', {}).get('reward_mode', '?')
+        print(f"\n{'='*60}")
+        print(f"  ABLATION {i}/{len(ablation_configs)}: reward_mode={reward_mode}")
+        print(f"  Config: {config_path}")
+        print(f"{'='*60}\n")
+
+        training_cfg = config.get('training', {})
+        resume_from = training_cfg.get('resume_from', None)
+        if resume_from:
+            resume_path = Path(resume_from)
+            if not resume_path.is_absolute():
+                resume_path = (PROJECT_ROOT / resume_path).resolve()
+            resume_from = str(resume_path)
+        else:
+            resume_from = None
+
+        train(
+            config_path=config_path,
+            output_dir=output_dir,
+            n_envs=2,
+            seed=42,
+            data_dir=data_dir,
+            resume_from=resume_from,
+        )
+        print(f"\n  → Ablation {i} (reward_mode={reward_mode}) completata.\n")
+
+    print("Tutti i training ablation completati.")
+
+
 if __name__ == "__main__":
-    main()
+    main_ablation()
