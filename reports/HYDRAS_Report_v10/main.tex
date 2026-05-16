@@ -1,0 +1,409 @@
+\documentclass[12pt, a4paper]{article}
+
+% ─── Encoding e lingua ────────────────────────────────────────────────────────
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[italian]{babel}
+
+% ─── Layout ───────────────────────────────────────────────────────────────────
+\usepackage[top=2.5cm, bottom=2.5cm, left=2.8cm, right=2.8cm, headheight=15pt]{geometry}
+\usepackage{parskip}
+\setlength{\parindent}{0pt}
+
+% ─── Font ─────────────────────────────────────────────────────────────────────
+\usepackage{lmodern}
+
+% ─── Grafica e colori ─────────────────────────────────────────────────────────
+\usepackage{graphicx}
+\usepackage[table]{xcolor}
+\definecolor{headerbg}{RGB}{30, 80, 140}
+\definecolor{rowalt}{RGB}{235, 242, 252}
+\definecolor{best}{RGB}{198, 239, 206}
+\definecolor{tied}{RGB}{255, 235, 150}
+
+% ─── Tabelle ──────────────────────────────────────────────────────────────────
+\usepackage{booktabs}
+\usepackage{array}
+\newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+
+% ─── Link e metadati ──────────────────────────────────────────────────────────
+\usepackage[hidelinks]{hyperref}
+
+% ─── Matematica ───────────────────────────────────────────────────────────────
+\usepackage{amsmath}
+
+% ─── Sezioni compatte ─────────────────────────────────────────────────────────
+\usepackage{titlesec}
+\titlespacing*{\section}{0pt}{14pt}{6pt}
+\titlespacing*{\subsection}{0pt}{10pt}{4pt}
+
+% ─── Header / Footer ──────────────────────────────────────────────────────────
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small HYDRAS --- Report v10}
+\fancyhead[R]{\small \today}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% ─── Codice inline ────────────────────────────────────────────────────────────
+\usepackage{listings}
+\lstset{basicstyle=\ttfamily\small, breaklines=true}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\begin{document}
+
+% ─── Titolo ───────────────────────────────────────────────────────────────────
+\begin{center}
+    {\LARGE\bfseries HYDRAS --- Report v10}\\[6pt]
+    {\large Studio di Ablation della Funzione di Reward}
+\end{center}
+\vspace{0.3cm}
+\hrule
+\vspace{0.5cm}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Algoritmo PPO}
+
+L'agente \`e addestrato con \textbf{MaskablePPO} (sb3-contrib), estensione di Proximal Policy
+Optimization che integra l'action masking per impedire collisioni con la costa.
+L'architettura della policy \`e una MLP con due reti separate (attore e critico), ciascuna
+composta da due strati nascosti da 256 neuroni con attivazione $\tanh$.
+Il training utilizza \textbf{SubprocVecEnv} con 6 worker paralleli (2 worker $\times$ 3 chunk)
+avviati con \texttt{start\_method='fork'} per ridurre l'overhead di inizializzazione
+e raggiungere un throughput di circa $300\,\text{K}$ step/ora.
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Dataset --- 132 Sorgenti $\times$ 4 Scenari Vento}
+
+\subsection{Acquisizione e Gestione Dati}
+
+Il dataset \`e composto da simulazioni oceanografiche MIKE21 su un dominio marino di
+$3 \times 2.5\,\text{km}$ nella baia di Cecina (costa toscana, UTM32N), con risoluzione
+spaziale di $10\,\text{m}$ e passo temporale di $10\,\text{s}$.
+Ogni sorgente \`e identificata da un codice univoco (SRC001--SRC132); per ciascuna sorgente
+sono disponibili 4 file di concentrazione corrispondenti ai 4 scenari di vento V0--V3.
+
+\subsection{I Quattro Scenari Vento (V0--V3)}
+
+I quattro scenari di vento sono caratterizzati da direzioni e intensit\`a differenti,
+generando plume con morfologie diverse. Il modello viene valutato su tutti e 4 gli scenari
+per verificarne la robustezza rispetto alle condizioni ambientali.
+
+\subsection{Split Training / Inferenza}
+
+Il dataset \`e suddiviso in modo da garantire una valutazione su sorgenti mai viste
+durante il training:
+\begin{itemize}
+    \item \textbf{Training:} SRC001--SRC106 (80\%, 106 sorgenti)
+    \item \textbf{Inferenza:} SRC107--SRC132 (20\%, 26 sorgenti)
+\end{itemize}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Ambiente di Simulazione}
+
+L'ambiente implementa l'interfaccia \texttt{gymnasium.Env} con spazio delle azioni discreto
+a 8 direzioni. Ogni episodio ha una durata massima di 1080 step ($= 3\,\text{h}$ di tempo
+simulato). Il dataset \`e suddiviso in 3 chunk temporali (Q1/4, Q1/2, Q3/4) per variare
+le condizioni iniziali del campo di concentrazione lungo l'asse temporale della simulazione.
+
+\subsection{Constraints di Spawn e Fallback Automatico}
+
+Lo spawn dell'agente viene campionato uniformemente nelle celle marine del dominio che
+soddisfano simultaneamente tre condizioni: (1) assenza di terra secondo la land mask,
+(2) distanza dalla costa $\geq 50\,\text{m}$, (3) concentrazione chimica $c \geq 0.5$.
+Se nessuna cella soddisfa tutte e tre le condizioni, il threshold di concentrazione
+viene abbassato progressivamente fino a trovare una posizione valida (fallback automatico).
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Training e Architettura}
+
+\subsection{Input della Rete Neurale --- 116 Dimensioni}
+
+L'observation space \`e composto da 116 dimensioni che forniscono all'agente
+una rappresentazione completa del campo chimico locale, della propria cinematica
+e delle condizioni ambientali (vento e corrente).
+Tutte le feature sono normalizzate nell'intervallo $[0,1]$ o $[-1,1]$.
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{L{4.5cm} C{1.2cm} L{9cm}}
+\toprule
+\textbf{Feature} & \textbf{Dim.} & \textbf{Descrizione} \\
+\midrule
+Concentrazione attuale & 1 & Concentrazione normalizzata nella posizione corrente \\
+Memoria concentrazione & 9 & Ultime 9 letture di concentrazione \\
+Gradienti spaziali & 8 & Gradiente di concentrazione nelle 8 direzioni \\
+Posizione normalizzata & 2 & $x, y$ nel dominio $[0,1]^2$ \\
+Velocit\`a agente & 2 & $v_x, v_y$ normalizzati \\
+Vento (componenti) & 2 & $u_w, v_w$ normalizzati \\
+Corrente (componenti) & 2 & $u_c, v_c$ normalizzati \\
+Memoria spostamenti & 18 & Ultimi 9 spostamenti $(dx, dy)$ \\
+Sensori direzionali & 8 & Concentrazione nelle 8 direzioni entro 20\,m \\
+Massima conc. osservata & 3 & Valore, posizione $(x,y)$ del massimo storico \\
+Step senza plume & 1 & Step dall'ultimo contatto con il plume (norm.) \\
+Step totali & 1 & Progress episodio normalizzato \\
+Distanza dalla costa & 1 & Distanza minima dalla costa normalizzata \\
+\bottomrule
+\end{tabular}
+\caption{Input della rete neurale: 116 dimensioni totali.}
+\end{table}
+
+\subsection{Parametri di Training}
+
+I tre modelli dell'ablation study condividono gli stessi iperparametri; l'unica
+differenza tra le rispettive configurazioni \`e il parametro \texttt{reward\_mode}.
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{L{5cm} C{4cm}}
+\toprule
+\textbf{Parametro} & \textbf{Valore} \\
+\midrule
+Algoritmo & MaskablePPO \\
+Policy & MlpPolicy (256$\times$256, tanh) \\
+Step totali & 6\,000\,000 \\
+$n\_steps$ & 4096 \\
+Batch size & 128 \\
+Epoche & 10 \\
+$\gamma$ & 0.99 \\
+$\lambda$ (GAE) & 0.95 \\
+Clip range & 0.15 \\
+$v_f$ coef & 0.3 \\
+Ent. coef & 0.01 \\
+Max grad norm & 0.5 \\
+Target KL & 0.01 \\
+\bottomrule
+\end{tabular}
+\caption{Iperparametri comuni ai tre training dell'ablation study.}
+\end{table}
+
+\subsection{Learning Rate Decrescente}
+
+Il learning rate segue uno schedule a gradini decrescenti: una fase iniziale ad alto
+learning rate favorisce l'esplorazione, mentre le fasi successive affinano la policy
+con aggiornamenti sempre pi\`u conservativi.
+Durante il training, la distribuzione degli scenari evolve progressivamente verso
+i casi pi\`u difficili tramite un parametro $\alpha \in [0,1]$: per $\alpha = 0$
+la distribuzione \`e uniforme, per $\alpha \to 1$ il peso \`e concentrato sugli
+scenari con vento pi\`u complesso (V2) e sui chunk temporali centrali.
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{minipage}{0.45\linewidth}
+\centering
+\begin{tabular}{C{3.5cm} C{2cm}}
+\toprule
+\textbf{Step} & \textbf{LR} \\
+\midrule
+0 -- 2\,000\,000 & $3 \times 10^{-4}$ \\
+2\,000\,000 -- 4\,000\,000 & $1 \times 10^{-4}$ \\
+4\,000\,000 -- 5\,000\,000 & $5 \times 10^{-5}$ \\
+5\,000\,000 -- 6\,000\,000 & $1 \times 10^{-5}$ \\
+\bottomrule
+\end{tabular}
+\caption{Schedule del learning rate.}
+\end{minipage}
+\hfill
+\begin{minipage}{0.45\linewidth}
+\centering
+\begin{tabular}{C{3.5cm} C{2cm}}
+\toprule
+\textbf{Step} & \textbf{$\alpha$} \\
+\midrule
+0 -- 2\,000\,000 & 0.0 \\
+2\,000\,000 -- 4\,000\,000 & 0.5 \\
+4\,000\,000 -- 6\,000\,000 & 0.8 \\
+\bottomrule
+\end{tabular}
+\caption{Curriculum sugli scenari.}
+\end{minipage}
+\end{table}
+
+\clearpage
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Studio di Ablation della Funzione di Reward}
+
+\subsection{Motivazione}
+
+\`E stato condotto uno studio di ablation per verificare
+l'effetto dei diversi componenti della funzione di reward sulle prestazioni dell'agente.
+L'obiettivo \`e determinare quali componenti siano effettivamente necessari e quali
+possano invece introdurre segnali di rinforzo fuorvianti.
+
+\subsection{Le Tre Varianti di Reward}
+
+Sono stati definiti tre modi di reward, configurabili tramite il parametro \texttt{reward\_mode}
+nel file di configurazione. L'observation space (116 dimensioni) rimane identico in tutti e tre.
+
+\subsubsection*{\texttt{full} --- Reward Completa (modello di riferimento)}
+
+La reward function completa, utilizzata nel modello \texttt{ppo\_20260513}:
+
+\begin{itemize}
+    \item Bonus sorgente raggiunta: $+100$ (+ time bonus fino a $+50$)
+    \item Penalt\`a uscita dal dominio: $-10$
+    \item Reward distanza quadratica con zone multiplier e retreat asymmetry ($\times 3$)
+    \item Reward gradiente di concentrazione: $\pm 0.05$
+    \item Reward allineamento vento: $\pm 0.05$
+    \item Reward allineamento corrente: $\pm 0.05$
+    \item Penalt\`a tempo: $-0.1$ per step
+    \item Penalt\`a land proximity: fino a $-15$
+    \item Stagnation penalty: $-1.5$ (finestra 15 step)
+    \item Directional stagnation penalty: $-0.5$
+\end{itemize}
+
+\subsubsection*{\texttt{base} --- Reward di Base}
+
+Versione semplificata: rimossi i componenti ad hoc (stagnation, zone multiplier,
+retreat asymmetry), distanza lineare al posto di quella quadratica.
+Wind e current alignment rimangono attivi.
+
+\begin{itemize}
+    \item Bonus sorgente: $+100$ (+ time bonus)
+    \item Penalt\`a uscita dominio: $-10$
+    \item Reward distanza lineare: $(d_{t-1} - d_t) \times 100 / 3000$
+    \item Reward gradiente concentrazione: $\pm 0.05$
+    \item Reward allineamento vento: $\pm 0.05$
+    \item Reward allineamento corrente: $\pm 0.05$
+    \item Penalt\`a tempo: $-0.1$ per step
+    \item Penalt\`a land proximity: fino a $-15$
+\end{itemize}
+
+\subsubsection*{\texttt{minimal} --- Reward Minima}
+
+Identica a \texttt{base}, con wind e current alignment rimossi dal reward.
+Le relative osservazioni rimangono nell'input della rete invariate.
+
+\begin{itemize}
+    \item Bonus sorgente: $+100$ (+ time bonus)
+    \item Penalt\`a uscita dominio: $-10$
+    \item Reward distanza lineare: $(d_{t-1} - d_t) \times 100 / 3000$
+    \item Reward gradiente concentrazione: $\pm 0.05$
+    \item Penalt\`a tempo: $-0.1$ per step
+    \item Penalt\`a land proximity: fino a $-15$
+\end{itemize}
+
+\subsection{Setup del Training Sequenziale}
+
+I modelli \texttt{base} e \texttt{minimal} sono stati addestrati
+sequenzialmente da zero, ciascuno per 6\,000\,000 step, con gli stessi
+iperparametri e lo stesso observation space del modello di riferimento \texttt{full}.
+Il training \`e stato avviato automaticamente dallo script \texttt{src/train\_ppo.py}
+tramite la funzione \texttt{main\_ablation()}, senza intervento manuale tra i due run.
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabular}{L{4.2cm} C{3.8cm} C{4cm}}
+\toprule
+\textbf{Modello} & \textbf{Config} & \textbf{reward\_mode} \\
+\midrule
+ppo\_20260513\_154951 & config.yaml & \texttt{full} \\
+ppo\_20260516\_095551 & config\_base.yaml & \texttt{base} \\
+ppo\_20260516\_143937 & config\_base\_no\_wind.yaml & \texttt{minimal} \\
+\bottomrule
+\end{tabular}
+\caption{Modelli addestrati nell'ablation study con relativa configurazione.}
+\end{table}
+
+\subsection{Risultati}
+
+L'inferenza \`e stata condotta sulle 26 sorgenti held-out (SRC107--SRC132),
+3 chunk temporali (Q1/4, Q1/2, Q3/4), 4 scenari vento (V0--V3),
+5 episodi per scenario --- per un totale di \textbf{1560 episodi} per modello.
+La policy \`e stata valutata in modalit\`a deterministica.
+
+\begin{table}[htbp]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\small
+\newcommand{\dpos}[1]{{\scriptsize\textcolor{green!50!black}{(+#1\%)}}}
+\newcommand{\dneg}[1]{{\scriptsize\textcolor{red!70!black}{(-#1\%)}}}
+\newcommand{\dzero}{{\scriptsize\textcolor{gray}{(0\%)}}}
+\begin{tabular}{L{3.5cm} C{2.4cm} C{3.2cm} C{3.2cm}}
+\toprule
+\rowcolor{headerbg}
+\textcolor{white}{\textbf{Metrica}} &
+\textcolor{white}{\textbf{base}} &
+\textcolor{white}{\textbf{full}} &
+\textcolor{white}{\textbf{minimal}} \\
+\midrule
+\rowcolor{rowalt}
+\textbf{SR globale} & 88{,}3\% & 95{,}6\% \dpos{7{,}3} & \textbf{96{,}9\%} \dpos{1{,}3} \\
+Dist. iniziale media & 799{,}9\,m & 802{,}1\,m & 801{,}1\,m \\
+\rowcolor{rowalt}
+Step medi (successo) & 113{,}8 ($\sim$19{,}0\,min) & 129{,}6 ($\sim$21{,}6\,min) & 129{,}2 ($\sim$21{,}5\,min) \\
+\midrule
+V0 & 99{,}5\% & 98{,}0\% \dneg{1{,}5} & 100{,}0\% \dpos{2{,}0} \\
+\rowcolor{rowalt}
+V1 & 95{,}4\% & 99{,}0\% \dpos{3{,}6} & 99{,}0\% \dzero \\
+V2 & 67{,}9\% & 88{,}5\% \dpos{20{,}6} & 88{,}7\% \dpos{0{,}2} \\
+\rowcolor{rowalt}
+V3 & 90{,}3\% & 97{,}0\% \dpos{6{,}7} & 99{,}7\% \dpos{2{,}7} \\
+\midrule
+Q1/4 & 100{,}0\% & 100{,}0\% \dzero & 100{,}0\% \dzero \\
+\rowcolor{rowalt}
+Q1/2 & 74{,}4\% & 93{,}7\% \dpos{19{,}3} & 93{,}5\% \dneg{0{,}2} \\
+Q3/4 & 90{,}4\% & 93{,}0\% \dpos{2{,}6} & 97{,}1\% \dpos{4{,}1} \\
+\bottomrule
+\end{tabular}
+\caption{Confronto delle prestazioni dei tre modelli su 1560 episodi ciascuno
+         (26 sorgenti held-out, 4 venti, 3 chunk, 5 episodi).
+         I delta sono calcolati rispetto alla colonna precedente.}
+\end{table}
+
+\subsection{Conclusioni}
+
+\subsubsection*{Reward minima vs.\ reward completa}
+
+Il modello \texttt{minimal} ottiene un success rate del \textbf{97\%},
+superando sia il modello \texttt{full} (96\%) che \texttt{base} (88\%),
+con configurazione di training identica e stesso observation space.
+Questo risultato indica che i componenti aggiuntivi della reward \texttt{full}
+(stagnation penalty, zone multiplier, retreat asymmetry) non producono un guadagno
+misurabile rispetto a una reward lineare pi\`u semplice.
+
+\subsubsection*{Effetto del wind/current alignment}
+
+Il delta pi\`u significativo \`e tra \texttt{base} e \texttt{minimal}:
+$-9\%$ di success rate globale, con un crollo di circa 20 punti percentuali
+su Q1/2 e su V2.
+I reward di allineamento vento e corrente ($\pm 0.05$ ciascuno) assumono che la sorgente
+si trovi sempre controvento/controcorrente rispetto all'agente. Questa ipotesi non \`e
+valida in un ambiente costiero complesso, dove riflessioni, correnti locali e
+morfologia della costa rendono il percorso ottimale non riducibile alla direzione del flusso.
+Il segnale risultante \`e in conflitto con il gradiente chimico in una frazione rilevante
+degli scenari, degradando la politica appresa.
+
+Si osserva inoltre che i componenti aggiuntivi della reward \texttt{full}
+(stagnation, zone multiplier, retreat asymmetry) sembrano svolgere in parte il ruolo di
+compensare il segnale negativo introdotto dal wind/current alignment, portando il
+risultato finale a un livello comparabile con \texttt{minimal} nonostante
+la presenza dello stesso segnale fuorviante.
+
+\subsubsection*{Ruolo del gradiente chimico}
+
+Il gradiente di concentrazione ($\pm 0.05$) \`e l'unico segnale direzionale
+nella reward \texttt{minimal}. Essendo calcolato direttamente sul campo
+di concentrazione simulato, incorpora implicitamente l'effetto di vento e corrente ---
+poich\'e il plume si disperde seguendo questi flussi. L'agente non necessita di ricevere
+l'informazione sul vento nel reward se pu\`o gi\`a leggerla nella struttura spaziale
+del campo chimico.
+
+\subsubsection*{Osservazioni sulla reward engineering}
+
+I risultati suggeriscono un principio generale per questo tipo di problema:
+\textbf{un observation space ricco rende il reward shaping complesso ridondante}.
+I componenti aggiuntivi del modello \texttt{full} erano stati introdotti iterativamente
+per correggere failure mode osservati con versioni precedenti dell'observation space.
+Con 116 dimensioni di osservazione --- in particolare il gradiente chimico direzionale,
+la memoria degli spostamenti e la storia della concentrazione --- l'agente dispone di
+informazioni sufficienti per navigare efficacemente senza spinte esplicite aggiuntive
+nel reward.
+
+\end{document}
