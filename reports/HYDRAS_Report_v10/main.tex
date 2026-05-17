@@ -44,7 +44,7 @@
 \pagestyle{fancy}
 \fancyhf{}
 \fancyhead[L]{\small HYDRAS --- Report v10}
-\fancyhead[R]{\small \today}
+\fancyhead[R]{}
 \fancyfoot[C]{\thepage}
 \renewcommand{\headrulewidth}{0.4pt}
 
@@ -84,15 +84,8 @@ Il dataset \`e composto da simulazioni oceanografiche MIKE21 su un dominio marin
 $3 \times 2.5\,\text{km}$ nella baia di Cecina (costa toscana, UTM32N), con risoluzione
 spaziale di $10\,\text{m}$ e passo temporale di $10\,\text{s}$.
 Ogni sorgente \`e identificata da un codice univoco (SRC001--SRC132); per ciascuna sorgente
-sono disponibili 4 file di concentrazione corrispondenti ai 4 scenari di vento V0--V3.
-
-\subsection{I Quattro Scenari Vento (V0--V3)}
-
-I quattro scenari di vento sono caratterizzati da direzioni e intensit\`a differenti,
-generando plume con morfologie diverse. Il modello viene valutato su tutti e 4 gli scenari
-per verificarne la robustezza rispetto alle condizioni ambientali.
-
-\subsection{Split Training / Inferenza}
+sono disponibili 4 file di concentrazione corrispondenti ai 4 scenari di vento V0--V3,
+caratterizzati da direzioni e intensit\`a differenti che generano plume con morfologie diverse.
 
 Il dataset \`e suddiviso in modo da garantire una valutazione su sorgenti mai viste
 durante il training:
@@ -111,11 +104,22 @@ le condizioni iniziali del campo di concentrazione lungo l'asse temporale della 
 
 \subsection{Constraints di Spawn e Fallback Automatico}
 
-Lo spawn dell'agente viene campionato uniformemente nelle celle marine del dominio che
-soddisfano simultaneamente tre condizioni: (1) assenza di terra secondo la land mask,
-(2) distanza dalla costa $\geq 50\,\text{m}$, (3) concentrazione chimica $c \geq 0.5$.
-Se nessuna cella soddisfa tutte e tre le condizioni, il threshold di concentrazione
-viene abbassato progressivamente fino a trovare una posizione valida (fallback automatico).
+L'agente viene inizializzato su una cella del plume (concentrazione $c \geq 0.5$)
+rispettando vincoli di distanza dalla sorgente e dalla costa.
+La procedura adotta una \textbf{cascata di anelli concentrici} in ordine decrescente
+di distanza dalla sorgente, garantendo spawn sempre lontani quando possibile:
+
+\begin{center}
+$(2000\text{--}2500\,\text{m}) \;\to\; (1500\text{--}2000\,\text{m}) \;\to\;
+(1000\text{--}1500\,\text{m}) \;\to\; (500\text{--}1000\,\text{m}) \;\to\;
+(250\text{--}500\,\text{m}) \;\to\; (50\text{--}250\,\text{m}) \;\to\; (0\text{--}50\,\text{m})$
+\end{center}
+
+Per ogni anello vengono selezionate le celle con $c \geq 0.5$ e distanza dalla terra
+$\geq 50\,\text{m}$; la cascata scende all'anello successivo solo se nessuna cella
+del corrente soddisfa entrambe le condizioni.
+\textbf{Fallback finale:} se nessun anello produce celle valide, lo spawn avviene
+in qualsiasi cella del plume senza vincoli di distanza dalla sorgente.
 
 % ══════════════════════════════════════════════════════════════════════════════
 \section{Training e Architettura}
@@ -156,41 +160,10 @@ Distanza dalla costa & 1 & Distanza minima dalla costa normalizzata \\
 
 I tre modelli dell'ablation study condividono gli stessi iperparametri; l'unica
 differenza tra le rispettive configurazioni \`e il parametro \texttt{reward\_mode}.
-
-\begin{table}[htbp]
-\centering
-\small
-\begin{tabular}{L{5cm} C{4cm}}
-\toprule
-\textbf{Parametro} & \textbf{Valore} \\
-\midrule
-Algoritmo & MaskablePPO \\
-Policy & MlpPolicy (256$\times$256, tanh) \\
-Step totali & 6\,000\,000 \\
-$n\_steps$ & 4096 \\
-Batch size & 128 \\
-Epoche & 10 \\
-$\gamma$ & 0.99 \\
-$\lambda$ (GAE) & 0.95 \\
-Clip range & 0.15 \\
-$v_f$ coef & 0.3 \\
-Ent. coef & 0.01 \\
-Max grad norm & 0.5 \\
-Target KL & 0.01 \\
-\bottomrule
-\end{tabular}
-\caption{Iperparametri comuni ai tre training dell'ablation study.}
-\end{table}
-
-\subsection{Learning Rate Decrescente}
-
-Il learning rate segue uno schedule a gradini decrescenti: una fase iniziale ad alto
-learning rate favorisce l'esplorazione, mentre le fasi successive affinano la policy
-con aggiornamenti sempre pi\`u conservativi.
-Durante il training, la distribuzione degli scenari evolve progressivamente verso
-i casi pi\`u difficili tramite un parametro $\alpha \in [0,1]$: per $\alpha = 0$
-la distribuzione \`e uniforme, per $\alpha \to 1$ il peso \`e concentrato sugli
-scenari con vento pi\`u complesso (V2) e sui chunk temporali centrali.
+Il learning rate segue uno schedule a gradini decrescenti e la distribuzione degli
+scenari evolve tramite un parametro $\alpha \in [0,1]$: per $\alpha = 0$ la
+distribuzione \`e uniforme, per $\alpha \to 1$ il peso \`e concentrato sugli scenari
+pi\`u difficili (V2) e sui chunk temporali centrali.
 
 \begin{table}[htbp]
 \centering
@@ -225,7 +198,30 @@ scenari con vento pi\`u complesso (V2) e sui chunk temporali centrali.
 \end{minipage}
 \end{table}
 
-\clearpage
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{L{5cm} C{4cm}}
+\toprule
+\textbf{Parametro} & \textbf{Valore} \\
+\midrule
+Algoritmo & MaskablePPO \\
+Policy & MlpPolicy (256$\times$256, tanh) \\
+Step totali & 6\,000\,000 \\
+$n\_steps$ & 4096 \\
+Batch size & 128 \\
+Epoche & 10 \\
+$\gamma$ & 0.99 \\
+$\lambda$ (GAE) & 0.95 \\
+Clip range & 0.15 \\
+$v_f$ coef & 0.3 \\
+Ent. coef & 0.01 \\
+Max grad norm & 0.5 \\
+Target KL & 0.01 \\
+\bottomrule
+\end{tabular}
+\caption{Iperparametri comuni ai tre training dell'ablation study.}
+\end{table}
 % ══════════════════════════════════════════════════════════════════════════════
 \section{Studio di Ablation della Funzione di Reward}
 
@@ -317,7 +313,9 @@ ppo\_20260516\_143937 & config\_base\_no\_wind.yaml & \texttt{minimal} \\
 L'inferenza \`e stata condotta sulle 26 sorgenti held-out (SRC107--SRC132),
 3 chunk temporali (Q1/4, Q1/2, Q3/4), 4 scenari vento (V0--V3),
 5 episodi per scenario --- per un totale di \textbf{1560 episodi} per modello.
-La policy \`e stata valutata in modalit\`a deterministica.
+La policy \`e stata valutata in modalit\`a deterministica
+(anzich\'e campionare dalla distribuzione di probabilit\`a sulle azioni,
+viene selezionata direttamente l'azione con probabilit\`a massima).
 
 \begin{table}[htbp]
 \centering
@@ -366,60 +364,52 @@ I grafici seguenti mostrano le distribuzioni di distanza iniziale, success rate,
 
 \begin{figure}[H]
   \centering
-  \begin{minipage}[t]{0.48\textwidth}
-    \centering
-    \includegraphics[width=\linewidth]{../../evaluations/evaluations_ablation_base/analysis/plot_initial_dist.png}
-    \caption{Distribuzione delle distanze iniziali --- \texttt{base}.}
-  \end{minipage}\hfill
-  \begin{minipage}[t]{0.48\textwidth}
-    \centering
-    \includegraphics[width=\linewidth]{../../evaluations/evaluations_ablation_base/analysis/plot_sr_analysis.png}
-    \caption{Success rate per scenario --- \texttt{base}.}
-  \end{minipage}
+  \includegraphics[width=0.82\linewidth]{../../evaluations/evaluations_ablation_base/analysis/plot_initial_dist.png}
+  \caption{Distribuzione delle distanze iniziali --- \texttt{base}.}
 \end{figure}
 
 \begin{figure}[H]
   \centering
-  \begin{minipage}[t]{0.48\textwidth}
-    \centering
-    \includegraphics[width=\linewidth]{../../evaluations/evaluations_ablation_base/analysis/plot_success_time_dist.png}
-    \caption{Distribuzione del tempo al successo --- \texttt{base}.}
-  \end{minipage}\hfill
-  \begin{minipage}[t]{0.48\textwidth}
-    \centering
-    \includegraphics[width=\linewidth]{../../evaluations/evaluations_ablation_base/analysis/plot_distance_over_time.png}
-    \caption{Distanza media dalla sorgente nel tempo --- \texttt{base}.}
-  \end{minipage}
+  \includegraphics[width=0.82\linewidth]{../../evaluations/evaluations_ablation_base/analysis/plot_sr_analysis.png}
+  \caption{Success rate per scenario --- \texttt{base}.}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.82\linewidth]{../../evaluations/evaluations_ablation_base/analysis/plot_success_time_dist.png}
+  \caption{Distribuzione del tempo al successo --- \texttt{base}.}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.82\linewidth]{../../evaluations/evaluations_ablation_base/analysis/plot_distance_over_time.png}
+  \caption{Distanza media dalla sorgente nel tempo --- \texttt{base}.}
 \end{figure}
 
 \subsubsection*{Modello \texttt{minimal}}
 
 \begin{figure}[H]
   \centering
-  \begin{minipage}[t]{0.48\textwidth}
-    \centering
-    \includegraphics[width=\linewidth]{../../evaluations/evaluations_ablation_base_no_wind_reward/analysis/plot_initial_dist.png}
-    \caption{Distribuzione delle distanze iniziali --- \texttt{minimal}.}
-  \end{minipage}\hfill
-  \begin{minipage}[t]{0.48\textwidth}
-    \centering
-    \includegraphics[width=\linewidth]{../../evaluations/evaluations_ablation_base_no_wind_reward/analysis/plot_sr_analysis.png}
-    \caption{Success rate per scenario --- \texttt{minimal}.}
-  \end{minipage}
+  \includegraphics[width=0.82\linewidth]{../../evaluations/evaluations_ablation_base_no_wind_reward/analysis/plot_initial_dist.png}
+  \caption{Distribuzione delle distanze iniziali --- \texttt{minimal}.}
 \end{figure}
 
 \begin{figure}[H]
   \centering
-  \begin{minipage}[t]{0.48\textwidth}
-    \centering
-    \includegraphics[width=\linewidth]{../../evaluations/evaluations_ablation_base_no_wind_reward/analysis/plot_success_time_dist.png}
-    \caption{Distribuzione del tempo al successo --- \texttt{minimal}.}
-  \end{minipage}\hfill
-  \begin{minipage}[t]{0.48\textwidth}
-    \centering
-    \includegraphics[width=\linewidth]{../../evaluations/evaluations_ablation_base_no_wind_reward/analysis/plot_distance_over_time.png}
-    \caption{Distanza media dalla sorgente nel tempo --- \texttt{minimal}.}
-  \end{minipage}
+  \includegraphics[width=0.82\linewidth]{../../evaluations/evaluations_ablation_base_no_wind_reward/analysis/plot_sr_analysis.png}
+  \caption{Success rate per scenario --- \texttt{minimal}.}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.82\linewidth]{../../evaluations/evaluations_ablation_base_no_wind_reward/analysis/plot_success_time_dist.png}
+  \caption{Distribuzione del tempo al successo --- \texttt{minimal}.}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.82\linewidth]{../../evaluations/evaluations_ablation_base_no_wind_reward/analysis/plot_distance_over_time.png}
+  \caption{Distanza media dalla sorgente nel tempo --- \texttt{minimal}.}
 \end{figure}
 
 \subsection{Conclusioni}
@@ -460,15 +450,5 @@ poich\'e il plume si disperde seguendo questi flussi. L'agente non necessita di 
 l'informazione sul vento nel reward se pu\`o gi\`a leggerla nella struttura spaziale
 del campo chimico.
 
-\subsubsection*{Osservazioni sulla reward engineering}
-
-I risultati suggeriscono un principio generale per questo tipo di problema:
-\textbf{un observation space ricco rende il reward shaping complesso ridondante}.
-I componenti aggiuntivi del modello \texttt{full} erano stati introdotti iterativamente
-per correggere failure mode osservati con versioni precedenti dell'observation space.
-Con 116 dimensioni di osservazione --- in particolare il gradiente chimico direzionale,
-la memoria degli spostamenti e la storia della concentrazione --- l'agente dispone di
-informazioni sufficienti per navigare efficacemente senza spinte esplicite aggiuntive
-nel reward.
 
 \end{document}
