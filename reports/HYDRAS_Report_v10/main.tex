@@ -138,22 +138,19 @@ Tutte le feature sono normalizzate nell'intervallo $[0,1]$ o $[-1,1]$.
 \toprule
 \textbf{Feature} & \textbf{Dim.} & \textbf{Descrizione} \\
 \midrule
-Concentrazione attuale & 1 & Concentrazione normalizzata nella posizione corrente \\
+Concentrazione attuale & 1 & Concentrazione nella posizione corrente \\
 Memoria concentrazione & 9 & Ultime 9 letture di concentrazione \\
-Gradienti spaziali & 8 & Gradiente di concentrazione nelle 8 direzioni \\
-Posizione normalizzata & 2 & $x, y$ nel dominio $[0,1]^2$ \\
-Velocit\`a agente & 2 & $v_x, v_y$ normalizzati \\
-Vento (componenti) & 2 & $u_w, v_w$ normalizzati \\
-Corrente (componenti) & 2 & $u_c, v_c$ normalizzati \\
-Memoria spostamenti & 18 & Ultimi 9 spostamenti $(dx, dy)$ \\
-Sensori direzionali & 8 & Concentrazione nelle 8 direzioni entro 20\,m \\
-Massima conc. osservata & 3 & Valore, posizione $(x,y)$ del massimo storico \\
-Step senza plume & 1 & Step dall'ultimo contatto con il plume (norm.) \\
-Step totali & 1 & Progress episodio normalizzato \\
-Distanza dalla costa & 1 & Distanza minima dalla costa normalizzata \\
+Memoria spostamenti & 18 & Ultimi 9 spostamenti $(\Delta x, \Delta y)$ in metri \\
+Sensori direzionali (correnti) & 8 & Concentrazione nelle 8 direzioni a 20\,m (step corrente) \\
+Memoria sensori direzionali & 72 & Concentrazione nelle 8 direzioni per i 9 timestep passati \\
+Vento & 2 & $u, v$ [m/s] correnti \\
+Corrente & 2 & $u, v$ [m/s] correnti \\
+Direzione max conc.\ vista & 2 & $(\Delta x, \Delta y)$ verso la posizione di concentrazione massima osservata nell'episodio \\
+Valore max conc.\ vista & 1 & Valore di concentrazione massima osservata nell'episodio \\
+Step senza plume & 1 & Step dall'ultimo contatto col plume (normalizzato su \texttt{max\_steps}) \\
 \bottomrule
 \end{tabular}
-\caption{Input della rete neurale: 116 dimensioni totali.}
+\caption{Input della rete neurale: 116 dimensioni totali ($1+9+18+8+72+2+2+2+1+1$).}
 \end{table}
 
 \subsection{Parametri di Training}
