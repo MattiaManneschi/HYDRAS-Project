@@ -38,3 +38,12 @@ venv/
 # Large model checkpoints (keep only final models for repo)
 trained_models/**/checkpoints/
 evaluations/
+
+# LaTeX auxiliary files
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.fls
+*.fdb_latexmk
