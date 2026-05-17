@@ -426,8 +426,8 @@ I grafici seguenti mostrano le distribuzioni di distanza iniziale, success rate,
 
 \subsubsection*{Reward minima vs.\ reward completa}
 
-Il modello \texttt{minimal} ottiene un success rate del \textbf{97\%},
-superando sia il modello \texttt{full} (96\%) che \texttt{base} (88\%),
+Il modello \texttt{minimal} ottiene un success rate del \textbf{96{,}9\%},
+superando sia il modello \texttt{full} (95{,}6\%) che \texttt{base} (88{,}3\%),
 con configurazione di training identica e stesso observation space.
 Questo risultato indica che i componenti aggiuntivi della reward \texttt{full}
 (stagnation penalty, zone multiplier, retreat asymmetry) non producono un guadagno
@@ -436,8 +436,8 @@ misurabile rispetto a una reward lineare pi\`u semplice.
 \subsubsection*{Effetto del wind/current alignment}
 
 Il delta pi\`u significativo \`e tra \texttt{base} e \texttt{minimal}:
-$-9\%$ di success rate globale, con un crollo di circa 20 punti percentuali
-su Q1/2 e su V2.
+$-8{,}6\%$ di success rate globale, con un crollo di circa 20 punti percentuali
+su Q1/2 ($74{,}4\%$ vs $93{,}5\%$) e su V2 ($67{,}9\%$ vs $88{,}7\%$).
 I reward di allineamento vento e corrente ($\pm 0.05$ ciascuno) assumono che la sorgente
 si trovi sempre controvento/controcorrente rispetto all'agente. Questa ipotesi non \`e
 valida in un ambiente costiero complesso, dove riflessioni, correnti locali e
