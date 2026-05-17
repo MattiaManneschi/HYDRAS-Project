@@ -357,6 +357,70 @@ Q3/4 & 90{,}4\% & 93{,}0\% \dpos{2{,}6} & 97{,}1\% \dpos{4{,}1} \\
          I delta sono calcolati rispetto alla colonna precedente.}
 \end{table}
 
+\subsection{Analisi dei Risultati}
+
+I grafici seguenti mostrano le distribuzioni di distanza iniziale, success rate, tempo al successo e distanza residua nel tempo per i modelli \texttt{base} e \texttt{minimal}, calcolati sui 1560 episodi di inferenza.
+
+\subsubsection*{Modello \texttt{base}}
+
+\begin{figure}[htbp]
+  \centering
+  \begin{minipage}[t]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{../../evaluations/evaluations_ablation_base/analysis/plot_initial_dist.png}
+    \caption{Distribuzione delle distanze iniziali --- \texttt{base}.}
+  \end{minipage}\hfill
+  \begin{minipage}[t]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{../../evaluations/evaluations_ablation_base/analysis/plot_sr_analysis.png}
+    \caption{Success rate per scenario --- \texttt{base}.}
+  \end{minipage}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \begin{minipage}[t]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{../../evaluations/evaluations_ablation_base/analysis/plot_success_time_dist.png}
+    \caption{Distribuzione del tempo al successo --- \texttt{base}.}
+  \end{minipage}\hfill
+  \begin{minipage}[t]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{../../evaluations/evaluations_ablation_base/analysis/plot_distance_over_time.png}
+    \caption{Distanza media dalla sorgente nel tempo --- \texttt{base}.}
+  \end{minipage}
+\end{figure}
+
+\subsubsection*{Modello \texttt{minimal}}
+
+\begin{figure}[htbp]
+  \centering
+  \begin{minipage}[t]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{../../evaluations/evaluations_ablation_base_no_wind_reward/analysis/plot_initial_dist.png}
+    \caption{Distribuzione delle distanze iniziali --- \texttt{minimal}.}
+  \end{minipage}\hfill
+  \begin{minipage}[t]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{../../evaluations/evaluations_ablation_base_no_wind_reward/analysis/plot_sr_analysis.png}
+    \caption{Success rate per scenario --- \texttt{minimal}.}
+  \end{minipage}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \begin{minipage}[t]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{../../evaluations/evaluations_ablation_base_no_wind_reward/analysis/plot_success_time_dist.png}
+    \caption{Distribuzione del tempo al successo --- \texttt{minimal}.}
+  \end{minipage}\hfill
+  \begin{minipage}[t]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{../../evaluations/evaluations_ablation_base_no_wind_reward/analysis/plot_distance_over_time.png}
+    \caption{Distanza media dalla sorgente nel tempo --- \texttt{minimal}.}
+  \end{minipage}
+\end{figure}
+
 \subsection{Conclusioni}
 
 \subsubsection*{Reward minima vs.\ reward completa}
