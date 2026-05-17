@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026) (preloaded format=pdflatex 2026.5.15)  16 MAY 2026 22:46
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026) (preloaded format=pdflatex 2026.5.15)  17 MAY 2026 11:11
 entering extended mode
  restricted \write18 enabled.
  %&-line parsing enabled.
@@ -642,26 +642,106 @@ Overfull \hbox (26.07692pt too wide) in paragraph at lines 308--308
  []|\T1/lmr/m/n/10.95 config_base_no_wind.yaml| 
  []
 
-[5]
-Overfull \hbox (6.1124pt too wide) in paragraph at lines 391--397
+<../../evaluations/evaluations_ablation_base/analysis/plot_initial_dist.png, id
+=112, 932.283pt x 352.6776pt>
+File: ../../evaluations/evaluations_ablation_base/analysis/plot_initial_dist.pn
+g Graphic file (type png)
+<use ../../evaluations/evaluations_ablation_base/analysis/plot_initial_dist.png
+>
+Package pdftex.def Info: ../../evaluations/evaluations_ablation_base/analysis/p
+lot_initial_dist.png  used on input line 370.
+(pdftex.def)             Requested size: 210.32082pt x 79.56429pt.
+<../../evaluations/evaluations_ablation_base/analysis/plot_sr_analysis.png, id=
+114, 931.8012pt x 353.1594pt>
+File: ../../evaluations/evaluations_ablation_base/analysis/plot_sr_analysis.png
+ Graphic file (type png)
+<use ../../evaluations/evaluations_ablation_base/analysis/plot_sr_analysis.png>
+
+Package pdftex.def Info: ../../evaluations/evaluations_ablation_base/analysis/p
+lot_sr_analysis.png  used on input line 375.
+(pdftex.def)             Requested size: 210.32082pt x 79.7107pt.
+<../../evaluations/evaluations_ablation_base/analysis/plot_success_time_dist.pn
+g, id=115, 715.473pt x 353.1594pt>
+File: ../../evaluations/evaluations_ablation_base/analysis/plot_success_time_di
+st.png Graphic file (type png)
+<use ../../evaluations/evaluations_ablation_base/analysis/plot_success_time_dis
+t.png>
+Package pdftex.def Info: ../../evaluations/evaluations_ablation_base/analysis/p
+lot_success_time_dist.png  used on input line 384.
+(pdftex.def)             Requested size: 210.32082pt x 103.81467pt.
+<../../evaluations/evaluations_ablation_base/analysis/plot_distance_over_time.p
+ng, id=116, 787.743pt x 353.1594pt>
+File: ../../evaluations/evaluations_ablation_base/analysis/plot_distance_over_t
+ime.png Graphic file (type png)
+<use ../../evaluations/evaluations_ablation_base/analysis/plot_distance_over_ti
+me.png>
+Package pdftex.def Info: ../../evaluations/evaluations_ablation_base/analysis/p
+lot_distance_over_time.png  used on input line 389.
+(pdftex.def)             Requested size: 210.32082pt x 94.28732pt.
+<../../evaluations/evaluations_ablation_base_no_wind_reward/analysis/plot_initi
+al_dist.png, id=117, 932.283pt x 352.6776pt>
+File: ../../evaluations/evaluations_ablation_base_no_wind_reward/analysis/plot_
+initial_dist.png Graphic file (type png)
+<use ../../evaluations/evaluations_ablation_base_no_wind_reward/analysis/plot_i
+nitial_dist.png>
+Package pdftex.def Info: ../../evaluations/evaluations_ablation_base_no_wind_re
+ward/analysis/plot_initial_dist.png  used on input line 400.
+(pdftex.def)             Requested size: 210.32082pt x 79.56429pt.
+<../../evaluations/evaluations_ablation_base_no_wind_reward/analysis/plot_sr_an
+alysis.png, id=118, 931.8012pt x 353.1594pt>
+File: ../../evaluations/evaluations_ablation_base_no_wind_reward/analysis/plot_
+sr_analysis.png Graphic file (type png)
+<use ../../evaluations/evaluations_ablation_base_no_wind_reward/analysis/plot_s
+r_analysis.png>
+Package pdftex.def Info: ../../evaluations/evaluations_ablation_base_no_wind_re
+ward/analysis/plot_sr_analysis.png  used on input line 405.
+(pdftex.def)             Requested size: 210.32082pt x 79.7107pt.
+<../../evaluations/evaluations_ablation_base_no_wind_reward/analysis/plot_succe
+ss_time_dist.png, id=119, 715.473pt x 353.1594pt>
+File: ../../evaluations/evaluations_ablation_base_no_wind_reward/analysis/plot_
+success_time_dist.png Graphic file (type png)
+<use ../../evaluations/evaluations_ablation_base_no_wind_reward/analysis/plot_s
+uccess_time_dist.png>
+Package pdftex.def Info: ../../evaluations/evaluations_ablation_base_no_wind_re
+ward/analysis/plot_success_time_dist.png  used on input line 414.
+(pdftex.def)             Requested size: 210.32082pt x 103.81467pt.
+<../../evaluations/evaluations_ablation_base_no_wind_reward/analysis/plot_dista
+nce_over_time.png, id=120, 787.743pt x 353.1594pt>
+File: ../../evaluations/evaluations_ablation_base_no_wind_reward/analysis/plot_
+distance_over_time.png Graphic file (type png)
+<use ../../evaluations/evaluations_ablation_base_no_wind_reward/analysis/plot_d
+istance_over_time.png>
+Package pdftex.def Info: ../../evaluations/evaluations_ablation_base_no_wind_re
+ward/analysis/plot_distance_over_time.png  used on input line 419.
+(pdftex.def)             Requested size: 210.32082pt x 94.28732pt.
+[5] [6 <../../evaluations/evaluations_ablation_base/analysis/plot_initial_dist.
+png> <../../evaluations/evaluations_ablation_base/analysis/plot_sr_analysis.png
+> <../../evaluations/evaluations_ablation_base/analysis/plot_success_time_dist.
+png> <../../evaluations/evaluations_ablation_base/analysis/plot_distance_over_t
+ime.png> <../../evaluations/evaluations_ablation_base_no_wind_reward/analysis/p
+lot_initial_dist.png> <../../evaluations/evaluations_ablation_base_no_wind_rewa
+rd/analysis/plot_sr_analysis.png>]
+Overfull \hbox (6.1124pt too wide) in paragraph at lines 455--461
 \T1/lmr/m/n/12 Il gra-dien-te di con-cen-tra-zio-ne ($\OMS/lmsy/m/n/12 ^^F\OT1/
 lmr/m/n/12 0\OML/lmm/m/it/12 :\OT1/lmr/m/n/12 05$\T1/lmr/m/n/12 ) è l'u-ni-co s
 e-gna-le di-re-zio-na-le nel-la reward \T1/lmtt/m/n/12 minimal\T1/lmr/m/n/12 .
  []
 
-[6] [7] (./main.aux)
+[7 <../../evaluations/evaluations_ablation_base_no_wind_reward/analysis/plot_su
+ccess_time_dist.png> <../../evaluations/evaluations_ablation_base_no_wind_rewar
+d/analysis/plot_distance_over_time.png>] [8] (./main.aux)
  ***********
 LaTeX2e <2025-11-01>
 L3 programming layer <2026-01-19>
  ***********
 Package rerunfilecheck Info: File `main.out' has not changed.
-(rerunfilecheck)             Checksum: 66C42C25FB9BF96FCCC8AC2F1DBBC869;3277.
+(rerunfilecheck)             Checksum: 257E979E3E4650AD5D9FDF71DE6A1ABE;3446.
  ) 
 Here is how much of TeX's memory you used:
- 13982 strings out of 469006
- 217630 string characters out of 5454813
+ 14051 strings out of 469006
+ 222874 string characters out of 5454813
  670567 words of memory out of 5000000
- 42452 multiletter control sequences out of 15000+600000
+ 42511 multiletter control sequences out of 15000+600000
  687957 words of font info for 77 fonts, out of 8000000 for 9000
  319 hyphenation exceptions out of 8191
  69i,15n,83p,1193b,528s stack positions out of 10000i,1000n,20000p,200000b,200000s
@@ -678,10 +758,10 @@ ype1/public/lm/lmsy8.pfb></usr/local/texlive/2026basic/texmf-dist/fonts/type1/p
 ublic/lm/lmtk10.pfb></usr/local/texlive/2026basic/texmf-dist/fonts/type1/public
 /lm/lmtt10.pfb></usr/local/texlive/2026basic/texmf-dist/fonts/type1/public/lm/l
 mtt12.pfb>
-Output written on main.pdf (7 pages, 269952 bytes).
+Output written on main.pdf (8 pages, 847967 bytes).
 PDF statistics:
- 203 PDF objects out of 1000 (max. 8388607)
- 162 compressed objects within 2 object streams
- 31 named destinations out of 1000 (max. 500000)
- 137 words of extra memory for PDF output out of 10000 (max. 10000000)
+ 239 PDF objects out of 1000 (max. 8388607)
+ 181 compressed objects within 2 object streams
+ 41 named destinations out of 1000 (max. 500000)
+ 185 words of extra memory for PDF output out of 10000 (max. 10000000)
 
