@@ -737,12 +737,6 @@ class FCMAgent:
         C(p + δ) ≈ C(p) + ∇C · δ   →   sistema overdetermined 8×2 → LS
 
     L'azione scelta è la direzione discreta più allineata al gradiente stimato.
-
-    Varianti:
-      'pure'   – stima il gradiente dalle sole misure correnti (senza memoria).
-      'kalman' – filtra il gradiente con un filtro di Kalman scalare
-                 per-componente; riduce le oscillazioni dovute al rumore
-                 di misura e all'evoluzione temporale del campo.
     """
 
     _DIAG = 1.0 / np.sqrt(2.0)
@@ -757,54 +751,19 @@ class FCMAgent:
         [-_DIAG,-_DIAG ],   # 7: SudOvest
     ], dtype=float)
 
-    def __init__(
-        self,
-        sensor_range: float = 20.0,
-        variant: str = 'pure',
-        kalman_q: float = 1e-2,
-        kalman_r: float = 1e-1,
-    ):
-        """
-        Args:
-            sensor_range: Distanza dei sensori direzionali (m).
-            variant:      'pure' oppure 'kalman'.
-            kalman_q:     Varianza processo Kalman (quanto può cambiare ∇C per step).
-            kalman_r:     Varianza misura Kalman (rumore sulla stima LS).
-        """
+    def __init__(self, sensor_range: float = 20.0):
         self.sensor_range = sensor_range
-        self.variant = variant
-        self._kf_mean = np.zeros(2)
-        self._kf_var  = np.ones(2)
-        self._kf_q    = kalman_q
-        self._kf_r    = kalman_r
-        self._kf_initialized = False
 
     def reset(self):
-        """Resetta lo stato interno; chiamare prima di ogni episodio."""
-        self._kf_mean = np.zeros(2)
-        self._kf_var  = np.ones(2)
-        self._kf_initialized = False
+        pass
 
     def _estimate_gradient_ls(self, obs: np.ndarray) -> np.ndarray:
         """Stima ∇C tramite minimi quadrati (Taylor 1° ordine)."""
         center_conc = float(obs[0])
         sensors = obs[28:36].astype(float)
-        # A[i] = direzione unitaria i;  b[i] = ΔC / sensor_range
         b = (sensors - center_conc) / max(self.sensor_range, 1.0)
         gradient, _, _, _ = np.linalg.lstsq(self._DIRECTIONS, b, rcond=None)
         return gradient
-
-    def _kalman_update(self, z: np.ndarray) -> np.ndarray:
-        """Filtra la stima del gradiente con un KF scalare per-componente."""
-        if not self._kf_initialized:
-            self._kf_mean = z.copy()
-            self._kf_initialized = True
-            return self._kf_mean
-        p_pred = self._kf_var + self._kf_q
-        k = p_pred / (p_pred + self._kf_r)
-        self._kf_mean = self._kf_mean + k * (z - self._kf_mean)
-        self._kf_var  = (1.0 - k) * p_pred
-        return self._kf_mean
 
     def predict(
         self,
@@ -815,19 +774,9 @@ class FCMAgent:
         """Seleziona l'azione tramite gradient ascent.
 
         Interfaccia compatibile con MaskablePPO.predict per riuso di run_episode.
-
-        Args:
-            obs:          Osservazione shape (1, 116) o (116,).
-            deterministic: Ignorato (FCM è deterministico dati gli input).
-            action_masks: Maschera booleana azioni valide, shape (8,).
-
-        Returns:
-            (action_array, None)  – action_array shape (1,).
         """
         flat_obs = obs[0] if obs.ndim == 2 else obs
         gradient = self._estimate_gradient_ls(flat_obs)
-        if self.variant == 'kalman':
-            gradient = self._kalman_update(gradient)
 
         grad_norm = float(np.linalg.norm(gradient))
         if grad_norm < 1e-12:
@@ -881,7 +830,6 @@ def run_inference_fcm(
     config_path: str,
     data_dir: str,
     output_dir: str,
-    variant: str = 'pure',
     n_episodes: int = 5,
     sources_csv: str = "Coordinate_Sorgenti_FaseII.csv",
     chunk_ids: Optional[List[int]] = None,
@@ -898,7 +846,6 @@ def run_inference_fcm(
     modello RL addestrato.
 
     Args:
-        variant:      'pure' (gradiente corrente) o 'kalman' (filtro di Kalman).
         sensor_range: Se None, usa il valore da config (default 20 m).
     """
     if chunk_ids is None:
@@ -919,7 +866,7 @@ def run_inference_fcm(
     if sensor_range is None:
         sensor_range = float(config.get('agent', {}).get('sensor_range', 20.0))
 
-    fcm_agent = FCMAgent(sensor_range=sensor_range, variant=variant)
+    fcm_agent = FCMAgent(sensor_range=sensor_range)
 
     data_manager = DataManager(
         data_dir=data_dir,
@@ -948,9 +895,9 @@ def run_inference_fcm(
         "_V3": "CL02_V3_SRC000_U_V_10mGrid.nc",
     }
 
-    agent_label = f"FCM-{variant} (sensor_range={sensor_range}m)"
+    agent_label = f"FCM (sensor_range={sensor_range}m)"
     print(f"\n{'='*100}")
-    print(f"HYDRAS Inference FCM [{variant.upper()}] — {len(inference_sources)} sorgenti × 4 versioni × "
+    print(f"HYDRAS Inference FCM — {len(inference_sources)} sorgenti × 4 versioni × "
           f"{len(chunk_ids)} chunk × {n_episodes} ep.")
     print(f"  = {len(inference_sources)*4*len(chunk_ids)*n_episodes} episodi totali")
     print(f"Variante FCM: {agent_label}")
@@ -1071,14 +1018,14 @@ def run_inference_fcm(
 
     if all_stats:
         print(f"\n{'='*80}")
-        print(f"FCM [{variant.upper()}] — RESULTS BY CHUNK")
+        print(f"FCM — RESULTS BY CHUNK")
         print(f"{'='*80}")
         for chunk_label in ['Q1/4', 'Q1/2', 'Q3/4']:
             sr  = chunk_sr.get(chunk_label)
             n_e = len(episode_success_by_chunk.get(chunk_label, []))
             print(f"{chunk_label}: {('n/d' if sr is None else f'{sr*100:6.1f}%')} ({n_e} episodes)")
         print(f"\n{'='*80}")
-        print(f"FCM [{variant.upper()}] — RESULTS BY WIND SCENARIO")
+        print(f"FCM — RESULTS BY WIND SCENARIO")
         print(f"{'='*80}")
         for v in ['V0', 'V1', 'V2', 'V3']:
             sr  = version_sr.get(v)
@@ -1152,7 +1099,6 @@ def main_fcm_inference():
             config_path=CONFIG_PATH,
             data_dir=DATA_DIR,
             output_dir=output_dir,
-            variant='pure',
             n_episodes=5,
             sources_csv="Coordinate_Sorgenti_FaseII.csv",
             chunk_ids=[0, 1, 2],
