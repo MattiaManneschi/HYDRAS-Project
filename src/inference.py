@@ -1002,6 +1002,7 @@ def run_inference_fcm(
                 episode_results: List[EpisodeResult] = []
 
                 env_cfg = make_env_config(config, chunk_id=chunk_id)
+                env_cfg.sensor_range = sensor_range  # FCM usa sensor_range diverso dall'RL
                 vec_env = build_env_fcm(
                     env_cfg, field,
                     use_masking=MASKABLE_PPO_AVAILABLE,
@@ -1122,25 +1123,27 @@ def run_inference_fcm(
 
 
 def main_fcm_inference():
-    """Inferenza FCM baseline su SRC107-SRC132 con varianti 'pure' e 'kalman'.
+    """Inferenza FCM su SRC107-SRC132 con sweep di sensor_range.
 
+    Prima fase: sweep con variante 'pure' su 3 range (100m, 200m, 500m)
+    per trovare il range ottimale.
     Struttura output:
-      evaluations/evaluations_FCM/fcm_pure/
-      evaluations/evaluations_FCM/fcm_kalman/
+      evaluations/evaluations_FCM/fcm_pure_100m/
+      evaluations/evaluations_FCM/fcm_pure_200m/
+      evaluations/evaluations_FCM/fcm_pure_500m/
     """
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
     DATA_DIR     = str(PROJECT_ROOT / "data")
     CONFIG_PATH  = str(PROJECT_ROOT / "utils" / "config.yaml")
 
-    config = load_config(CONFIG_PATH)
-    sensor_range = float(config.get('agent', {}).get('sensor_range', 20.0))
-
     fcm_base = PROJECT_ROOT / "evaluations" / "evaluations_FCM"
 
-    for variant in ['pure', 'kalman']:
-        output_dir = str(fcm_base / f"fcm_{variant}")
+    sensor_ranges = [100, 200, 500]
+
+    for sr in sensor_ranges:
+        output_dir = str(fcm_base / f"fcm_pure_{sr}m")
         print(f"\n{'#'*80}")
-        print(f"# FCM variant: {variant.upper()}")
+        print(f"# FCM pure — sensor_range={sr}m")
         print(f"# Output: {output_dir}")
         print(f"{'#'*80}\n")
 
@@ -1148,14 +1151,14 @@ def main_fcm_inference():
             config_path=CONFIG_PATH,
             data_dir=DATA_DIR,
             output_dir=output_dir,
-            variant=variant,
+            variant='pure',
             n_episodes=5,
             sources_csv="Coordinate_Sorgenti_FaseII.csv",
             chunk_ids=[0, 1, 2],
-            sensor_range=sensor_range,
+            sensor_range=float(sr),
         )
 
-    print(f"\nInferenza FCM completata. Output: {fcm_base}")
+    print(f"\nSweep FCM completato. Output: {fcm_base}")
 
 
 # ─── Analysis Plots ──────────────────────────────────────────────────────────
@@ -1528,4 +1531,4 @@ def main_ablation_inference():
 
 
 if __name__ == "__main__":
-    main_ablation_inference()
+    main_fcm_inference()
