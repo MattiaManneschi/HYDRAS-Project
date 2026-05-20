@@ -1070,15 +1070,11 @@ def run_inference_fcm(
 
 
 def main_fcm_inference():
-    """Inferenza FCM su SRC107-SRC132 con sweep di sensor_range.
+    """Inferenza FCM su SRC107-SRC132, sweep sensor_range 20→200m.
 
-    Sweep variante 'pure' su 5 range (20, 50, 100, 150, 200m),
-    speculare allo sweep eseguito per RL.
-    Struttura output:
-      evaluations/evaluations_FCM/fcm_pure_20m/
-      evaluations/evaluations_FCM/fcm_pure_50m/
-      ...
-      evaluations/evaluations_FCM/fcm_pure_200m/
+    2 episodi per scenario (vs 5 dell'RL) — sufficiente per vedere il trend
+    di SR al variare del range senza moltiplicare inutilmente il runtime.
+    Output: evaluations/evaluations_FCM/fcm_pure_<N>m/
     """
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
     DATA_DIR     = str(PROJECT_ROOT / "data")
@@ -1086,20 +1082,17 @@ def main_fcm_inference():
 
     fcm_base = PROJECT_ROOT / "evaluations" / "evaluations_FCM"
 
-    sensor_ranges = [20, 50, 100, 150, 200]
-
-    for sr in sensor_ranges:
+    for sr in [20, 50, 100, 150, 200]:
         output_dir = str(fcm_base / f"fcm_pure_{sr}m")
         print(f"\n{'#'*80}")
-        print(f"# FCM pure — sensor_range={sr}m")
+        print(f"# FCM — sensor_range={sr}m")
         print(f"# Output: {output_dir}")
         print(f"{'#'*80}\n")
-
         run_inference_fcm(
             config_path=CONFIG_PATH,
             data_dir=DATA_DIR,
             output_dir=output_dir,
-            n_episodes=5,
+            n_episodes=2,
             sources_csv="Coordinate_Sorgenti_FaseII.csv",
             chunk_ids=[0, 1, 2],
             sensor_range=float(sr),
