@@ -1125,12 +1125,13 @@ def run_inference_fcm(
 def main_fcm_inference():
     """Inferenza FCM su SRC107-SRC132 con sweep di sensor_range.
 
-    Prima fase: sweep con variante 'pure' su 3 range (100m, 200m, 500m)
-    per trovare il range ottimale.
+    Sweep variante 'pure' su 5 range (20, 50, 100, 150, 200m),
+    speculare allo sweep eseguito per RL.
     Struttura output:
-      evaluations/evaluations_FCM/fcm_pure_100m/
+      evaluations/evaluations_FCM/fcm_pure_20m/
+      evaluations/evaluations_FCM/fcm_pure_50m/
+      ...
       evaluations/evaluations_FCM/fcm_pure_200m/
-      evaluations/evaluations_FCM/fcm_pure_500m/
     """
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
     DATA_DIR     = str(PROJECT_ROOT / "data")
@@ -1138,7 +1139,7 @@ def main_fcm_inference():
 
     fcm_base = PROJECT_ROOT / "evaluations" / "evaluations_FCM"
 
-    sensor_ranges = [100, 200, 500]
+    sensor_ranges = [20, 50, 100, 150, 200]
 
     for sr in sensor_ranges:
         output_dir = str(fcm_base / f"fcm_pure_{sr}m")
