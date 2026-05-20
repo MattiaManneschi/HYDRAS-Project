@@ -701,6 +701,9 @@ def run_inference(
     if save_videos:
         generate_showcase_videos(all_results_global, data_manager, output_path)
 
+    generate_analysis_plots(episodes_data, output_path, dt_seconds=dt_seconds,
+                            max_steps=config.get('environment', {}).get('max_episode_steps', 1080))
+
     return all_stats
 
 
@@ -720,6 +723,671 @@ def find_model_for_sensor_range(trained_dir: Path, sensor_range: float) -> Optio
         except Exception:
             continue
     return candidates[-1] if candidates else None
+
+
+# ─── FCM: Field Climbing Method ───────────────────────────────────────────────
+
+class FCMAgent:
+    """
+    Agente Field Climbing Method.
+
+    Stima il gradiente locale del campo di concentrazione tramite regressione
+    ai minimi quadrati con approssimazione di Taylor al primo ordine:
+
+        C(p + δ) ≈ C(p) + ∇C · δ   →   sistema overdetermined 8×2 → LS
+
+    L'azione scelta è la direzione discreta più allineata al gradiente stimato.
+
+    Varianti:
+      'pure'   – stima il gradiente dalle sole misure correnti (senza memoria).
+      'kalman' – filtra il gradiente con un filtro di Kalman scalare
+                 per-componente; riduce le oscillazioni dovute al rumore
+                 di misura e all'evoluzione temporale del campo.
+    """
+
+    _DIAG = 1.0 / np.sqrt(2.0)
+    _DIRECTIONS = np.array([
+        [0.0,    1.0   ],   # 0: Nord
+        [0.0,   -1.0   ],   # 1: Sud
+        [1.0,    0.0   ],   # 2: Est
+        [-1.0,   0.0   ],   # 3: Ovest
+        [_DIAG,  _DIAG ],   # 4: NordEst
+        [_DIAG, -_DIAG ],   # 5: SudEst
+        [-_DIAG, _DIAG ],   # 6: NordOvest
+        [-_DIAG,-_DIAG ],   # 7: SudOvest
+    ], dtype=float)
+
+    def __init__(
+        self,
+        sensor_range: float = 20.0,
+        variant: str = 'pure',
+        kalman_q: float = 1e-2,
+        kalman_r: float = 1e-1,
+    ):
+        """
+        Args:
+            sensor_range: Distanza dei sensori direzionali (m).
+            variant:      'pure' oppure 'kalman'.
+            kalman_q:     Varianza processo Kalman (quanto può cambiare ∇C per step).
+            kalman_r:     Varianza misura Kalman (rumore sulla stima LS).
+        """
+        self.sensor_range = sensor_range
+        self.variant = variant
+        self._kf_mean = np.zeros(2)
+        self._kf_var  = np.ones(2)
+        self._kf_q    = kalman_q
+        self._kf_r    = kalman_r
+        self._kf_initialized = False
+
+    def reset(self):
+        """Resetta lo stato interno; chiamare prima di ogni episodio."""
+        self._kf_mean = np.zeros(2)
+        self._kf_var  = np.ones(2)
+        self._kf_initialized = False
+
+    def _estimate_gradient_ls(self, obs: np.ndarray) -> np.ndarray:
+        """Stima ∇C tramite minimi quadrati (Taylor 1° ordine)."""
+        center_conc = float(obs[0])
+        sensors = obs[28:36].astype(float)
+        # A[i] = direzione unitaria i;  b[i] = ΔC / sensor_range
+        b = (sensors - center_conc) / max(self.sensor_range, 1.0)
+        gradient, _, _, _ = np.linalg.lstsq(self._DIRECTIONS, b, rcond=None)
+        return gradient
+
+    def _kalman_update(self, z: np.ndarray) -> np.ndarray:
+        """Filtra la stima del gradiente con un KF scalare per-componente."""
+        if not self._kf_initialized:
+            self._kf_mean = z.copy()
+            self._kf_initialized = True
+            return self._kf_mean
+        p_pred = self._kf_var + self._kf_q
+        k = p_pred / (p_pred + self._kf_r)
+        self._kf_mean = self._kf_mean + k * (z - self._kf_mean)
+        self._kf_var  = (1.0 - k) * p_pred
+        return self._kf_mean
+
+    def predict(
+        self,
+        obs: np.ndarray,
+        deterministic: bool = True,
+        action_masks: Optional[np.ndarray] = None,
+    ) -> Tuple[np.ndarray, None]:
+        """Seleziona l'azione tramite gradient ascent.
+
+        Interfaccia compatibile con MaskablePPO.predict per riuso di run_episode.
+
+        Args:
+            obs:          Osservazione shape (1, 116) o (116,).
+            deterministic: Ignorato (FCM è deterministico dati gli input).
+            action_masks: Maschera booleana azioni valide, shape (8,).
+
+        Returns:
+            (action_array, None)  – action_array shape (1,).
+        """
+        flat_obs = obs[0] if obs.ndim == 2 else obs
+        gradient = self._estimate_gradient_ls(flat_obs)
+        if self.variant == 'kalman':
+            gradient = self._kalman_update(gradient)
+
+        grad_norm = float(np.linalg.norm(gradient))
+        if grad_norm < 1e-12:
+            # Gradiente nullo: sceglie random tra azioni valide
+            if action_masks is not None:
+                valid = np.where(action_masks)[0]
+                action = int(np.random.choice(valid)) if len(valid) > 0 else 0
+            else:
+                action = int(np.random.randint(0, 8))
+        else:
+            scores = self._DIRECTIONS @ gradient   # (8,)
+            if action_masks is not None:
+                scores[~action_masks.astype(bool)] = -np.inf
+            action = int(np.argmax(scores))
+
+        return np.array([action]), None
+
+
+def build_env_fcm(
+    env_cfg,
+    field,
+    use_masking: bool,
+    data_manager: Optional[DataManager] = None,
+    wind_data=None,
+    current_data=None,
+    wind_mapping: Optional[Dict[str, str]] = None,
+    current_mapping: Optional[Dict[str, str]] = None,
+):
+    """Costruisce l'environment per FCM (senza VecNormalize)."""
+    raw_env = SourceSeekingEnv(
+        config=env_cfg,
+        concentration_field=field,
+        wind_data=wind_data,
+        current_data=current_data,
+        data_manager=data_manager,
+        wind_mapping=wind_mapping,
+        current_mapping=current_mapping,
+    )
+    if use_masking and MASKABLE_PPO_AVAILABLE and ActionMasker is not None:
+        raw_env = ActionMasker(raw_env, mask_fn)
+    return DummyVecEnv([lambda e=raw_env: e])
+
+
+def run_episode_fcm(fcm_agent: FCMAgent, vec_env, deterministic: bool = True) -> EpisodeResult:
+    """Esegue un singolo episodio FCM, resettando lo stato interno dell'agente."""
+    fcm_agent.reset()
+    return run_episode(fcm_agent, vec_env, deterministic=deterministic)
+
+
+def run_inference_fcm(
+    config_path: str,
+    data_dir: str,
+    output_dir: str,
+    variant: str = 'pure',
+    n_episodes: int = 5,
+    sources_csv: str = "Coordinate_Sorgenti_FaseII.csv",
+    chunk_ids: Optional[List[int]] = None,
+    sensor_range: Optional[float] = None,
+    save_plots: bool = True,
+    save_videos: bool = True,
+    seed: Optional[int] = None,
+    config_override: Optional[dict] = None,
+) -> List[ScenarioStats]:
+    """Inferenza completa con Field Climbing Method.
+
+    Stessa struttura e stessi output di run_inference() (log.txt, episodes_data.json,
+    trajectory plots, analysis plots, showcase videos) ma con FCMAgent al posto del
+    modello RL addestrato.
+
+    Args:
+        variant:      'pure' (gradiente corrente) o 'kalman' (filtro di Kalman).
+        sensor_range: Se None, usa il valore da config (default 20 m).
+    """
+    if chunk_ids is None:
+        chunk_ids = [0, 1, 2]
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    if seed is not None:
+        np.random.seed(seed)
+        import random
+        random.seed(seed)
+
+    config = config_override if config_override is not None else load_config(config_path)
+    dt_seconds      = config.get('environment', {}).get('dt', 10)
+    max_steps_cfg   = config.get('environment', {}).get('max_episode_steps', 1080)
+    success_threshold = config.get('environment', {}).get('reward', {}).get('distance_threshold', 50)
+
+    if sensor_range is None:
+        sensor_range = float(config.get('agent', {}).get('sensor_range', 20.0))
+
+    fcm_agent = FCMAgent(sensor_range=sensor_range, variant=variant)
+
+    data_manager = DataManager(
+        data_dir=data_dir,
+        preload_all=False,
+        sources_csv=sources_csv,
+    )
+
+    all_sources       = data_manager.get_discovered_sources()
+    inference_sources = [s for s in all_sources if int(s[3:]) > 106]
+
+    chunk_labels = {0: "Q1/4", 1: "Q1/2", 2: "Q3/4"}
+    chunk_descriptions = ", ".join([
+        f"{chunk_labels[cid]} (chunk_id={cid})" for cid in chunk_ids
+    ])
+
+    wind_mapping = {
+        "_V0": "CI_WIND_faseII_V0.txt",
+        "_V1": "CI_WIND_faseII_V1.txt",
+        "_V2": "CI_WIND_faseII_V2.txt",
+        "_V3": "CI_WIND_faseII_V3.txt",
+    }
+    current_mapping = {
+        "_V0": "CL02_V0_SRC000_U_V_10mGrid.nc",
+        "_V1": "CL02_V1_SRC000_U_V_10mGrid.nc",
+        "_V2": "CL02_V2_SRC000_U_V_10mGrid.nc",
+        "_V3": "CL02_V3_SRC000_U_V_10mGrid.nc",
+    }
+
+    agent_label = f"FCM-{variant} (sensor_range={sensor_range}m)"
+    print(f"\n{'='*100}")
+    print(f"HYDRAS Inference FCM [{variant.upper()}] — {len(inference_sources)} sorgenti × 4 versioni × "
+          f"{len(chunk_ids)} chunk × {n_episodes} ep.")
+    print(f"  = {len(inference_sources)*4*len(chunk_ids)*n_episodes} episodi totali")
+    print(f"Variante FCM: {agent_label}")
+    print(f"Chunk testati: {chunk_descriptions}")
+    print(f"Dati: {data_dir}")
+    print(f"Sorgenti inference (20%): SRC107–SRC132 ({len(inference_sources)} sorgenti)")
+    print(f"{'='*100}\n")
+
+    all_stats: List[ScenarioStats]          = []
+    episode_success_all: List[float]        = []
+    episode_success_by_version: Dict[str, List[float]] = {'V0': [], 'V1': [], 'V2': [], 'V3': []}
+    episode_success_by_chunk: Dict[str, List[float]]   = {'Q1/4': [], 'Q1/2': [], 'Q3/4': []}
+    initial_distances_all: List[float]      = []
+    success_steps_all: List[float]          = []
+    all_results_global: List[EpisodeResult] = []
+    episodes_data: List[dict]               = []
+
+    for src_idx, source_id in enumerate(inference_sources, 1):
+        if src_idx % 5 == 0:
+            print(f"\n[Progress: {src_idx}/{len(inference_sources)} sources]\n")
+
+        for version in ['V0', 'V1', 'V2', 'V3']:
+            version_files = [f for f in data_manager._nc_files
+                             if version in f.name and source_id in f.name]
+            if not version_files:
+                continue
+
+            version_dir = output_path / source_id / version
+            version_dir.mkdir(parents=True, exist_ok=True)
+
+            try:
+                field = data_manager._nc_loader.load(
+                    str(version_files[0]),
+                    concentration_var="Concentration - component 1",
+                )
+                if field is None:
+                    continue
+                coords = data_manager.get_source_coordinates(source_id)
+                if coords:
+                    field.source_position = coords
+                field.run_id = f"{source_id}_{version}"
+            except Exception as e:
+                print(f"  [SKIP] {version}_{source_id}: {e}")
+                continue
+
+            for chunk_id in chunk_ids:
+                chunk_label    = chunk_labels[chunk_id]
+                scenario_label = f"{version}_{source_id}_{chunk_label}"
+                episode_results: List[EpisodeResult] = []
+
+                env_cfg = make_env_config(config, chunk_id=chunk_id)
+                vec_env = build_env_fcm(
+                    env_cfg, field,
+                    use_masking=MASKABLE_PPO_AVAILABLE,
+                    data_manager=data_manager,
+                    wind_data=None, current_data=None,
+                    wind_mapping=wind_mapping,
+                    current_mapping=current_mapping,
+                )
+
+                for ep in range(n_episodes):
+                    result = run_episode_fcm(fcm_agent, vec_env, deterministic=True)
+                    result.scenario  = scenario_label
+                    result.source_id = source_id
+                    result.episode   = ep
+
+                    sv = 1.0 if result.success else 0.0
+                    episode_success_all.append(sv)
+                    episode_success_by_version[version].append(sv)
+                    episode_success_by_chunk[chunk_label].append(sv)
+                    initial_distances_all.append(result.initial_distance)
+                    if result.success:
+                        success_steps_all.append(float(result.steps))
+                    episode_results.append(result)
+                    all_results_global.append(result)
+
+                    src_x, src_y = field.source_position
+                    dist_history = [
+                        float(np.sqrt((pos[0] - src_x)**2 + (pos[1] - src_y)**2))
+                        for pos in result.trajectory
+                    ]
+                    episodes_data.append({
+                        "source_id": source_id, "version": version,
+                        "chunk": chunk_label, "chunk_id": chunk_id,
+                        "episode": ep + 1, "success": result.success,
+                        "termination": result.termination,
+                        "initial_distance": result.initial_distance,
+                        "final_distance": result.final_distance,
+                        "steps": result.steps, "distance_history": dist_history,
+                    })
+
+                    if save_plots:
+                        plot_path = version_dir / f"ep{ep+1:02d}_chunk{chunk_id}_trajectory.png"
+                        save_trajectory_plot(result, field, plot_path, success_threshold)
+
+                    init_dist = f"{result.initial_distance:.0f}m"
+                    if result.success:
+                        time_mins = (result.steps * dt_seconds) / 60
+                        print(f"  {scenario_label} Ep{ep+1}: spawn_dist={init_dist:>5s} → SUCCESS in {result.steps:3d} steps ({time_mins:5.1f}m)")
+                    else:
+                        print(f"  {scenario_label} Ep{ep+1}: spawn_dist={init_dist:>5s} → {result.termination.upper()} at {result.steps:4d} steps (final_dist={result.final_distance:6.1f}m)")
+
+                vec_env.close()
+
+                if episode_results:
+                    all_stats.append(compute_scenario_stats(episode_results, scenario_label, source_id))
+
+    def safe_mean(values: List[float]) -> Optional[float]:
+        return float(np.mean(values)) if values else None
+
+    global_sr       = safe_mean(episode_success_all)
+    mean_initial_dist = safe_mean(initial_distances_all)
+    mean_success_steps = safe_mean(success_steps_all)
+
+    version_sr = {v: safe_mean(episode_success_by_version.get(v, [])) for v in ['V0', 'V1', 'V2', 'V3']}
+    chunk_sr   = {c: safe_mean(episode_success_by_chunk.get(c, []))   for c in ['Q1/4', 'Q1/2', 'Q3/4']}
+
+    if all_stats:
+        print(f"\n{'='*80}")
+        print(f"FCM [{variant.upper()}] — RESULTS BY CHUNK")
+        print(f"{'='*80}")
+        for chunk_label in ['Q1/4', 'Q1/2', 'Q3/4']:
+            sr  = chunk_sr.get(chunk_label)
+            n_e = len(episode_success_by_chunk.get(chunk_label, []))
+            print(f"{chunk_label}: {('n/d' if sr is None else f'{sr*100:6.1f}%')} ({n_e} episodes)")
+        print(f"\n{'='*80}")
+        print(f"FCM [{variant.upper()}] — RESULTS BY WIND SCENARIO")
+        print(f"{'='*80}")
+        for v in ['V0', 'V1', 'V2', 'V3']:
+            sr  = version_sr.get(v)
+            n_e = len(episode_success_by_version.get(v, []))
+            print(f"{v}: {('n/d' if sr is None else f'{sr*100:6.1f}%')} ({n_e} episodes)")
+        print(f"\n{'='*80}")
+        print(f"Global Success Rate: {('n/d' if global_sr is None else f'{global_sr*100:.1f}%')}")
+        print(f"Mean initial distance: {('n/d' if mean_initial_dist is None else f'{mean_initial_dist:.0f}m')}")
+        if mean_success_steps is not None:
+            print(f"Mean success steps: {mean_success_steps:.1f} (~{(mean_success_steps * dt_seconds)/60:.1f} min)")
+        print(f"Total scenarios: {len(all_stats)}")
+        print(f"Total episodes: {len(episode_success_all)}")
+        print(f"{'='*80}\n")
+
+    log_path = write_inference_log(
+        output_path=output_path,
+        model_path=agent_label,
+        dt_seconds=dt_seconds,
+        global_success_rate=global_sr,
+        version_success_rates=version_sr,
+        chunk_success_rates=chunk_sr,
+        mean_initial_distance=mean_initial_dist,
+        mean_success_steps=mean_success_steps,
+        total_scenarios=len(all_stats),
+        total_episodes=len(episode_success_all),
+    )
+    print(f"Summary log salvato in: {log_path}")
+
+    import json
+    episodes_json_path = output_path / "episodes_data.json"
+    with open(episodes_json_path, "w") as f:
+        json.dump(episodes_data, f)
+    print(f"Dati per-episodio salvati in: {episodes_json_path}")
+
+    if save_videos:
+        generate_showcase_videos(all_results_global, data_manager, output_path)
+
+    generate_analysis_plots(episodes_data, output_path, dt_seconds=dt_seconds,
+                            max_steps=max_steps_cfg)
+
+    return all_stats
+
+
+def main_fcm_inference():
+    """Inferenza FCM baseline su SRC107-SRC132 con varianti 'pure' e 'kalman'.
+
+    Struttura output:
+      evaluations/evaluations_FCM/fcm_pure/
+      evaluations/evaluations_FCM/fcm_kalman/
+    """
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
+    DATA_DIR     = str(PROJECT_ROOT / "data")
+    CONFIG_PATH  = str(PROJECT_ROOT / "utils" / "config.yaml")
+
+    config = load_config(CONFIG_PATH)
+    sensor_range = float(config.get('agent', {}).get('sensor_range', 20.0))
+
+    fcm_base = PROJECT_ROOT / "evaluations" / "evaluations_FCM"
+
+    for variant in ['pure', 'kalman']:
+        output_dir = str(fcm_base / f"fcm_{variant}")
+        print(f"\n{'#'*80}")
+        print(f"# FCM variant: {variant.upper()}")
+        print(f"# Output: {output_dir}")
+        print(f"{'#'*80}\n")
+
+        run_inference_fcm(
+            config_path=CONFIG_PATH,
+            data_dir=DATA_DIR,
+            output_dir=output_dir,
+            variant=variant,
+            n_episodes=5,
+            sources_csv="Coordinate_Sorgenti_FaseII.csv",
+            chunk_ids=[0, 1, 2],
+            sensor_range=sensor_range,
+        )
+
+    print(f"\nInferenza FCM completata. Output: {fcm_base}")
+
+
+# ─── Analysis Plots ──────────────────────────────────────────────────────────
+
+def generate_analysis_plots(
+    episodes_data: List[dict],
+    output_path: Path,
+    dt_seconds: float = 10.0,
+    max_steps: int = 1080,
+) -> dict:
+    """Genera i 4 plot di analisi quantitativa nella sottocartella analysis/.
+
+    Returns:
+        Dict path_name → Path dei PNG generati.
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+
+    analysis_dir = output_path / "analysis"
+    analysis_dir.mkdir(parents=True, exist_ok=True)
+
+    episodes = episodes_data
+    success_eps = [e for e in episodes if e['success']]
+    fail_eps    = [e for e in episodes if not e['success']]
+    plot_paths: dict = {}
+
+    # ── Plot 1: Distribuzione tempi di successo ──────────────────────────────
+    fig, ax = plt.subplots(figsize=(10, 5))
+    if success_eps:
+        steps_arr   = np.array([e['steps'] for e in success_eps])
+        minutes_arr = steps_arr * dt_seconds / 60.0
+        p25 = np.percentile(minutes_arr, 25)
+        p50 = np.percentile(minutes_arr, 50)
+        p75 = np.percentile(minutes_arr, 75)
+        p95 = np.percentile(minutes_arr, 95)
+        mean_val = float(minutes_arr.mean())
+        std_val  = float(minutes_arr.std())
+        n_outliers = int(np.sum(minutes_arr > p95))
+        clipped = minutes_arr[minutes_arr <= p95]
+        n_bins = min(40, max(15, int(len(clipped) ** 0.5)))
+        ax.hist(clipped, bins=n_bins, color='#2196F3', edgecolor='white',
+                linewidth=0.5, alpha=0.8)
+        ax.axvline(mean_val, color='red', linestyle='--', linewidth=1.5,
+                   label=f'Media: {mean_val:.1f} min')
+        ax.axvline(p50, color='orange', linestyle=':', linewidth=1.8,
+                   label=f'Mediana: {p50:.1f} min')
+        ax.set_xlim(0, p95)
+        ax.set_xlabel('Tempo per raggiungere la sorgente (minuti simulati)', fontsize=11)
+        ax.set_ylabel('Numero di episodi', fontsize=11)
+        ax.set_title('Distribuzione dei Tempi di Successo', fontsize=13, fontweight='bold')
+        ax.legend(fontsize=9, loc='upper right')
+        ax.grid(axis='y', alpha=0.35)
+        stats_txt = (
+            f"N successi = {len(minutes_arr)}\n"
+            f"Dev.std = {std_val:.1f} min\n"
+            f"P25–P75 = [{p25:.1f}, {p75:.1f}] min\n"
+            f"Outliers (>{p95:.0f} min) = {n_outliers}"
+        )
+        ax.text(0.97, 0.03, stats_txt, transform=ax.transAxes,
+                fontsize=8.5, va='bottom', ha='right',
+                bbox=dict(boxstyle='round,pad=0.4', facecolor='#F5F5F5', alpha=0.9))
+    else:
+        ax.text(0.5, 0.5, 'Nessun episodio di successo', ha='center', va='center',
+                transform=ax.transAxes, fontsize=12)
+    fig.tight_layout()
+    p1 = analysis_dir / "plot_success_time_dist.png"
+    fig.savefig(p1, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    plot_paths['time_dist'] = p1
+
+    # ── Plot 2: Heatmap SR versione×chunk + SR per distanza iniziale ─────────
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    versions = ['V0', 'V1', 'V2', 'V3']
+    chunks   = ['Q1/4', 'Q1/2', 'Q3/4']
+    matrix   = np.full((len(versions), len(chunks)), np.nan)
+    for vi, v in enumerate(versions):
+        for ci, c in enumerate(chunks):
+            sub = [e for e in episodes if e['version'] == v and e['chunk'] == c]
+            if sub:
+                matrix[vi, ci] = float(np.mean([e['success'] for e in sub])) * 100
+
+    ax = axes[0]
+    im = ax.imshow(matrix, vmin=0, vmax=100, cmap='RdYlGn', aspect='auto')
+    ax.set_xticks(range(len(chunks)));  ax.set_xticklabels(chunks, fontsize=10)
+    ax.set_yticks(range(len(versions))); ax.set_yticklabels(versions, fontsize=10)
+    ax.set_title('Success Rate (%) — Versione × Chunk', fontsize=11, fontweight='bold')
+    for vi in range(len(versions)):
+        for ci in range(len(chunks)):
+            val = matrix[vi, ci]
+            if not np.isnan(val):
+                ax.text(ci, vi, f'{val:.0f}%', ha='center', va='center',
+                        fontsize=11, fontweight='bold',
+                        color='white' if val < 50 else 'black')
+    fig.colorbar(im, ax=ax, label='SR (%)')
+
+    ax2 = axes[1]
+    bins_edges = [0, 500, 1000, 1500, 2000, 2500]
+    bin_labels  = ['0–500', '500–1000', '1000–1500', '1500–2000', '2000+']
+    bin_sr, bin_n = [], []
+    for lo, hi in zip(bins_edges[:-1], bins_edges[1:]):
+        sub = [e for e in episodes if lo <= e['initial_distance'] < hi]
+        bin_sr.append(float(np.mean([e['success'] for e in sub])) * 100 if sub else 0.0)
+        bin_n.append(len(sub))
+    bar_colors = ['#4CAF50' if s >= 80 else '#FF9800' if s >= 50 else '#F44336'
+                  for s in bin_sr]
+    bars = ax2.bar(bin_labels, bin_sr, color=bar_colors, edgecolor='white', linewidth=0.5)
+    for bar, n in zip(bars, bin_n):
+        ax2.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 1,
+                 f'n={n}', ha='center', va='bottom', fontsize=8)
+    ax2.set_ylim(0, 110)
+    ax2.set_xlabel('Distanza iniziale dalla sorgente (m)', fontsize=10)
+    ax2.set_ylabel('Success Rate (%)', fontsize=10)
+    ax2.set_title('SR in funzione della Distanza Iniziale', fontsize=11, fontweight='bold')
+    ax2.tick_params(axis='x', labelsize=9)
+    ax2.grid(axis='y', alpha=0.4)
+    fig.tight_layout()
+    p2 = analysis_dir / "plot_sr_analysis.png"
+    fig.savefig(p2, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    plot_paths['sr_analysis'] = p2
+
+    # ── Plot 3: Distanza media dalla sorgente nel tempo ──────────────────────
+    fig, ax = plt.subplots(figsize=(11, 5))
+
+    def _pad_and_stack(ep_list, max_len):
+        padded = []
+        for e in ep_list:
+            h = e['distance_history']
+            if len(h) < max_len:
+                h = h + [h[-1]] * (max_len - len(h))
+            padded.append(h[:max_len])
+        return np.array(padded) if padded else None
+
+    max_len    = max_steps + 1
+    steps_axis = np.arange(max_len) * dt_seconds / 60.0
+    all_mat = _pad_and_stack(episodes, max_len)
+    suc_mat = _pad_and_stack(success_eps, max_len)
+    fai_mat = _pad_and_stack(fail_eps, max_len)
+    if all_mat is not None:
+        ax.plot(steps_axis, all_mat.mean(axis=0), color='steelblue',
+                linewidth=1.8, label=f'Tutti ({len(episodes)} ep.)')
+    if suc_mat is not None:
+        ax.plot(steps_axis, suc_mat.mean(axis=0), color='green',
+                linewidth=1.8, linestyle='--', label=f'Successi ({len(success_eps)} ep.)')
+    if fai_mat is not None:
+        ax.plot(steps_axis, fai_mat.mean(axis=0), color='crimson',
+                linewidth=1.8, linestyle=':', label=f'Fallimenti ({len(fail_eps)} ep.)')
+    ax.set_xlabel('Tempo (minuti)', fontsize=11)
+    ax.set_ylabel('Distanza media dalla sorgente (m)', fontsize=11)
+    ax.set_title('Evoluzione della Distanza dalla Sorgente nel Tempo', fontsize=13, fontweight='bold')
+    ax.legend(fontsize=10)
+    ax.grid(alpha=0.4)
+    ax.set_xlim(0, max_steps * dt_seconds / 60.0)
+    fig.tight_layout()
+    p3 = analysis_dir / "plot_distance_over_time.png"
+    fig.savefig(p3, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    plot_paths['distance_time'] = p3
+
+    # ── Plot 4: Distribuzione distanza iniziale di spawn ─────────────────────
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    init_dists      = np.array([e['initial_distance'] for e in episodes])
+    init_dists_suc  = np.array([e['initial_distance'] for e in success_eps]) if success_eps else np.array([])
+    init_dists_fail = np.array([e['initial_distance'] for e in fail_eps])    if fail_eps    else np.array([])
+
+    ax = axes[0]
+    bin_edges   = np.arange(0, float(init_dists.max()) + 200, 200)
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+    bar_w = 160
+    counts_suc  = np.histogram(init_dists_suc,  bins=bin_edges)[0] if len(init_dists_suc)  else np.zeros(len(bin_centers), int)
+    counts_fail = np.histogram(init_dists_fail, bins=bin_edges)[0] if len(init_dists_fail) else np.zeros(len(bin_centers), int)
+    ax.bar(bin_centers, counts_suc,  width=bar_w, color='#4CAF50', edgecolor='white',
+           linewidth=0.4, label=f'Successi ({len(success_eps)})', alpha=0.9)
+    ax.bar(bin_centers, counts_fail, width=bar_w, bottom=counts_suc, color='#F44336',
+           edgecolor='white', linewidth=0.4, label=f'Fallimenti ({len(fail_eps)})', alpha=0.9)
+    ax.axvline(float(np.mean(init_dists)), color='navy', linestyle='--', linewidth=1.5,
+               label=f'Media: {np.mean(init_dists):.0f} m')
+    ax.axvline(float(np.median(init_dists)), color='darkorange', linestyle=':', linewidth=1.8,
+               label=f'Mediana: {np.median(init_dists):.0f} m')
+    ax.set_xlabel('Distanza iniziale dalla sorgente (m)', fontsize=11)
+    ax.set_ylabel('Numero di episodi', fontsize=11)
+    ax.set_title('Distribuzione delle Distanze di Spawn', fontsize=12, fontweight='bold')
+    ax.legend(fontsize=9)
+    ax.grid(axis='y', alpha=0.35)
+    stats_txt = (
+        f"N tot = {len(init_dists)}\n"
+        f"Min = {init_dists.min():.0f} m\n"
+        f"Max = {init_dists.max():.0f} m\n"
+        f"Std = {init_dists.std():.0f} m\n"
+        f"P25 = {np.percentile(init_dists, 25):.0f} m\n"
+        f"P75 = {np.percentile(init_dists, 75):.0f} m"
+    )
+    ax.text(0.97, 0.97, stats_txt, transform=ax.transAxes, fontsize=8.5,
+            va='top', ha='right',
+            bbox=dict(boxstyle='round,pad=0.4', facecolor='#F5F5F5', alpha=0.9))
+
+    ax2 = axes[1]
+    fine_edges   = np.arange(0, float(init_dists.max()) + 250, 250)
+    fine_centers = (fine_edges[:-1] + fine_edges[1:]) / 2
+    fine_sr, fine_n = [], []
+    for lo, hi in zip(fine_edges[:-1], fine_edges[1:]):
+        sub = [e for e in episodes if lo <= e['initial_distance'] < hi]
+        fine_sr.append(float(np.mean([e['success'] for e in sub])) * 100 if sub else np.nan)
+        fine_n.append(len(sub))
+    valid = [(c, s, n) for c, s, n in zip(fine_centers, fine_sr, fine_n) if not np.isnan(s)]
+    if valid:
+        vcs, vsr, vns = zip(*valid)
+        bar_colors2 = ['#4CAF50' if s >= 80 else '#FF9800' if s >= 50 else '#F44336'
+                       for s in vsr]
+        bars2 = ax2.bar(vcs, vsr, width=220, color=bar_colors2, edgecolor='white', linewidth=0.4)
+        for bar, n in zip(bars2, vns):
+            if n > 0:
+                ax2.text(bar.get_x() + bar.get_width() / 2,
+                         bar.get_height() + 1.5, f'n={n}',
+                         ha='center', va='bottom', fontsize=7.5)
+    global_sr_val = round(float(np.mean([e['success'] for e in episodes])) * 100)
+    ax2.axhline(global_sr_val, color='navy', linestyle='--', linewidth=1.2,
+                label=f'SR globale {global_sr_val}%')
+    ax2.set_ylim(0, 115)
+    ax2.set_xlabel('Distanza iniziale dalla sorgente (m)', fontsize=11)
+    ax2.set_ylabel('Success Rate (%)', fontsize=11)
+    ax2.set_title('SR per Fascia di Distanza Iniziale (bins 250 m)', fontsize=12, fontweight='bold')
+    ax2.legend(fontsize=9)
+    ax2.grid(axis='y', alpha=0.35)
+    fig.tight_layout()
+    p4 = analysis_dir / "plot_initial_dist.png"
+    fig.savefig(p4, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    plot_paths['initial_dist'] = p4
+
+    print(f"  Analisi plots salvati in: {analysis_dir}")
+    return plot_paths
 
 
 def main():
@@ -742,7 +1410,7 @@ def main():
                 print(f"[SKIP] Nessun modello trovato per sensor_range={sr}m in {trained_dir}")
                 continue
 
-            output_dir = str(PROJECT_ROOT / "evaluations" / f"evaluations_v{BASE_VERSION + i}")
+            output_dir = str(PROJECT_ROOT / "evaluations" / "evaluations_RL" / f"evaluations_v{BASE_VERSION + i}")
 
             cfg_override = load_config(CONFIG_PATH)
             cfg_override['agent']['sensor_range'] = sr
@@ -790,7 +1458,7 @@ def main():
             cfg_override['agent']['sensor_range'] = sr
             print(f"sensor_range dal modello: {sr}m")
 
-        output_dir = str(PROJECT_ROOT / "evaluations" / "evaluations_v12")
+        output_dir = str(PROJECT_ROOT / "evaluations" / "evaluations_RL" / "evaluations_v12")
 
         print(f"Modello selezionato: {model_path}")
         print(f"Output valutazioni: {output_dir}")
@@ -837,7 +1505,7 @@ def main_ablation_inference():
             print(f"ERRORE: Nessun modello trovato in {run_dir}/models/ — skip")
             continue
 
-        output_dir = str(PROJECT_ROOT / "evaluations" / f"evaluations_ablation_{name}")
+        output_dir = str(PROJECT_ROOT / "evaluations" / "evaluations_RL" / f"evaluations_ablation_{name}")
 
         print(f"\n{'='*70}")
         print(f"Ablation inference: reward_mode={name}")
