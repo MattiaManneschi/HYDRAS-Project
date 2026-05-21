@@ -795,6 +795,102 @@ class FCMAgent:
         return np.array([action]), None
 
 
+class FCMTrajAgent:
+    """FCM con memoria di traiettoria.
+
+    Stima il gradiente usando gli ultimi `window` punti reali della traiettoria
+    (posizione + concentrazione misurata) via least squares:
+
+        C(x, y) ≈ a + b·x + c·y   →   [b, c] = ∇C stimato
+
+    La finestra spaziale si adatta automaticamente alla scala del percorso
+    effettuato, invece di dipendere da un sensor_range fisso come FCMAgent.
+    Traccia internamente la posizione accumulando gli spostamenti applicati.
+    """
+
+    _DIAG = 1.0 / np.sqrt(2.0)
+    _DIRECTIONS = np.array([
+        [0.0,    1.0   ],
+        [0.0,   -1.0   ],
+        [1.0,    0.0   ],
+        [-1.0,   0.0   ],
+        [_DIAG,  _DIAG ],
+        [_DIAG, -_DIAG ],
+        [-_DIAG, _DIAG ],
+        [-_DIAG,-_DIAG ],
+    ], dtype=float)
+
+    def __init__(self, window: int = 20, step_size: float = 10.0):
+        """
+        Args:
+            window:    Numero di step passati da usare per la stima del gradiente.
+            step_size: Spostamento per step in metri (max_velocity * dt, default 10m).
+        """
+        self.window    = window
+        self.step_size = step_size
+        self._buf_x: List[float] = []
+        self._buf_y: List[float] = []
+        self._buf_c: List[float] = []
+        self._cur_x = 0.0
+        self._cur_y = 0.0
+
+    def reset(self):
+        self._buf_x.clear()
+        self._buf_y.clear()
+        self._buf_c.clear()
+        self._cur_x = 0.0
+        self._cur_y = 0.0
+
+    def _estimate_gradient(self) -> np.ndarray:
+        n = len(self._buf_x)
+        if n < 3:
+            return np.zeros(2)
+        X = np.array(self._buf_x) - np.mean(self._buf_x)
+        Y = np.array(self._buf_y) - np.mean(self._buf_y)
+        C = np.array(self._buf_c)
+        A = np.column_stack([np.ones(n), X, Y])
+        theta, _, _, _ = np.linalg.lstsq(A, C, rcond=None)
+        return theta[1:]   # [gx, gy]
+
+    def predict(
+        self,
+        obs: np.ndarray,
+        deterministic: bool = True,
+        action_masks: Optional[np.ndarray] = None,
+    ) -> Tuple[np.ndarray, None]:
+        flat_obs = obs[0] if obs.ndim == 2 else obs
+        center_conc = float(flat_obs[0])
+
+        self._buf_x.append(self._cur_x)
+        self._buf_y.append(self._cur_y)
+        self._buf_c.append(center_conc)
+        if len(self._buf_x) > self.window:
+            self._buf_x.pop(0)
+            self._buf_y.pop(0)
+            self._buf_c.pop(0)
+
+        gradient  = self._estimate_gradient()
+        grad_norm = float(np.linalg.norm(gradient))
+
+        if grad_norm < 1e-12:
+            if action_masks is not None:
+                valid  = np.where(action_masks)[0]
+                action = int(np.random.choice(valid)) if len(valid) > 0 else 0
+            else:
+                action = int(np.random.randint(0, 8))
+        else:
+            scores = self._DIRECTIONS @ gradient
+            if action_masks is not None:
+                scores[~action_masks.astype(bool)] = -np.inf
+            action = int(np.argmax(scores))
+
+        dx, dy = self._DIRECTIONS[action]
+        self._cur_x += dx * self.step_size
+        self._cur_y += dy * self.step_size
+
+        return np.array([action]), None
+
+
 def build_env_fcm(
     env_cfg,
     field,
@@ -834,6 +930,8 @@ def run_inference_fcm(
     sources_csv: str = "Coordinate_Sorgenti_FaseII.csv",
     chunk_ids: Optional[List[int]] = None,
     sensor_range: Optional[float] = None,
+    use_traj_memory: bool = False,
+    trajectory_window: int = 20,
     save_plots: bool = True,
     save_videos: bool = True,
     seed: Optional[int] = None,
@@ -841,12 +939,14 @@ def run_inference_fcm(
 ) -> List[ScenarioStats]:
     """Inferenza completa con Field Climbing Method.
 
-    Stessa struttura e stessi output di run_inference() (log.txt, episodes_data.json,
-    trajectory plots, analysis plots, showcase videos) ma con FCMAgent al posto del
-    modello RL addestrato.
+    Stessa struttura e stessi output di run_inference() ma con FCMAgent
+    (gradient ascent sui sensori correnti) o FCMTrajAgent (gradient ascent
+    sulla traiettoria accumulata) al posto del modello RL.
 
     Args:
-        sensor_range: Se None, usa il valore da config (default 20 m).
+        sensor_range:      Range sensori per FCMAgent (ignorato da FCMTrajAgent).
+        use_traj_memory:   Se True usa FCMTrajAgent, altrimenti FCMAgent.
+        trajectory_window: Numero di step passati per FCMTrajAgent.
     """
     if chunk_ids is None:
         chunk_ids = [0, 1, 2]
@@ -866,7 +966,13 @@ def run_inference_fcm(
     if sensor_range is None:
         sensor_range = float(config.get('agent', {}).get('sensor_range', 20.0))
 
-    fcm_agent = FCMAgent(sensor_range=sensor_range)
+    step_size = float(config.get('agent', {}).get('max_velocity', 1.0)) * dt_seconds
+    if use_traj_memory:
+        fcm_agent  = FCMTrajAgent(window=trajectory_window, step_size=step_size)
+        agent_label = f"FCM-Traj (window={trajectory_window} steps)"
+    else:
+        fcm_agent  = FCMAgent(sensor_range=sensor_range)
+        agent_label = f"FCM (sensor_range={sensor_range}m)"
 
     data_manager = DataManager(
         data_dir=data_dir,
@@ -895,7 +1001,6 @@ def run_inference_fcm(
         "_V3": "CL02_V3_SRC000_U_V_10mGrid.nc",
     }
 
-    agent_label = f"FCM (sensor_range={sensor_range}m)"
     print(f"\n{'='*100}")
     print(f"HYDRAS Inference FCM — {len(inference_sources)} sorgenti × 4 versioni × "
           f"{len(chunk_ids)} chunk × {n_episodes} ep.")
@@ -1070,11 +1175,13 @@ def run_inference_fcm(
 
 
 def main_fcm_inference():
-    """Inferenza FCM su SRC107-SRC132, sweep sensor_range 20→200m.
+    """Inferenza FCM su SRC107-SRC132, sweep sensor_range e trajectory window.
 
-    2 episodi per scenario (vs 5 dell'RL) — sufficiente per vedere il trend
-    di SR al variare del range senza moltiplicare inutilmente il runtime.
-    Output: evaluations/evaluations_FCM/fcm_pure_<N>m/
+    FCMAgent     — sweep sensor_range [20, 50, 100, 150, 200]m
+    FCMTrajAgent — sweep window [10, 20, 30, 50] steps
+
+    2 episodi per scenario, sufficiente per confrontare i range.
+    Output: evaluations/evaluations_FCM/fcm_<N>m/  e  fcm_traj_w<N>/
     """
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
     DATA_DIR     = str(PROJECT_ROOT / "data")
@@ -1082,20 +1189,28 @@ def main_fcm_inference():
 
     fcm_base = PROJECT_ROOT / "evaluations" / "evaluations_FCM"
 
+    # ── FCMAgent: sweep sensor_range ─────────────────────────────────────────
     for sr in [20, 50, 100, 150, 200]:
-        output_dir = str(fcm_base / f"fcm_pure_{sr}m")
+        output_dir = str(fcm_base / f"fcm_{sr}m")
         print(f"\n{'#'*80}")
         print(f"# FCM — sensor_range={sr}m")
-        print(f"# Output: {output_dir}")
         print(f"{'#'*80}\n")
         run_inference_fcm(
-            config_path=CONFIG_PATH,
-            data_dir=DATA_DIR,
-            output_dir=output_dir,
-            n_episodes=2,
-            sources_csv="Coordinate_Sorgenti_FaseII.csv",
-            chunk_ids=[0, 1, 2],
-            sensor_range=float(sr),
+            config_path=CONFIG_PATH, data_dir=DATA_DIR, output_dir=output_dir,
+            n_episodes=2, sources_csv="Coordinate_Sorgenti_FaseII.csv",
+            chunk_ids=[0, 1, 2], sensor_range=float(sr),
+        )
+
+    # ── FCMTrajAgent: sweep window ────────────────────────────────────────────
+    for w in [10, 20, 30, 50]:
+        output_dir = str(fcm_base / f"fcm_traj_w{w}")
+        print(f"\n{'#'*80}")
+        print(f"# FCM-Traj — window={w} steps")
+        print(f"{'#'*80}\n")
+        run_inference_fcm(
+            config_path=CONFIG_PATH, data_dir=DATA_DIR, output_dir=output_dir,
+            n_episodes=2, sources_csv="Coordinate_Sorgenti_FaseII.csv",
+            chunk_ids=[0, 1, 2], use_traj_memory=True, trajectory_window=w,
         )
 
     print(f"\nSweep FCM completato. Output: {fcm_base}")
