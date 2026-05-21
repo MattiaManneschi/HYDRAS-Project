@@ -1,0 +1,363 @@
+\documentclass[12pt, a4paper]{article}
+
+% ─── Encoding e lingua ────────────────────────────────────────────────────────
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[italian]{babel}
+
+% ─── Layout ───────────────────────────────────────────────────────────────────
+\usepackage[top=2.5cm, bottom=2.5cm, left=2.8cm, right=2.8cm, headheight=15pt]{geometry}
+\usepackage{parskip}
+\setlength{\parindent}{0pt}
+
+% ─── Font ─────────────────────────────────────────────────────────────────────
+\usepackage{lmodern}
+
+% ─── Grafica e colori ─────────────────────────────────────────────────────────
+\usepackage{graphicx}
+\usepackage[table]{xcolor}
+\definecolor{headerbg}{RGB}{30, 80, 140}
+\definecolor{rowalt}{RGB}{235, 242, 252}
+\definecolor{best}{RGB}{198, 239, 206}
+
+% ─── Tabelle ──────────────────────────────────────────────────────────────────
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{float}
+\newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+
+% ─── Figure affiancate ────────────────────────────────────────────────────────
+\usepackage{subcaption}
+
+% ─── Link e metadati ──────────────────────────────────────────────────────────
+\usepackage[hidelinks]{hyperref}
+
+% ─── Matematica ───────────────────────────────────────────────────────────────
+\usepackage{amsmath}
+
+% ─── Sezioni compatte ─────────────────────────────────────────────────────────
+\usepackage{titlesec}
+\titlespacing*{\section}{0pt}{14pt}{6pt}
+\titlespacing*{\subsection}{0pt}{10pt}{4pt}
+
+% ─── Header / Footer ──────────────────────────────────────────────────────────
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small HYDRAS --- Report FCM}
+\fancyhead[R]{}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\begin{document}
+
+% ─── Titolo ───────────────────────────────────────────────────────────────────
+\begin{center}
+    {\LARGE\bfseries HYDRAS --- Report FCM}\\[6pt]
+    {\large Field Climbing Method come Baseline di Confronto con RL}
+\end{center}
+\vspace{0.3cm}
+\hrule
+\vspace{0.5cm}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Motivazione}
+
+Per valutare il contributo dell'apprendimento per rinforzo nel problema di source
+seeking, \`e stato implementato e testato il \textbf{Field Climbing Method} (FCM)
+come baseline algoritmica.
+FCM rappresenta l'approccio gradient-based classico al problema: stima il gradiente
+del campo di concentrazione a partire dalle letture locali dei sensori e si muove
+nella direzione di salita pi\`u ripida.
+A differenza del modello RL, non richiede training e non mantiene memoria globale
+dell'episodio: decide l'azione ad ogni step basandosi esclusivamente sulle
+osservazioni correnti.
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Algoritmo Field Climbing Method}
+
+\subsection{Stima del Gradiente per Minimi Quadrati}
+
+L'agente legge la concentrazione in \textbf{9 punti}: la posizione corrente
+$\mathbf{p}$ (concentrazione centrale $C_0$) e gli 8 sensori direzionali che
+campionano $C(\mathbf{p} + \boldsymbol{\delta}_i)$ con offset
+$\boldsymbol{\delta}_i = \hat{d}_i \cdot r_s$, dove $\hat{d}_i$ \`e il versore
+della direzione $i$ e $r_s$ il \emph{sensor range}.
+
+Assumendo un'approssimazione lineare locale del campo (Taylor al primo ordine):
+\begin{equation}
+    C(\mathbf{p} + \boldsymbol{\delta}_i) \approx C(\mathbf{p}) + \nabla C \cdot \boldsymbol{\delta}_i
+\end{equation}
+
+Il punto centrale funge da riferimento: sottraendo $C_0$ da ciascuna lettura
+e normalizzando per $r_s$ si ottiene un sistema sovradeterminato $8 \times 2$:
+\begin{equation}
+    \mathbf{D}\,\nabla C = \mathbf{b}
+    \qquad
+    \mathbf{D} \in \mathbb{R}^{8 \times 2},\quad
+    b_i = \frac{C_i - C_0}{r_s}
+\end{equation}
+
+risolto per minimi quadrati con \texttt{numpy.linalg.lstsq}.
+Il punto centrale ancora il piano a $C_0$ in $(0,0)$; gli 8 sensori
+determinano congiuntamente la direzione e la magnitudine del gradiente.
+
+\subsection{Selezione dell'Azione}
+
+Le 8 azioni discrete corrispondono alle direzioni cardinali e diagonali
+(N, S, E, O, NE, SE, NO, SO); ogni direzione ha passo fisso pari a
+$v_{\max} \cdot \Delta t = 1\,\text{m/s} \times 10\,\text{s} = 10\,\text{m}$.
+
+La direzione scelta massimizza la proiezione del gradiente stimato:
+\begin{equation}
+    a^* = \arg\max_{i} \; \hat{d}_i \cdot \nabla C
+\end{equation}
+Se il gradiente stimato \`e inferiore a $10^{-12}$ in norma (campo localmente
+piatto), l'azione viene scelta uniformemente a caso tra le direzioni non mascherate.
+
+\subsection{Action Masking}
+
+Per impedire collisioni con la costa, le azioni che porterebbero l'agente
+fuori dal dominio vengono mascherate prima della selezione, sia nel caso
+gradient-based che in quello random.
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Dataset e Ambiente di Simulazione}
+
+Il setup sperimentale \`e identico a quello usato per il modello RL.
+Il dataset \`e composto da simulazioni MIKE21 su un dominio marino di
+$3 \times 2{,}5\,\text{km}$ (baia di Cecina, UTM32N), risoluzione $10\,\text{m}$,
+passo temporale $10\,\text{s}$, con 132 sorgenti $\times$ 4 scenari vento (V0--V3).
+
+\begin{itemize}
+    \item \textbf{Sorgenti di inferenza:} SRC107--SRC132 (26 sorgenti)
+    \item \textbf{Chunk temporali:} Q1/4, Q1/2, Q3/4
+    \item \textbf{Episodi per scenario:} 2
+    \item \textbf{Totale episodi per run:} $26 \times 4 \times 3 \times 2 = 624$
+    \item \textbf{Durata massima episodio:} 1080 step ($= 3\,\text{h}$ simulate)
+    \item \textbf{Soglia di successo:} distanza dalla sorgente $\leq 50\,\text{m}$
+    \item \textbf{Distanza iniziale media:} $\approx 800\,\text{m}$
+\end{itemize}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Sweep del Sensor Range}
+
+Il parametro critico di FCM \`e il \textbf{sensor range} $r_s$: la distanza a cui
+vengono campionati i sensori direzionali.
+Un range troppo piccolo rende i sensori insensibili al gradiente (differenze di
+concentrazione trascurabili su scala locale); un range troppo grande campiona zone
+distanti dalla posizione corrente, riducendo la validit\`a dell'approssimazione lineare
+e aumentando il tempo medio di convergenza verso la sorgente.
+
+Sono stati testati cinque valori: $r_s \in \{20, 50, 100, 150, 200\}\,\text{m}$,
+con 2 episodi per scenario (624 episodi totali per run).
+
+\begin{table}[htbp]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\small
+\begin{tabular}{C{2cm} C{2.2cm} C{2.2cm} C{2cm} C{2cm} C{2cm} C{2cm}}
+\toprule
+\rowcolor{headerbg}
+\textcolor{white}{\textbf{$r_s$}} &
+\textcolor{white}{\textbf{SR globale}} &
+\textcolor{white}{\textbf{Step medi (succ.)}} &
+\textcolor{white}{\textbf{V0}} &
+\textcolor{white}{\textbf{V1}} &
+\textcolor{white}{\textbf{V2}} &
+\textcolor{white}{\textbf{V3}} \\
+\midrule
+20\,m  & 19{,}4\% & 274{,}5 ($\sim$45{,}7\,min) & 17{,}9\% & 10{,}3\% & 19{,}2\% & 30{,}1\% \\
+\rowcolor{best}
+\textbf{50\,m}  & \textbf{32{,}9\%} & \textbf{182{,}7 ($\sim$30{,}5\,min)} & \textbf{39{,}7\%} & \textbf{16{,}0\%} & \textbf{23{,}7\%} & \textbf{51{,}9\%} \\
+100\,m & 18{,}8\% & 411{,}6 ($\sim$68{,}6\,min) & 28{,}2\% & 8{,}3\%  & 16{,}0\% & 22{,}4\% \\
+150\,m & 13{,}6\% & 546{,}4 ($\sim$91{,}1\,min) & 16{,}0\% & 5{,}1\%  & 12{,}2\% & 21{,}2\% \\
+200\,m & 13{,}8\% & 398{,}7 ($\sim$66{,}4\,min) & 6{,}4\%  & 6{,}4\%  & 13{,}5\% & 28{,}8\% \\
+\bottomrule
+\end{tabular}
+\caption{Risultati dello sweep su sensor range. In verde il valore ottimale ($r_s = 50\,\text{m}$).}
+\end{table}
+
+\begin{table}[htbp]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\small
+\begin{tabular}{C{2cm} C{3cm} C{3cm} C{3cm}}
+\toprule
+\rowcolor{headerbg}
+\textcolor{white}{\textbf{$r_s$}} &
+\textcolor{white}{\textbf{Q1/4}} &
+\textcolor{white}{\textbf{Q1/2}} &
+\textcolor{white}{\textbf{Q3/4}} \\
+\midrule
+20\,m  & 41{,}3\% & 1{,}0\%  & 15{,}9\% \\
+\rowcolor{best}
+\textbf{50\,m}  & \textbf{50{,}5\%} & \textbf{11{,}5\%} & \textbf{36{,}5\%} \\
+100\,m & 28{,}8\% & 1{,}4\%  & 26{,}0\% \\
+150\,m & 16{,}8\% & 1{,}0\%  & 23{,}1\% \\
+200\,m & 11{,}1\% & 7{,}7\%  & 22{,}6\% \\
+\bottomrule
+\end{tabular}
+\caption{Success rate per chunk temporale al variare del sensor range.}
+\end{table}
+
+Il valore ottimale risulta $r_s = 50\,\text{m}$, con un success rate globale del
+\textbf{32{,}9\%} e un tempo medio al successo di $\sim$30 minuti.
+Per valori superiori il success rate crolla significativamente rispetto al valore
+ottimale, e il tempo medio al successo aumenta, a causa dell'approssimazione lineare
+sempre meno valida su scale spaziali grandi rispetto alla struttura del plume.
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Analisi dei Risultati --- $r_s = 50\,\text{m}$}
+
+I grafici seguenti analizzano il comportamento di FCM con il sensor range ottimale
+su 624 episodi.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.88\linewidth]{../../evaluations/evaluations_FCM/fcm_pure_50m/analysis/plot_initial_dist.png}
+  \caption{Distribuzione delle distanze iniziali di spawn --- FCM $r_s = 50\,\text{m}$.}
+\end{figure}
+
+\vspace{1.2cm}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.88\linewidth]{../../evaluations/evaluations_FCM/fcm_pure_50m/analysis/plot_sr_analysis.png}
+  \caption{Success rate per scenario di vento e chunk temporale --- FCM $r_s = 50\,\text{m}$.}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.88\linewidth]{../../evaluations/evaluations_FCM/fcm_pure_50m/analysis/plot_success_time_dist.png}
+  \caption{Distribuzione del tempo al successo --- FCM $r_s = 50\,\text{m}$.}
+\end{figure}
+
+\vspace{1.2cm}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.88\linewidth]{../../evaluations/evaluations_FCM/fcm_pure_50m/analysis/plot_distance_over_time.png}
+  \caption{Distanza media dalla sorgente nel tempo --- FCM $r_s = 50\,\text{m}$.}
+\end{figure}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\subsection{Casi rappresentativi}
+
+\subsubsection*{Episodi di successo}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.62\linewidth]{../../evaluations/evaluations_FCM/fcm_pure_50m/SRC123/V0/ep02_chunk1_trajectory.png}
+  \caption{Successo --- SRC123, V0, Q1/2: convergenza in 137 step ($\sim$23 min) da 640\,m.
+           Gradiente ben definito lungo tutto l'episodio; risalita direzionale del plume.}
+\end{figure}
+
+\vspace{1.2cm}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.62\linewidth]{../../evaluations/evaluations_FCM/fcm_pure_50m/SRC118/V0/ep02_chunk2_trajectory.png}
+  \caption{Successo --- SRC118, V0, Q3/4: convergenza in 252 step ($\sim$42 min) da 651\,m.
+           Alcune deviazioni intermedie ma tendenza direzionale sostenuta verso la sorgente.}
+\end{figure}
+
+\subsubsection*{Episodi di fallimento}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.62\linewidth]{../../evaluations/evaluations_FCM/fcm_pure_50m/SRC109/V1/ep01_chunk1_trajectory.png}
+  \caption{Plume sparso --- SRC109, V1, Q1/2: l'agente finisce a 2532\,m (partenza 2004\,m).
+           Il plume diffuso annulla il gradiente locale: l'agente degenera in random walk
+           e nei video appare quasi fermo per tutta la durata dell'episodio.}
+\end{figure}
+
+\vspace{1.2cm}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.62\linewidth]{../../evaluations/evaluations_FCM/fcm_pure_50m/SRC127/V2/ep01_chunk2_trajectory.png}
+  \caption{Massimo locale --- SRC127, V2, Q3/4: l'agente percorre 886\,m verso la sorgente
+           (da 1008\,m a 122\,m) ma si blocca su un picco locale di concentrazione
+           e non riesce a uscirne fino al timeout.}
+\end{figure}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Confronto FCM vs.\ RL}
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\small
+\begin{tabular}{L{4cm} C{3.5cm} C{3.5cm}}
+\toprule
+\rowcolor{headerbg}
+\textcolor{white}{\textbf{Metrica}} &
+\textcolor{white}{\textbf{FCM ($r_s{=}50\,\text{m}$)}} &
+\textcolor{white}{\textbf{RL (MaskablePPO)}} \\
+\midrule
+\rowcolor{rowalt}
+SR globale          & 32{,}9\%  & \textbf{96{,}9\%} {\scriptsize\textcolor{green!50!black}{(+64{,}0\%)}} \\
+Step medi (succ.)   & 182{,}7 ($\sim$30{,}5\,min)  & \textbf{129{,}2 ($\sim$21{,}5\,min)} \\
+\rowcolor{rowalt}
+V0                  & 39{,}7\%  & \textbf{100{,}0\%} {\scriptsize\textcolor{green!50!black}{(+60{,}3\%)}} \\
+V1                  & 16{,}0\%  & \textbf{99{,}0\%}  {\scriptsize\textcolor{green!50!black}{(+83{,}0\%)}} \\
+\rowcolor{rowalt}
+V2                  & 23{,}7\%  & \textbf{88{,}7\%}  {\scriptsize\textcolor{green!50!black}{(+65{,}0\%)}} \\
+V3                  & 51{,}9\%  & \textbf{99{,}7\%}  {\scriptsize\textcolor{green!50!black}{(+47{,}8\%)}} \\
+\rowcolor{rowalt}
+Q1/4                & 50{,}5\%  & \textbf{100{,}0\%} {\scriptsize\textcolor{green!50!black}{(+49{,}5\%)}} \\
+Q1/2                & 11{,}5\%  & \textbf{93{,}5\%}  {\scriptsize\textcolor{green!50!black}{(+82{,}0\%)}} \\
+\rowcolor{rowalt}
+Q3/4                & 36{,}5\%  & \textbf{97{,}1\%}  {\scriptsize\textcolor{green!50!black}{(+60{,}6\%)}} \\
+\bottomrule
+\end{tabular}
+\caption{Confronto diretto FCM ottimale vs.\ modello RL (\texttt{ppo\_20260516\_143937}, 1560 episodi).
+         Stesse sorgenti di test, stesso ambiente, stessa soglia di successo.}
+\end{table}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Conclusioni e Limiti di FCM}
+
+\subsection{Limiti strutturali e casi critici}
+
+Il Field Climbing Method \`e un metodo \textbf{puramente locale e reattivo}:
+non mantiene memoria dell'episodio, non sfrutta informazioni di vento e corrente,
+e non ha mai visto esempi di traiettorie di successo.
+Questo comporta due categorie di fallimento sistematico:
+
+\begin{enumerate}
+    \item \textbf{Campo localmente piatto.}
+    In zone lontane dalla sorgente, o in scenari di vento debole (V1), il plume
+    \`e cos\`i diffuso che tutti i sensori restituiscono concentrazioni quasi identiche.
+    Il gradiente stimato \`e nullo o dominato dal rumore: l'agente degenera in un
+    random walk e nei video appare sostanzialmente fermo (micro-oscillazioni di
+    $\pm 10\,\text{m}$ su scala di centinaia di metri).
+    V1 \`e il caso pi\`u critico: success rate del 16{,}0\% contro il 99{,}0\% del modello RL
+    (+83pp), confermando che il plume diffuso non \`e un problema di parametrizzazione
+    del sensor range ma una limitazione intrinseca dell'approccio gradient-based.
+
+    \item \textbf{Gradiente locale ingannevole.}
+    In un ambiente costiero con correnti complesse, la struttura del plume pu\`o
+    presentare massimi locali di concentrazione distanti dalla sorgente reale.
+    FCM segue il gradiente locale senza meccanismi di esplorazione forzata:
+    viene attratto da questi massimi locali e si blocca.
+    Il chunk Q1/2 registra le performance peggiori per tutti i sensor range
+    (11{,}5\% nel caso migliore), suggerendo che il campo a met\`a simulazione
+    abbia una struttura di plume pi\`u complessa o meno direzionata.
+\end{enumerate}
+
+\subsection{Conclusione}
+
+Il gap di 64 punti percentuali tra FCM (32{,}9\%) e RL (96{,}9\%) quantifica
+il contributo dell'apprendimento per rinforzo in questo problema.
+Il modello RL ha appreso strategie non riducibili al gradiente locale: sfruttamento
+delle informazioni di vento e corrente, navigazione in zone a bassa concentrazione,
+recupero da situazioni di stallo.
+Queste strategie emergono dall'ottimizzazione su milioni di episodi con scenari
+diversificati e non sono accessibili a un metodo che decide step-by-step
+senza contesto storico.
+
+\end{document}
