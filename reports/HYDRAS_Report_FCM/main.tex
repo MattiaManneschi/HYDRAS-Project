@@ -81,47 +81,53 @@ osservazioni correnti.
 \subsection{Stima del Gradiente per Minimi Quadrati}
 
 L'agente legge la concentrazione in \textbf{9 punti}: la posizione corrente
-$\mathbf{p}$ (concentrazione centrale $C_0$) e gli 8 sensori direzionali che
+$\mathbf{p}$ (concentrazione centrale $C_0$) e 8 sensori direzionali che
 campionano $C(\mathbf{p} + \boldsymbol{\delta}_i)$ con offset
-$\boldsymbol{\delta}_i = \hat{d}_i \cdot r_s$, dove $\hat{d}_i$ \`e il versore
-della direzione $i$ e $r_s$ il \emph{sensor range}.
+$\boldsymbol{\delta}_i = r_s\,\hat{d}_i$, dove $r_s$ \`e il \emph{sensor range}
+e $\hat{d}_i$ \`e uno degli 8 versori cardinali e diagonali
+(N, S, E, O, NE, SE, NO, SO) --- gli stessi delle azioni discrete (sez.~2.2).
 
 Assumendo un'approssimazione lineare locale del campo (Taylor al primo ordine):
 \begin{equation}
     C(\mathbf{p} + \boldsymbol{\delta}_i) \approx C(\mathbf{p}) + \nabla C \cdot \boldsymbol{\delta}_i
 \end{equation}
 
-Il punto centrale funge da riferimento: sottraendo $C_0$ da ciascuna lettura
-e normalizzando per $r_s$ si ottiene un sistema sovradeterminato $8 \times 2$:
+Sottraendo $C_0$ da ciascuna lettura e normalizzando per $r_s$, l'equazione~(1)
+diventa $\hat{d}_i \cdot \nabla C \approx b_i$ per ogni sensore $i$, con:
 \begin{equation}
-    \mathbf{D}\,\nabla C = \mathbf{b}
-    \qquad
-    \mathbf{D} \in \mathbb{R}^{8 \times 2},\quad
-    b_i = \frac{C_i - C_0}{r_s}
+    b_i = \frac{C_i - C_0}{r_s}, \qquad C_i \equiv C(\mathbf{p}+\boldsymbol{\delta}_i)
 \end{equation}
 
-risolto per minimi quadrati con \texttt{numpy.linalg.lstsq}.
-Il punto centrale ancora il piano a $C_0$ in $(0,0)$; gli 8 sensori
-determinano congiuntamente la direzione e la magnitudine del gradiente.
+Raccogliendo gli 8 vincoli in forma matriciale ($\mathbf{D} \in \mathbb{R}^{8 \times 2}$,
+$D_{ij} = (\hat{d}_i)_j$) si ottiene il sistema sovradeterminato
+$\mathbf{D}\,\nabla C \approx \mathbf{b}$, risolto per minimi quadrati con
+\texttt{numpy.linalg.lstsq}. La disposizione simmetrica delle 8 direzioni
+(per ogni $\hat{d}_i$ \`e presente anche $-\hat{d}_i$) implica
+$\sum_i (\hat{d}_i)_x^2 = \sum_i (\hat{d}_i)_y^2 = 4$ e
+$\sum_i (\hat{d}_i)_x(\hat{d}_i)_y = 0$, ovvero
+$\mathbf{D}^\top\mathbf{D} = 4\,\mathbf{I}_2$.
+Il sistema \`e perfettamente condizionato e la stima ha forma chiusa:
+\begin{equation}
+    \hat{\nabla C} = \frac{1}{4}\,\mathbf{D}^\top\mathbf{b}
+    \;=\; \frac{1}{4}\sum_{i=1}^{8} \hat{d}_i\,b_i
+\end{equation}
 
 \subsection{Selezione dell'Azione}
 
-Le 8 azioni discrete corrispondono alle direzioni cardinali e diagonali
-(N, S, E, O, NE, SE, NO, SO); ogni direzione ha passo fisso pari a
+Le 8 azioni discrete corrispondono esattamente alle 8 direzioni $\hat{d}_i$ usate
+dai sensori in sez.~2.1, con passo fisso pari a
 $v_{\max} \cdot \Delta t = 1\,\text{m/s} \times 10\,\text{s} = 10\,\text{m}$.
 
-La direzione scelta massimizza la proiezione del gradiente stimato:
+Avendo già il gradiente stimato $\hat{\nabla C}$, si sceglie la direzione
+discreta pi\`u allineata ad esso:
 \begin{equation}
-    a^* = \arg\max_{i} \; \hat{d}_i \cdot \nabla C
+    a^* = \arg\max_{i \in \{1,\ldots,8\}} \; \hat{d}_i \cdot \hat{\nabla C}
 \end{equation}
-Se il gradiente stimato \`e inferiore a $10^{-12}$ in norma (campo localmente
-piatto), l'azione viene scelta uniformemente a caso tra le direzioni non mascherate.
-
-\subsection{Action Masking}
-
-Per impedire collisioni con la costa, le azioni che porterebbero l'agente
-fuori dal dominio vengono mascherate prima della selezione, sia nel caso
-gradient-based che in quello random.
+L'agente si sposta quindi di $10\,\text{m}$ nella direzione $\hat{d}_{a^*}$.
+Se $\|\hat{\nabla C}\| < 10^{-12}$ (campo localmente piatto),
+l'azione viene scelta uniformemente a caso tra le direzioni valide.
+In entrambi i casi, le direzioni che porterebbero l'agente fuori dal dominio
+(collisione con la costa) vengono preventivamente escluse tramite action masking.
 
 % ══════════════════════════════════════════════════════════════════════════════
 \section{Dataset e Ambiente di Simulazione}
@@ -319,13 +325,13 @@ Q3/4                & 36{,}5\%  & \textbf{97{,}1\%}  {\scriptsize\textcolor{gree
 \end{table}
 
 % ══════════════════════════════════════════════════════════════════════════════
-\section{Conclusioni e Limiti di FCM}
+\section{Discussione e Conclusione}
 
 \subsection{Limiti strutturali e casi critici}
 
 Il Field Climbing Method \`e un metodo \textbf{puramente locale e reattivo}:
 non mantiene memoria dell'episodio, non sfrutta informazioni di vento e corrente,
-e non ha mai visto esempi di traiettorie di successo.
+e non dispone di alcun meccanismo di esplorazione globale.
 Questo comporta due categorie di fallimento sistematico:
 
 \begin{enumerate}
@@ -333,8 +339,8 @@ Questo comporta due categorie di fallimento sistematico:
     In zone lontane dalla sorgente, o in scenari di vento debole (V1), il plume
     \`e cos\`i diffuso che tutti i sensori restituiscono concentrazioni quasi identiche.
     Il gradiente stimato \`e nullo o dominato dal rumore: l'agente degenera in un
-    random walk e nei video appare sostanzialmente fermo (micro-oscillazioni di
-    $\pm 10\,\text{m}$ su scala di centinaia di metri).
+    random walk con passi da 10\,m e accumula spostamenti confinati a poche
+    decine di metri su scala di centinaia di metri di distanza dalla sorgente.
     V1 \`e il caso pi\`u critico: success rate del 16{,}0\% contro il 99{,}0\% del modello RL
     (+83pp), confermando che il plume diffuso non \`e un problema di parametrizzazione
     del sensor range ma una limitazione intrinseca dell'approccio gradient-based.
