@@ -1,0 +1,426 @@
+\documentclass[12pt, a4paper]{article}
+
+% ─── Encoding e lingua ────────────────────────────────────────────────────────
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[italian]{babel}
+
+% ─── Layout ───────────────────────────────────────────────────────────────────
+\usepackage[top=2.5cm, bottom=2.5cm, left=2.8cm, right=2.8cm, headheight=15pt]{geometry}
+\usepackage{parskip}
+\setlength{\parindent}{0pt}
+
+% ─── Font ─────────────────────────────────────────────────────────────────────
+\usepackage{lmodern}
+
+% ─── Grafica e colori ─────────────────────────────────────────────────────────
+\usepackage{graphicx}
+\usepackage[table]{xcolor}
+\definecolor{headerbg}{RGB}{30, 80, 140}
+\definecolor{rowalt}{RGB}{235, 242, 252}
+\definecolor{best}{RGB}{198, 239, 206}
+\definecolor{worst}{RGB}{255, 230, 230}
+
+% ─── Tabelle ──────────────────────────────────────────────────────────────────
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{float}
+\newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+
+% ─── Figure affiancate ────────────────────────────────────────────────────────
+\usepackage{subcaption}
+
+% ─── Link e metadati ──────────────────────────────────────────────────────────
+\usepackage[hidelinks]{hyperref}
+
+% ─── Matematica ───────────────────────────────────────────────────────────────
+\usepackage{amsmath}
+\usepackage{amssymb}
+
+% ─── Pseudocodice ─────────────────────────────────────────────────────────────
+\usepackage{listings}
+\lstdefinelanguage{pseudocode}{
+  morekeywords={finché, se, allora, altrimenti, ritorna, calcola},
+  sensitive=false,
+  morecomment=[l]{\%},
+}
+\lstset{
+  language=pseudocode,
+  basicstyle=\small\ttfamily,
+  keywordstyle=\bfseries,
+  commentstyle=\itshape\color{gray!70!black},
+  frame=tb,
+  framesep=6pt,
+  xleftmargin=1.5em,
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  numbersep=8pt,
+  breaklines=true,
+  tabsize=3,
+  showstringspaces=false,
+  captionpos=b,
+}
+
+% ─── Sezioni compatte ─────────────────────────────────────────────────────────
+\usepackage{titlesec}
+\titlespacing*{\section}{0pt}{14pt}{6pt}
+\titlespacing*{\subsection}{0pt}{10pt}{4pt}
+
+% ─── Header / Footer ──────────────────────────────────────────────────────────
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small HYDRAS --- Report V12}
+\fancyhead[R]{}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\begin{document}
+
+% ─── Titolo ───────────────────────────────────────────────────────────────────
+\begin{center}
+    {\LARGE\bfseries HYDRAS --- Report V12}\\[6pt]
+    {\large FCM Adattivo, RL con Doppia Corona di Sensori, Spawn Maps}
+\end{center}
+\vspace{0.3cm}
+\hrule
+\vspace{0.5cm}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{FCM Adattivo con Passo Ottimizzato}
+
+\subsection{Motivazione}
+
+Nel Field Climbing Method classico (FCM puro) il passo dell'agente \`e fisso:
+$\Delta x = v_{\max} \cdot \Delta t = 1\,\text{m/s} \times 10\,\text{s} = 10\,\text{m}$.
+Questa scelta \`e indipendente dall'intensit\`a del gradiente stimato: in zone a
+gradiente debole il passo rimane invariato, portando a movimenti incerti e potenzialmente
+oscillanti; in zone a gradiente forte un passo fisso pu\`o sovrastimare la scala
+spaziale rilevante.
+
+L'idea del FCM adattivo \`e di modulare il passo in proporzione inversa alla norma
+del gradiente stimato $\|\hat{\nabla} C\|$, interpretando quest'ultima come una
+misura della ``certezza'' locale della direzione di salita.
+
+\subsection{Passo Adattivo}
+
+L'agente adottato usa la seguente regola di passo:
+\begin{equation}
+    \Delta x = \min\!\left(\frac{K}{\left\|\hat{\nabla}C\right\|},\;\Delta x_{\max}\right)
+    \label{eq:adaptive_step}
+\end{equation}
+
+dove:
+\begin{itemize}
+    \item $K > 0$ \`e la \textbf{costante di proporzionalit\`a} da ottimizzare;
+    \item $\Delta x_{\max} = 50\,\text{m}$ \`e il cap superiore che evita passi eccessivi
+          in zone a gradiente quasi nullo;
+    \item $\|\hat{\nabla} C\|$ \`e la norma euclidea del gradiente stimato tramite
+          regressione ai minimi quadrati (Taylor al primo ordine, 8 direzioni).
+\end{itemize}
+
+Il passo \`e inversamente proporzionale all'intensit\`a del gradiente con costante $K$: vicino a un massimo (gradiente forte) l'agente avanza con cautela; in zone di plume diffuso (gradiente debole) avanza pi\`u rapidamente, con un cap superiore per evitare passi fuori scala.
+
+\subsection{Ottimizzazione di $K$ tramite Metodo di Brent}
+
+La scelta di $K$ \`e formulata come un problema di ottimizzazione scalare:
+si massimizza il success rate globale (SR) come funzione di $K$ su un sottoinsieme
+di scenari di calibrazione:
+\begin{equation}
+    K^* = \operatorname*{argmax}_{K \in [K_{\min},\, K_{\max}]} \text{SR}(K)
+\end{equation}
+
+Poich\'e SR \`e una funzione costosa da valutare (richiede la simulazione di tutti gli
+episodi) e non \`e garantita una forma analitica, si minimizza $f(K) = -\text{SR}(K)$
+tramite il \textbf{metodo di Brent} (\texttt{scipy.optimize.brent}), un algoritmo di
+minimizzazione scalare a convergenza super-lineare che alterna interpolazione parabolica
+(veloce) e sezione aurea (robusta).
+Il metodo mantiene un \emph{bracket} $[a,b]$ garantito contenere il minimo e tre
+punti di riferimento: $K$ (migliore), $K_w$ (secondo migliore), $K_v$ (precedente $K_w$).
+Ad ogni iterazione tenta l'interpolazione parabolica; se il punto suggerito cade fuori
+dal bracket o non riduce sufficientemente l'intervallo, retrocede alla sezione aurea.
+Converge in poche decine di valutazioni di $f$. Di seguito ne viene riportato lo pseudocodice.
+
+\begin{figure}[H]
+\noindent\rule{\linewidth}{0.8pt}\vspace{-3pt}
+\noindent\rule{\linewidth}{0.4pt}
+\vspace{4pt}
+
+\noindent\textit{Metodo di Brent: minimizzazione di $f(K)$ su $[a,b]$}
+
+\vspace{4pt}
+\noindent\rule{\linewidth}{0.4pt}
+\vspace{4pt}
+
+\small
+\begin{tabbing}
+\hspace{2.2em}\=\hspace{2.2em}\=\hspace{2.2em}\=\kill
+$\varphi = \dfrac{3-\sqrt{5}}{2}$;\quad\textit{(sezione aurea $\approx 0{,}382$)}\\[6pt]
+$\varepsilon,\, \delta$ = tolleranze in input;\\[6pt]
+$K = K_w = K_v = a + \varphi(b-a)$;\quad $f_K = f_{K_w} = f_{K_v} = f(K)$;\\[6pt]
+$e = 0$;\quad\textit{(ampiezza del passo precedente; 0 = nessun passo ancora eseguito)}\\[8pt]
+\textbf{finché} $(b-a) > \varepsilon$:\\[4pt]
+\>$m = \dfrac{a+b}{2}$;\\[6pt]
+\>\textbf{se} $|e| > \delta$:\quad\textit{(tenta interpolazione parabolica)}\\[2pt]
+\>\>$r = (K - K_w)(f_K - f_{K_v})$;\\[2pt]
+\>\>$q = (K - K_v)(f_K - f_{K_w})$;\\[2pt]
+\>\>$p = (K - K_v)\cdot q - (K - K_w)\cdot r$;\quad $q = 2(q - r)$;\\[2pt]
+\>\>\textbf{se} $q > 0$:\;$p = -p$\quad\textbf{altrimenti}:\;$q = -q$;\quad\textit{(garantisce $q>0$)}\\[4pt]
+\>\>\textbf{se} $a < K+\dfrac{p}{q} < b$ \textbf{e} $\left|\dfrac{p}{q}\right| < \dfrac{|e|}{2}$:\\[6pt]
+\>\>\>$u = K + \dfrac{p}{q}$;\quad\textit{(accetta passo parabolico)}\\[6pt]
+\>\>\textbf{altrimenti}:\\[2pt]
+\>\>\>$e = (K \geq m \;?\; a : b) - K$;\quad $u = K + \varphi \cdot e$;\quad\textit{(sezione aurea)}\\[6pt]
+\>\textbf{altrimenti}:\\[2pt]
+\>\>$e = (K \geq m \;?\; a : b) - K$;\quad $u = K + \varphi \cdot e$;\\[8pt]
+\>$f_u = f(u)$;\\[8pt]
+\>\textbf{se} $f_u \leq f_K$:\quad\textit{(aggiorna bracket e punti di riferimento)}\\[2pt]
+\>\>\textbf{se} $u < K$:\;$b = K$;\quad\textbf{altrimenti}:\;$a = K$;\\[2pt]
+\>\>$K_v = K_w$;\; $f_{K_v} = f_{K_w}$;\quad $K_w = K$;\; $f_{K_w} = f_K$;\quad $K = u$;\; $f_K = f_u$;\\[4pt]
+\>\textbf{altrimenti}:\\[2pt]
+\>\>\textbf{se} $u < K$:\;$a = u$;\quad\textbf{altrimenti}:\;$b = u$;\\[2pt]
+\>\>\textbf{se} $f_u \leq f_{K_w}$ \textbf{o} $K_w = K$:\\[2pt]
+\>\>\>$K_v = K_w$;\; $f_{K_v} = f_{K_w}$;\quad $K_w = u$;\; $f_{K_w} = f_u$;\\[4pt]
+\>\>\textbf{altrimenti se} $f_u \leq f_{K_v}$ \textbf{o} $K_v = K$ \textbf{o} $K_v = K_w$:\\[2pt]
+\>\>\>$K_v = u$;\; $f_{K_v} = f_u$;\\[8pt]
+\textbf{ritorna} $K$;
+\end{tabbing}
+
+\vspace{2pt}
+\noindent\rule{\linewidth}{0.4pt}\vspace{-3pt}
+\noindent\rule{\linewidth}{0.8pt}
+\end{figure}
+
+Il valore ottimo trovato \`e:
+\begin{equation}
+    K^* = 0{,}124
+\end{equation}
+
+con cap $\Delta x_{\max} = 50\,\text{m}$ e sensor range $r_s = 50\,\text{m}$
+(il valore ottimale dello sweep precedente).
+
+\subsection{Confronto FCM Puro vs.\ FCM Adattivo}
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\small
+\begin{tabular}{L{4.2cm} C{3.2cm} C{3.2cm}}
+\toprule
+\rowcolor{headerbg}
+\textcolor{white}{\textbf{Metrica}} &
+\textcolor{white}{\textbf{FCM Puro ($r_s{=}50\,\text{m}$)}} &
+\textcolor{white}{\textbf{FCM Adattivo ($K^*{=}0{,}124$)}} \\
+\midrule
+\rowcolor{rowalt}
+SR globale          & 32{,}9\%  & \textbf{56{,}1\%} {\scriptsize\textcolor{green!50!black}{(+23{,}2\%)}} \\
+Step medi (succ.)   & 182{,}7 ($\sim$30{,}5\,min) & \textbf{157{,}2 ($\sim$26{,}2\,min)} \\
+\rowcolor{rowalt}
+V0                  & 39{,}7\%  & \textbf{71{,}2\%} {\scriptsize\textcolor{green!50!black}{(+31{,}5\%)}} \\
+V1                  & 16{,}0\%  & \textbf{28{,}2\%} {\scriptsize\textcolor{green!50!black}{(+12{,}2\%)}} \\
+\rowcolor{rowalt}
+V2                  & 23{,}7\%  & \textbf{34{,}6\%} {\scriptsize\textcolor{green!50!black}{(+10{,}9\%)}} \\
+V3                  & 51{,}9\%  & \textbf{90{,}4\%} {\scriptsize\textcolor{green!50!black}{(+38{,}5\%)}} \\
+\rowcolor{rowalt}
+Q1/4                & 50{,}5\%  & \textbf{84{,}1\%} {\scriptsize\textcolor{green!50!black}{(+33{,}6\%)}} \\
+Q1/2                & 11{,}5\%  & \textbf{33{,}7\%} {\scriptsize\textcolor{green!50!black}{(+22{,}2\%)}} \\
+\rowcolor{rowalt}
+Q3/4                & 36{,}5\%  & \textbf{50{,}5\%} {\scriptsize\textcolor{green!50!black}{(+14{,}0\%)}} \\
+\bottomrule
+\end{tabular}
+\caption{Confronto tra FCM puro (passo fisso 10\,m) e FCM adattivo ($\Delta x = \min(K^*/\|\hat{\nabla}C\|,\,50\,\text{m})$).
+         Stesse 624 prove, sensor range $r_s = 50\,\text{m}$, sorgenti SRC107--SRC132.}
+\end{table}
+
+Il FCM adattivo porta un guadagno netto di \textbf{+23{,}2 punti percentuali} sul
+success rate globale e riduce il tempo medio al successo di circa 4 minuti simulati.
+Il miglioramento \`e particolarmente marcato per V3 (+38{,}5\%) e Q1/4 (+33{,}6\%),
+scenari in cui il plume \`e relativamente compatto e il gradiente pi\`u informativo.
+Nonostante ci\`o, le prestazioni rimangono nettamente inferiori a quelle del modello
+RL (96{,}9\%), a conferma che la modulazione del passo non supplisce alla mancanza
+di memoria storica e di informazioni contestuali (vento, correnti).
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{RL con Doppia Corona di Sensori}
+
+\subsection{Motivazione}
+
+Il modello RL precedente (``minimal'', 96{,}9\% SR) equipaggiava l'agente con una
+singola corona di 8 sensori direzionali a $r_s = 20\,\text{m}$.
+L'ipotesi alla base dell'estensione \`e che una \textbf{seconda corona a raggio
+maggiore} ($r_{s2} = 50\,\text{m}$) fornisca all'agente informazioni sullo
+stato del plume a una scala spaziale pi\`u larga, complementare a quella locale.
+
+\subsection{Architettura dell'Osservazione}
+
+Lo spazio di osservazione passa da \textbf{116 dimensioni} (singola corona) a
+\textbf{196 dimensioni} (doppia corona), secondo la seguente struttura:
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\small
+\begin{tabular}{L{5.5cm} C{2.5cm} C{2.5cm}}
+\toprule
+\rowcolor{headerbg}
+\textcolor{white}{\textbf{Componente}} &
+\textcolor{white}{\textbf{Singola corona}} &
+\textcolor{white}{\textbf{Doppia corona}} \\
+\midrule
+\rowcolor{rowalt}
+Concentrazione corrente         & 1   & 1   \\
+Memoria concentrazione (9 step) & 9   & 9   \\
+\rowcolor{rowalt}
+Memoria conc.\ $\Delta$ (9 step)& 18  & 18  \\
+Sensori direz.\ corona 1 (8 dir.) & 8 & 8   \\
+\rowcolor{rowalt}
+Sensori direz.\ corona 2 (8 dir.) & --  & 8   \\
+Memoria storica corona 1 (9$\times$8) & 72 & 72 \\
+\rowcolor{rowalt}
+Memoria storica corona 2 (9$\times$8) & -- & 72  \\
+Velocit\`a vento (2D)           & 2   & 2   \\
+\rowcolor{rowalt}
+Corrente marina (2D)            & 2   & 2   \\
+Informazione posizionale (4)    & 4   & 4   \\
+\midrule
+\textbf{Totale}                 & \textbf{116} & \textbf{196} \\
+\bottomrule
+\end{tabular}
+\caption{Confronto tra lo spazio di osservazione a singola e doppia corona di sensori.}
+\end{table}
+
+La doppia corona \`e implementata come estensione opzionale nell'ambiente:
+il parametro \texttt{sensor\_range\_2} (default \texttt{None}) abilita la seconda
+corona e ridimensiona automaticamente lo spazio di osservazione.
+In questo modo il codice rimane retrocompatibile con i modelli a singola corona
+(116-dim) gi\`a addestrati.
+
+\subsection{Confronto RL Minimal vs.\ RL Doppia Corona}
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\small
+\begin{tabular}{L{4.2cm} C{3.2cm} C{3.2cm}}
+\toprule
+\rowcolor{headerbg}
+\textcolor{white}{\textbf{Metrica}} &
+\textcolor{white}{\textbf{RL Minimal (116-dim)}} &
+\textcolor{white}{\textbf{RL Doppia Corona (196-dim)}} \\
+\midrule
+\rowcolor{rowalt}
+SR globale          & \textbf{96{,}9\%}  & 93{,}0\% {\scriptsize\textcolor{red!60!black}{($-$3{,}9\%)}} \\
+Step medi (succ.)   & 129{,}2 ($\sim$21{,}5\,min) & \textbf{114{,}4 ($\sim$19{,}1\,min)} \\
+\rowcolor{rowalt}
+V0                  & \textbf{100{,}0\%} & 99{,}7\%  {\scriptsize\textcolor{red!60!black}{($-$0{,}3\%)}} \\
+V1                  & \textbf{99{,}0\%}  & 90{,}3\%  {\scriptsize\textcolor{red!60!black}{($-$8{,}7\%)}} \\
+\rowcolor{rowalt}
+V2                  & \textbf{88{,}7\%}  & 82{,}3\%  {\scriptsize\textcolor{red!60!black}{($-$6{,}4\%)}} \\
+V3                  & \textbf{99{,}7\%}  & 99{,}7\%  {\scriptsize 0{,}0\%} \\
+\rowcolor{rowalt}
+Q1/4                & \textbf{100{,}0\%} & 100{,}0\% {\scriptsize 0{,}0\%} \\
+Q1/2                & \textbf{93{,}5\%}  & 86{,}2\%  {\scriptsize\textcolor{red!60!black}{($-$7{,}3\%)}} \\
+\rowcolor{rowalt}
+Q3/4                & \textbf{97{,}1\%}  & 92{,}9\%  {\scriptsize\textcolor{red!60!black}{($-$4{,}2\%)}} \\
+\bottomrule
+\end{tabular}
+\caption{Confronto tra il modello RL minimal (\texttt{ppo\_20260516\_143937}, 1560 episodi)
+         e il modello RL con doppia corona (\texttt{ppo\_20260529\_214839}, 1560 episodi).
+         In verde il valore migliore per ogni riga.}
+\end{table}
+
+\subsection{Discussione}
+
+Il modello a doppia corona non supera il modello minimal: il success rate globale
+diminuisce di 3{,}9 punti percentuali (96{,}9\% $\to$ 93{,}0\%), con regressioni
+concentrate su V1 ($-$8{,}7\%), V2 ($-$6{,}4\%) e Q1/2 ($-$7{,}3\%).
+La contrazione del tempo medio al successo ($-$2{,}4\,min) suggerisce che nei casi
+in cui l'agente converge, lo fa pi\`u rapidamente; tuttavia la riduzione del SR
+indica che la seconda corona introduce rumore nel processo decisionale per alcuni
+scenari.
+
+La spiegazione pi\`u plausibile \`e che l'informazione proveniente dalla corona
+a 50\,m, troppo distante in condizioni di plume diffuso o turbolento (V1, V2, Q1/2),
+distoglie l'agente dalla concentrazione locale pi\`u affidabile.
+Questo risultato indica che, per questo dominio e questa configurazione di reward,
+la singola corona a 20\,m \`e sufficiente e la doppia corona non porta benefici netti.
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Spawn Maps: Analisi dei Punti di Partenza}
+
+\subsection{Metodologia}
+
+Per le combinazioni vento--chunk ($v$, $q$) con success rate medio inferiore al 100\%,
+\`e stata generata una \textbf{mappa degli spawn point} per identificare eventuali
+zone spaziali sistematicamente critiche.
+
+La procedura \`e la seguente:
+\begin{enumerate}
+    \item Si identificano le combinazioni attive $(v, q)$ in cui almeno un episodio
+          (su 1560 totali) \`e risultato in fallimento.
+    \item Per ogni combinazione attiva, si contano i fallimenti per sorgente e si
+          selezionano le \textbf{5 sorgenti} con il maggior numero di fallimenti
+          complessivi.
+    \item Per ogni terna (sorgente, $v$, $q$), si eseguono 10 episodi con il modello
+          minimal e si registrano le coordinate di spawn $\mathbf{p}_0$.
+    \item Ogni punto di spawn viene contrassegnato con:
+          \begin{itemize}
+              \item \textcolor{green!60!black}{\textbullet} \textbf{cerchio verde} se l'episodio \`e terminato con successo;
+              \item \textcolor{red!70!black}{\bfseries\texttimes} \textbf{croce rossa} se l'episodio \`e terminato con fallimento.
+          \end{itemize}
+    \item Il background di ogni subplot mostra la distribuzione del plume di
+          concentrazione all'istante $t = Q^*$ (Q1/4, Q1/2 o Q3/4 della simulazione)
+          per quella specifica sorgente, garantendo che gli spawn point siano
+          all'interno del plume corretto.
+\end{enumerate}
+
+\subsection{Risultati}
+
+Le mappe seguenti mostrano una figura per ciascuna delle 5 sorgenti selezionate.
+Ogni figura contiene un subplot per ogni combinazione $(v, q)$ attiva.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\linewidth]{../../evaluations/evaluations_RL/evaluations_minimal_reward/spawn_maps/spawn_map_SRC114.png}
+  \caption{Spawn map --- SRC114. Punti di partenza per ogni combinazione vento/chunk attiva.}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\linewidth]{../../evaluations/evaluations_RL/evaluations_minimal_reward/spawn_maps/spawn_map_SRC115.png}
+  \caption{Spawn map --- SRC115.}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\linewidth]{../../evaluations/evaluations_RL/evaluations_minimal_reward/spawn_maps/spawn_map_SRC119.png}
+  \caption{Spawn map --- SRC119.}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\linewidth]{../../evaluations/evaluations_RL/evaluations_minimal_reward/spawn_maps/spawn_map_SRC120.png}
+  \caption{Spawn map --- SRC120.}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\linewidth]{../../evaluations/evaluations_RL/evaluations_minimal_reward/spawn_maps/spawn_map_SRC132.png}
+  \caption{Spawn map --- SRC132.}
+\end{figure}
+
+\subsection{Conclusione}
+
+In tutte e cinque le sorgenti analizzate, i punti di partenza che portano al
+successo e quelli che portano al fallimento \textbf{non mostrano alcuna separazione spaziale}: non emergono zone di spawn sistematicamente ``difficili'' o
+``facili''.
+Questo indica che l'esito di un episodio non dipende dalla posizione iniziale
+dell'agente, bens\`i dalle condizioni idrodinamiche locali (intensit\`a e
+direzione del plume, turbolenza) proprie di quel chunk temporale e di quello
+scenario di vento.
+I fallimenti residui del modello minimal sono pertanto da attribuire a
+caratteristiche intrinseche degli scenari pi\`u difficili (V2, Q1/2) piuttosto che
+a limitazioni geometriche dello spazio di spawn.
+
+\end{document}
