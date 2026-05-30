@@ -84,16 +84,16 @@ class SourceSeekingConfig:
     # (nella stessa zona di distanza). Scoraggia il bypass della sorgente.
     retreat_penalty_multiplier: float = 3.0
 
-    # Reward mode per ablation study:
-    #   "full"                 → reward completa (default, modello v9)
-    #   "base"                 → reward semplificata: rimuove zone_mult, retreat_asymmetry,
-    #                            stagnazione, stagnazione direzionale; distanza lineare
-    #   "base_no_wind_reward"  → come "base" ma senza wind/current alignment
+    # Reward mode:
+    #   "full"                 → reward completa
+    #   "base"                 → reward semplificata: senza zone_mult, retreat_asymmetry, stagnazione
+    #   "base_no_wind_reward"  → come "base" ma senza wind/current alignment (modello di riferimento)
     reward_mode: str = "full"
 
     # Distanza di misurazione dei sensori direzionali (8 direzioni).
     # Variabile per lo sweep sperimentale; il modello base è trainato con 20m.
     sensor_range: float = 20.0
+    sensor_range_2: Optional[float] = None  # seconda corona di sensori; None = disabilitata (116-dim obs)
 
     @classmethod
     def from_config(cls, config: dict, chunk_id: int = 0) -> 'SourceSeekingConfig':
@@ -113,6 +113,7 @@ class SourceSeekingConfig:
             memory_length=agent.get('memory_length', 9),
             n_discrete_actions=agent.get('n_discrete_actions', 8),
             sensor_range=float(agent.get('sensor_range', 20.0)),
+            sensor_range_2=float(agent['sensor_range_2']) if 'sensor_range_2' in agent else None,
             dt=env.get('dt', 10),
             max_steps=env.get('max_episode_steps', 1080),
             chunk_id=chunk_id,
@@ -281,6 +282,8 @@ class SourceSeekingEnv(gym.Env):
         # Memory buffer per concentrazioni direzionali passate (9 timestep x 8 direzioni)
         # Ogni elemento è una lista di 8 float (uno per direzione)
         self._directional_conc_memory: List[List[float]] = [[0.0] * 8 for _ in range(self.config.memory_length)]
+        if self.config.sensor_range_2 is not None:
+            self._directional_conc_memory_2: List[List[float]] = [[0.0] * 8 for _ in range(self.config.memory_length)]
 
         # Cache wind/current components: popolata una volta per step, letta da _compute_reward e _get_observation
         self._cached_wind_components: Optional[Tuple[float, float]] = None
@@ -334,20 +337,24 @@ class SourceSeekingEnv(gym.Env):
     def _setup_observation_space(self):
         """Configura lo spazio delle osservazioni.
 
-        Osservazione (116 valori):
-        - 1 concentrazione corrente
-        - 9 concentrazioni passate (memory_length)
-        - 9 * 2 spostamenti passati (Δx, Δy) normalizzati
-        - 8 sensori concentrazione @ sensor_range (navigazione locale - CORRENTI)
-        - 9 * 8 = 72 sensori concentrazione passati @ sensor_range (9 timestep x 8 direzioni)
-        - 2 componenti vento corrente (u, v)
-        - 2 componenti corrente corrente (u, v)
-        - 2 vettore (Δx, Δy) verso posizione di concentrazione massima vista
-        - 1 valore di concentrazione massima vista
-        - 1 step dall'ultimo contatto col plume (normalizzato)
+        Osservazione (196 valori):
+        - 1   concentrazione corrente
+        - 9   concentrazioni passate (memory_length)
+        - 18  spostamenti passati (9 * 2)
+        - 8   sensori corona 1 @ sensor_range    (correnti)
+        - 8   sensori corona 2 @ sensor_range_2  (correnti)
+        - 72  sensori corona 1 passati (9 timestep x 8 direzioni)
+        - 72  sensori corona 2 passati (9 timestep x 8 direzioni)
+        - 2   vento corrente (u, v)
+        - 2   corrente marina (u, v)
+        - 4   max conc position + value + steps since plume
         """
-        obs_dim = 1 + self.config.memory_length + self.config.memory_length * 2 + 8 + (self.config.memory_length * 8) + 2 + 2 + 4
-        # = 1 + 9 + 18 + 8 + 72 + 2 + 2 + 4 = 116
+        dual = self.config.sensor_range_2 is not None
+        obs_dim = (1 + self.config.memory_length + self.config.memory_length * 2
+                   + 8 + (8 if dual else 0)
+                   + self.config.memory_length * 8 + (self.config.memory_length * 8 if dual else 0)
+                   + 2 + 2 + 4)
+        # single ring: 1+9+18+8+72+2+2+4 = 116; dual ring: +8+72 = 196
 
         self.observation_space = spaces.Box(
             low=-np.inf,
@@ -477,13 +484,15 @@ class SourceSeekingEnv(gym.Env):
         - [0]       : concentrazione corrente
         - [1:10]    : 9 concentrazioni passate
         - [10:28]   : 9 spostamenti passati (Δx, Δy) in metri
-        - [28:36]   : 8 sensori concentrazione @ sensor_range (locale - CORRENTI)
-        - [36:108]  : 9*8=72 sensori concentrazione passati @ sensor_range
-        - [108:110] : vento corrente (u, v) in m/s
-        - [110:112] : corrente corrente (u, v) in m/s
-        - [112:114] : (Δx, Δy) verso posizione di concentrazione massima vista (m)
-        - [114]     : valore di concentrazione massima vista
-        - [115]     : step dall'ultimo contatto col plume (normalizzato su max_steps)
+        - [28:36]   : 8 sensori corona 1 @ sensor_range    (correnti)
+        - [36:44]   : 8 sensori corona 2 @ sensor_range_2  (correnti)
+        - [44:116]  : 9*8=72 sensori corona 1 passati
+        - [116:188] : 9*8=72 sensori corona 2 passati
+        - [188:190] : vento corrente (u, v) in m/s
+        - [190:192] : corrente corrente (u, v) in m/s
+        - [192:194] : (Δx, Δy) verso posizione di concentrazione massima vista (m)
+        - [194]     : valore di concentrazione massima vista
+        - [195]     : step dall'ultimo contatto col plume (normalizzato su max_steps)
         """
         obs = []
 
@@ -502,27 +511,21 @@ class SourceSeekingEnv(gym.Env):
 
         x, y = self.state.x, self.state.y
         
-        # Sensori concentrazione direzionali - CORRENTI (8 valori)
-        conc_sensors = []
-        for action_idx in range(8):
-            dx_dir, dy_dir = self._ACTION_MAP[action_idx]
-            sense_x = x + dx_dir * self.config.sensor_range
-            sense_y = y + dy_dir * self.config.sensor_range
-            # Se il punto è su terra o fuori dominio, concentrazione = 0
-            out_of_bounds = (sense_x < self.config.xmin or sense_x > self.config.xmax or
-                             sense_y < self.config.ymin or sense_y > self.config.ymax)
-            if out_of_bounds or self.field.is_land(sense_x, sense_y):
-                conc_sensors.append(0.0)
-            else:
-                conc = self.field.get_concentration(sense_x, sense_y)
-                # Safety: nan_to_num per evitare NaN a VecNormalize
-                conc_sensors.append(float(np.nan_to_num(conc, nan=0.0)))
-        obs.extend(conc_sensors)
+        # Corona 1 corrente: 8 sensori @ sensor_range
+        obs.extend(self._compute_directional_sensors(self.config.sensor_range))
 
-        # Sensori concentrazione direzionali PASSATI (9 * 8 = 72 valori)
-        # Memorizzo tutti i 9 timestep di sensori passati
+        # Corona 2 corrente (opzionale): 8 sensori @ sensor_range_2
+        if self.config.sensor_range_2 is not None:
+            obs.extend(self._compute_directional_sensors(self.config.sensor_range_2))
+
+        # Corona 1 storica: 9 * 8 = 72 valori
         for timestep_sensors in self._directional_conc_memory:
             obs.extend(timestep_sensors)
+
+        # Corona 2 storica (opzionale): 9 * 8 = 72 valori
+        if self.config.sensor_range_2 is not None:
+            for timestep_sensors in self._directional_conc_memory_2:
+                obs.extend(timestep_sensors)
 
         # Vento corrente (u, v)
         if self._cached_wind_components is not None:
@@ -558,19 +561,23 @@ class SourceSeekingEnv(gym.Env):
 
         return np.array(obs, dtype=np.float32)
 
-    def _compute_directional_sensors(self) -> List[float]:
-        """Calcola i 8 sensori di concentrazione direzionali a 20m.
-        
+    def _compute_directional_sensors(self, sensor_range: float = None) -> List[float]:
+        """Calcola 8 sensori di concentrazione direzionali al raggio dato.
+
+        Args:
+            sensor_range: raggio in metri (default: config.sensor_range)
         Returns:
             Lista di 8 float (uno per direzione)
         """
+        if sensor_range is None:
+            sensor_range = self.config.sensor_range
         conc_sensors = []
         x, y = self.state.x, self.state.y
 
         for action_idx in range(8):
             dx_dir, dy_dir = self._ACTION_MAP[action_idx]
-            sense_x = x + dx_dir * self.config.sensor_range
-            sense_y = y + dy_dir * self.config.sensor_range
+            sense_x = x + dx_dir * sensor_range
+            sense_y = y + dy_dir * sensor_range
             # Se il punto è su terra o fuori dominio, concentrazione = 0
             out_of_bounds = (sense_x < self.config.xmin or sense_x > self.config.xmax or
                              sense_y < self.config.ymin or sense_y > self.config.ymax)
@@ -1089,6 +1096,8 @@ class SourceSeekingEnv(gym.Env):
 
         # Reset memoria concentrazioni direzionali passate (9 timestep x 8 direzioni)
         self._directional_conc_memory = [[0.0] * 8 for _ in range(self.config.memory_length)]
+        if self.config.sensor_range_2 is not None:
+            self._directional_conc_memory_2 = [[0.0] * 8 for _ in range(self.config.memory_length)]
 
         # Reset buffer distanze per stagnation penalty
         self._distance_history = []
@@ -1206,9 +1215,11 @@ class SourceSeekingEnv(gym.Env):
         self._concentration_memory.append(conc_now)
 
         # Aggiorna memoria concentrazioni direzionali (FIFO: 9 timestep x 8 direzioni)
-        directional_conc = self._compute_directional_sensors()
         self._directional_conc_memory.pop(0)
-        self._directional_conc_memory.append(directional_conc)
+        self._directional_conc_memory.append(self._compute_directional_sensors(self.config.sensor_range))
+        if self.config.sensor_range_2 is not None:
+            self._directional_conc_memory_2.pop(0)
+            self._directional_conc_memory_2.append(self._compute_directional_sensors(self.config.sensor_range_2))
 
         # Aggiorna feature 3 e 4
         if conc_now > self.config.spawn_conc_threshold:
