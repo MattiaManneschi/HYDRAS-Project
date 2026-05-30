@@ -1059,56 +1059,5 @@ def main():
             resume_from=resume_from,
         )
 
-
-def main_ablation():
-    """Esegue sequenzialmente i training ablation (base e base_no_wind_reward)."""
-    import os
-    os.chdir(PROJECT_ROOT)
-
-    output_dir = str(PROJECT_ROOT / "trained_models")
-    data_dir   = str(PROJECT_ROOT / "data")
-
-    if not Path(data_dir).exists():
-        raise FileNotFoundError(
-            f"Cartella dati NC non trovata: {data_dir}\n"
-            f"Scarica i file .nc di simulazione MIKE21 nella cartella 'data/'"
-        )
-
-    ablation_configs = [
-        str(PROJECT_ROOT / "utils" / "config_base.yaml"),
-        str(PROJECT_ROOT / "utils" / "config_base_no_wind_reward.yaml"),
-    ]
-
-    for i, config_path in enumerate(ablation_configs, 1):
-        config = load_config(config_path)
-        reward_mode = config.get('environment', {}).get('reward', {}).get('reward_mode', '?')
-        print(f"\n{'='*60}")
-        print(f"  ABLATION {i}/{len(ablation_configs)}: reward_mode={reward_mode}")
-        print(f"  Config: {config_path}")
-        print(f"{'='*60}\n")
-
-        training_cfg = config.get('training', {})
-        resume_from = training_cfg.get('resume_from', None)
-        if resume_from:
-            resume_path = Path(resume_from)
-            if not resume_path.is_absolute():
-                resume_path = (PROJECT_ROOT / resume_path).resolve()
-            resume_from = str(resume_path)
-        else:
-            resume_from = None
-
-        train(
-            config_path=config_path,
-            output_dir=output_dir,
-            n_envs=2,
-            seed=42,
-            data_dir=data_dir,
-            resume_from=resume_from,
-        )
-        print(f"\n  → Ablation {i} (reward_mode={reward_mode}) completata.\n")
-
-    print("Tutti i training ablation completati.")
-
-
 if __name__ == "__main__":
-    main_ablation()
+    main()

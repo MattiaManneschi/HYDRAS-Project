@@ -4,6 +4,7 @@ agent:
   memory_length: 9
   n_discrete_actions: 8
   sensor_range: 20
+  sensor_range_2: 50
 curriculum:
   enabled: false
   phases:
@@ -33,7 +34,7 @@ environment:
   normalize_obs: true
   normalize_reward: false
   reward:
-    reward_mode: full
+    reward_mode: base_no_wind_reward
     boundary_penalty: -10.0
     concentration_gradient_reward_negative: -0.05
     concentration_gradient_reward_positive: 0.05
@@ -122,7 +123,7 @@ training:
     end: 6000000
   scenario_weights: null
   sensor_range_sweep: []
-  target_kl: 0.01
+  target_kl: 0.02
   targeted_chunk_ids:
   - 1
   - 2
