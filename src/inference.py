@@ -128,6 +128,8 @@ class EpisodeResult:
     trajectory: np.ndarray
     start_frame: int = 0   # Frame iniziale (dipende da chunk_id)
     end_frame: int = 0     # Frame finale (al quale plottare)
+    spawn_x: float = 0.0   # Posizione iniziale agente
+    spawn_y: float = 0.0
 
 
 @dataclass
@@ -351,7 +353,9 @@ def run_episode(model, vec_env, deterministic=True) -> EpisodeResult:
         steps=n_steps,
         trajectory=np.array(trajectory),
         start_frame=start_frame,
-        end_frame=end_frame
+        end_frame=end_frame,
+        spawn_x=float(spawn_pos[0]),
+        spawn_y=float(spawn_pos[1]),
     )
 
 
@@ -727,6 +731,9 @@ def find_model_for_sensor_range(trained_dir: Path, sensor_range: float) -> Optio
 
 # ─── FCM: Field Climbing Method ───────────────────────────────────────────────
 
+FCM_K_OPT    = 0.124   # rapporto di proporzionalità ottimo (Brent)
+FCM_STEP_MAX = 50.0    # cap superiore passo adattivo [m]
+
 class FCMAgent:
     """
     Agente Field Climbing Method.
@@ -751,11 +758,15 @@ class FCMAgent:
         [-_DIAG,-_DIAG ],   # 7: SudOvest
     ], dtype=float)
 
-    def __init__(self, sensor_range: float = 20.0):
+    def __init__(self, sensor_range: float = 20.0,
+                 K: float = FCM_K_OPT, step_max: float = FCM_STEP_MAX):
         self.sensor_range = sensor_range
+        self.K = K
+        self.step_max = step_max
+        self._last_step: float = 10.0
 
     def reset(self):
-        pass
+        self._last_step = 10.0
 
     def _estimate_gradient_ls(self, obs: np.ndarray) -> np.ndarray:
         """Stima ∇C tramite minimi quadrati (Taylor 1° ordine)."""
@@ -780,13 +791,14 @@ class FCMAgent:
 
         grad_norm = float(np.linalg.norm(gradient))
         if grad_norm < 1e-12:
-            # Gradiente nullo: sceglie random tra azioni valide
+            self._last_step = self.step_max
             if action_masks is not None:
                 valid = np.where(action_masks)[0]
                 action = int(np.random.choice(valid)) if len(valid) > 0 else 0
             else:
                 action = int(np.random.randint(0, 8))
         else:
+            self._last_step = min(self.K / grad_norm, self.step_max)
             scores = self._DIRECTIONS @ gradient   # (8,)
             if action_masks is not None:
                 scores[~action_masks.astype(bool)] = -np.inf
@@ -821,9 +833,54 @@ def build_env_fcm(
 
 
 def run_episode_fcm(fcm_agent, vec_env, deterministic: bool = True) -> EpisodeResult:
-    """Esegue un singolo episodio FCM, resettando lo stato interno dell'agente."""
+    """Esegue un singolo episodio FCM con passo adattivo step = min(K/||∇C||, step_max)."""
     fcm_agent.reset()
-    return run_episode(fcm_agent, vec_env, deterministic=deterministic)
+    inner = get_inner_env(vec_env)
+    obs = vec_env.reset()
+
+    start_frame = inner.info_reset.get('start_time_idx', 0) if hasattr(inner, 'info_reset') else 0
+    spawn_pos   = inner.state.position.copy()
+    initial_dist = float(np.linalg.norm(spawn_pos - inner.source_position))
+    dt           = inner.config.dt
+    default_vel  = inner.config.max_velocity
+
+    trajectory = [spawn_pos]
+    done = False
+    last_info: dict = {}
+
+    while not done:
+        if MASKABLE_PPO_AVAILABLE:
+            action, _ = fcm_agent.predict(obs, deterministic=deterministic,
+                                          action_masks=vec_env.env_method('action_masks')[0])
+        else:
+            action, _ = fcm_agent.predict(obs, deterministic=deterministic)
+
+        inner.config.max_velocity = fcm_agent._last_step / dt
+        obs, _, dones, infos = vec_env.step(action)
+        done = dones[0]
+        last_info = infos[0]
+        trajectory.append(np.array(last_info.get('position', inner.state.position.tolist())))
+
+    inner.config.max_velocity = default_vel
+
+    termination = last_info.get('termination_reason')
+    if termination not in {'success', 'boundary', 'land', 'timeout'}:
+        if last_info.get('source_reached', False):       termination = 'success'
+        elif last_info.get('out_of_bounds', False):      termination = 'boundary'
+        elif last_info.get('on_land', False):            termination = 'land'
+        else:                                            termination = 'timeout'
+
+    return EpisodeResult(
+        scenario="", source_id="", episode=0,
+        success=termination == 'success',
+        termination=termination,
+        initial_distance=initial_dist,
+        final_distance=last_info.get('distance_to_source', 0.0),
+        steps=last_info.get('steps', len(trajectory) - 1),
+        trajectory=np.array(trajectory),
+        start_frame=start_frame,
+        end_frame=last_info.get('end_time_idx', start_frame),
+    )
 
 
 def run_inference_fcm(
@@ -1376,16 +1433,18 @@ def main():
             print(f"ERRORE: Nessun modello trovato in {latest_run}/models/")
             sys.exit(1)
 
-        # Leggi sensor_range dal config salvato nel run
+        # Leggi sensor_range e sensor_range_2 dal config salvato nel run
         cfg_override = load_config(CONFIG_PATH)
         run_cfg_path = latest_run / "config.yaml"
         if run_cfg_path.exists():
             run_cfg = load_config(str(run_cfg_path))
             sr = run_cfg.get('agent', {}).get('sensor_range', cfg_override['agent'].get('sensor_range', 20))
+            sr2 = run_cfg.get('agent', {}).get('sensor_range_2', cfg_override['agent'].get('sensor_range_2', 50))
             cfg_override['agent']['sensor_range'] = sr
-            print(f"sensor_range dal modello: {sr}m")
+            cfg_override['agent']['sensor_range_2'] = sr2
+            print(f"sensor_range dal modello: {sr}m  |  sensor_range_2: {sr2}m")
 
-        output_dir = str(PROJECT_ROOT / "evaluations" / "evaluations_RL" / "evaluations_v12")
+        output_dir = str(PROJECT_ROOT / "evaluations" / "evaluations_RL" / "evaluations_v13")
 
         print(f"Modello selezionato: {model_path}")
         print(f"Output valutazioni: {output_dir}")
@@ -1402,57 +1461,226 @@ def main():
             chunk_ids=[0, 1, 2],
         )
 
-
-def main_ablation_inference():
-    """Inferenza sui 2 modelli ablation (penultimo=base, ultimo=base_no_wind_reward).
-    Nessun plot generato; spawn riproducibili con seed fisso.
+def main_spawn_map():
     """
+    Per ogni combinazione V*/Q* con SR<100%, seleziona le sorgenti con più
+    fallimenti e genera una griglia di spawn maps:
+    - sfondo: plume della sorgente al frame del chunk (spawn sempre nel plume)
+    - marker: spawn dell'agente → verde=successo, X rossa=fallimento
+    Modello: base_no_wind_reward (96.9% SR).
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import ListedColormap as _LCmap
+    import json as _json
+    import csv
+    from collections import defaultdict
+    import copy
+
+    N_SOURCES  = 5    # sorgenti con più fallimenti da selezionare
+    N_EPISODES = 10   # episodi per terna (sorgente, versione, chunk)
+
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
-    DATA_DIR = str(PROJECT_ROOT / "data")
-    trained_dir = PROJECT_ROOT / "trained_models"
+    DATA_DIR     = str(PROJECT_ROOT / "data")
+    CONFIG_PATH  = str(PROJECT_ROOT / "utils" / "config_base_no_wind_reward.yaml")
+    MODEL_PATH   = str(PROJECT_ROOT / "trained_models" / "ppo_20260516_143937" / "models" / "final_model.zip")
+    OUTPUT_DIR   = PROJECT_ROOT / "evaluations" / "evaluations_RL" / "evaluations_minimal_reward" / "spawn_maps"
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    run_dirs = sorted([d for d in trained_dir.iterdir()
-                       if d.is_dir() and d.name.startswith("ppo_")])
-    if len(run_dirs) < 2:
-        print("ERRORE: Meno di 2 modelli trovati in trained_models/")
-        sys.exit(1)
+    config = load_config(CONFIG_PATH)
+    chunk_labels = {0: 'Q1/4', 1: 'Q1/2', 2: 'Q3/4'}
 
-    ablation_runs = run_dirs[-2:]  # penultimo=base, ultimo=base_no_wind_reward
-    ablation_configs = [
-        str(PROJECT_ROOT / "utils" / "config_base.yaml"),
-        str(PROJECT_ROOT / "utils" / "config_base_no_wind_reward.yaml"),
-    ]
-    ablation_names = ["base", "base_no_wind_reward"]
+    data_manager = DataManager(data_dir=DATA_DIR, preload_all=False,
+                               sources_csv="Coordinate_Sorgenti_FaseII.csv")
+    wind_mapping    = {"_V0": "CI_WIND_faseII_V0.txt", "_V1": "CI_WIND_faseII_V1.txt",
+                       "_V2": "CI_WIND_faseII_V2.txt", "_V3": "CI_WIND_faseII_V3.txt"}
+    current_mapping = {"_V0": "CL02_V0_SRC000_U_V_10mGrid.nc", "_V1": "CL02_V1_SRC000_U_V_10mGrid.nc",
+                       "_V2": "CL02_V2_SRC000_U_V_10mGrid.nc", "_V3": "CL02_V3_SRC000_U_V_10mGrid.nc"}
 
-    for run_dir, config_path, name in zip(ablation_runs, ablation_configs, ablation_names):
-        model_path = run_dir / "models" / "final_model.zip"
-        if not model_path.exists():
-            model_path = run_dir / "models" / "best" / "best_model.zip"
-        if not model_path.exists():
-            print(f"ERRORE: Nessun modello trovato in {run_dir}/models/ — skip")
-            continue
+    model = load_model(MODEL_PATH)
+    vec_norm_path = Path(MODEL_PATH).parent / "vec_normalize.pkl"
+    inference_sources = [s for s in data_manager.get_discovered_sources() if int(s[3:]) > 106]
 
-        output_dir = str(PROJECT_ROOT / "evaluations" / "evaluations_RL" / f"evaluations_ablation_{name}")
+    # ── 1. Combinazioni con SR < 100% dai dati esistenti ──────────────────────
+    eval_path = (PROJECT_ROOT / "evaluations" / "evaluations_RL"
+                 / "evaluations_minimal_reward" / "episodes_data.json")
+    eps_data = _json.loads(eval_path.read_text())
 
-        print(f"\n{'='*70}")
-        print(f"Ablation inference: reward_mode={name}")
-        print(f"Modello: {model_path}")
-        print(f"Output: {output_dir}")
-        print(f"{'='*70}\n")
+    # failures per (source, version, chunk_id)
+    failures_by_src_combo = defaultdict(int)
+    combo_outcomes        = defaultdict(list)
+    for e in eps_data:
+        key = (e['version'], e['chunk_id'])
+        combo_outcomes[key].append(e['success'])
+        if not e['success']:
+            failures_by_src_combo[(e['source_id'], e['version'], e['chunk_id'])] += 1
 
-        run_inference(
-            model_path=str(model_path),
-            config_path=config_path,
-            data_dir=DATA_DIR,
-            output_dir=output_dir,
-            n_episodes=5,
-            deterministic=True,
-            sources_csv="Coordinate_Sorgenti_FaseII.csv",
-            chunk_ids=[0, 1, 2],
-            save_videos=False,
-            save_plots=False,
-        )
+    active_combos = {k for k, v in combo_outcomes.items() if not all(v)}
+    print(f"Combinazioni attive (SR<100%): {sorted(active_combos)}")
+
+    # ── 2. Top-N sorgenti con più fallimenti sulle combo attive ───────────────
+    src_fail_count = defaultdict(int)
+    for (src, v, c), n in failures_by_src_combo.items():
+        if (v, c) in active_combos:
+            src_fail_count[src] += n
+    top_sources = sorted(src_fail_count, key=src_fail_count.get, reverse=True)[:N_SOURCES]
+    print(f"\nTop {N_SOURCES} sorgenti per fallimenti: "
+          + ", ".join(f"{s}({src_fail_count[s]})" for s in top_sources))
+
+    # ── 3. Inferenza: N_EPISODES per (sorgente, combo) ────────────────────────
+    # results[(src, version, chunk_id)] = [(spawn_x, spawn_y, success), ...]
+    results = {}
+    active_combos_sorted = sorted(active_combos)
+    n_total = len(top_sources) * len(active_combos_sorted) * N_EPISODES
+    print(f"\nEpisodi totali: {len(top_sources)} sorgenti × "
+          f"{len(active_combos_sorted)} combo × {N_EPISODES} ep = {n_total}\n")
+
+    from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+    from utils.data_loader import NetCDFLoader as _NCLoader
+
+    for src_idx, source_id in enumerate(top_sources, 1):
+        print(f"  [{src_idx}/{len(top_sources)}] {source_id}")
+        for version, chunk_id in active_combos_sorted:
+            nc_files = [f for f in data_manager._nc_files
+                        if f'_{version}_' in f.name and source_id in f.name and 'Conc' in f.name]
+            if not nc_files:
+                continue
+            try:
+                field = _NCLoader(DATA_DIR).load(str(nc_files[0]),
+                                                  concentration_var="Concentration - component 1")
+                if field is None:
+                    continue
+                coords = data_manager.get_source_coordinates(source_id)
+                if coords:
+                    field.source_position = coords
+                field.run_id = f"{source_id}_{version}"
+            except Exception as ex:
+                print(f"    [SKIP] {source_id}_{version}: {ex}")
+                continue
+
+            env_cfg = SourceSeekingConfig.from_config(config, chunk_id=chunk_id)
+            key = (source_id, version, chunk_id)
+            results[key] = []
+
+            for _ in range(N_EPISODES):
+                def _make(f=field, cfg=env_cfg):
+                    env = SourceSeekingEnv(config=cfg,
+                                           concentration_field=copy.deepcopy(f),
+                                           data_manager=data_manager,
+                                           wind_mapping=wind_mapping,
+                                           current_mapping=current_mapping)
+                    from stable_baselines3.common.monitor import Monitor as _Mon
+                    env = _Mon(env)
+                    if MASKABLE_PPO_AVAILABLE:
+                        from sb3_contrib.common.wrappers import ActionMasker
+                        env = ActionMasker(env, mask_fn)
+                    return env
+
+                vec_env = DummyVecEnv([_make])
+                if vec_norm_path.exists():
+                    vec_env = VecNormalize.load(str(vec_norm_path), vec_env)
+                    vec_env.training = False
+                r = run_episode(model, vec_env, deterministic=True)
+                vec_env.close()
+                results[key].append((r.spawn_x, r.spawn_y, r.success))
+
+    # ── 4. Plot: by_combo e by_source ─────────────────────────────────────────
+    def _draw_subplot(ax, source_id, version, chunk_id):
+        key = (source_id, version, chunk_id)
+        nc_files = [f for f in data_manager._nc_files
+                    if f'_{version}_' in f.name and source_id in f.name and 'Conc' in f.name]
+        bg_field = None
+        if nc_files:
+            try:
+                bg_field = _NCLoader(DATA_DIR).load(str(nc_files[0]),
+                                                     concentration_var="Concentration - component 1")
+                coords = data_manager.get_source_coordinates(source_id)
+                if coords and bg_field:
+                    bg_field.source_position = coords
+            except Exception:
+                pass
+
+        ax.set_facecolor('#87CEEB')
+        if bg_field is not None:
+            nt = bg_field.n_timesteps
+            frame = {0: nt // 4, 1: nt // 2, 2: (nt * 3) // 4}[chunk_id]
+            bg_field.set_time(min(frame, nt - 1))
+            conc = bg_field.get_current_field()
+            ddx = float(bg_field.x_coords[1] - bg_field.x_coords[0]) if len(bg_field.x_coords) > 1 else 10.0
+            ddy = float(bg_field.y_coords[1] - bg_field.y_coords[0]) if len(bg_field.y_coords) > 1 else 10.0
+            extent = [float(bg_field.x_coords[0]) - ddx/2, float(bg_field.x_coords[-1]) + ddx/2,
+                      float(bg_field.y_coords[0]) - ddy/2, float(bg_field.y_coords[-1]) + ddy/2]
+            if bg_field.land_mask is not None:
+                land = np.ma.masked_where(~bg_field.land_mask, np.ones_like(conc))
+                ax.imshow(land, origin='lower', extent=extent,
+                          cmap=_LCmap(['#FFFFFF']), alpha=1.0, zorder=1, aspect='auto')
+            mask = (bg_field.land_mask | (conc < 0.01)) if bg_field.land_mask is not None else (conc < 0.01)
+            conc_m = np.ma.masked_where(mask, conc)
+            ax.imshow(conc_m, origin='lower', extent=extent, cmap='YlOrRd',
+                      alpha=0.9, vmin=0, vmax=max(float(conc.max()), 0.1),
+                      zorder=2, aspect='auto')
+
+        pts = results.get(key, [])
+        xs_ok   = [p[0] for p in pts if p[2]]
+        ys_ok   = [p[1] for p in pts if p[2]]
+        xs_fail = [p[0] for p in pts if not p[2]]
+        ys_fail = [p[1] for p in pts if not p[2]]
+        if xs_ok:
+            ax.scatter(xs_ok, ys_ok, c='green', s=60, zorder=5,
+                       label=f'✓ {len(xs_ok)}', edgecolors='white', linewidths=0.5)
+        if xs_fail:
+            ax.scatter(xs_fail, ys_fail, marker='X', c='darkred', s=80, zorder=6,
+                       edgecolors='white', linewidths=0.5, label=f'✗ {len(xs_fail)}')
+        if bg_field is not None and bg_field.source_position is not None:
+            sx, sy = bg_field.source_position
+            ax.scatter(sx, sy, c='yellow', s=200, marker='*',
+                       edgecolors='black', linewidths=0.8, zorder=7, label='Source')
+        ax.set_title(source_id, fontsize=13, fontweight='bold')
+        ax.set_xlabel('X [m]', fontsize=11)
+        ax.set_ylabel('Y [m]', fontsize=11)
+        ax.tick_params(labelsize=10)
+        ax.legend(fontsize=10, loc='upper right')
+
+    import math
+
+    def _make_grid_fig(items, draw_fn, suptitle, n_cols=2, cell_size=6):
+        """Crea una figura a griglia con max n_cols colonne."""
+        n = len(items)
+        n_cols = min(n, n_cols)
+        n_rows = math.ceil(n / n_cols)
+        fig, axes = plt.subplots(n_rows, n_cols,
+                                 figsize=(cell_size * n_cols, cell_size * n_rows),
+                                 squeeze=False)
+        fig.suptitle(suptitle, fontsize=15, fontweight='bold')
+        for idx, item in enumerate(items):
+            ax = axes[idx // n_cols][idx % n_cols]
+            draw_fn(ax, item)
+        # Nascondi assi vuoti
+        for idx in range(len(items), n_rows * n_cols):
+            axes[idx // n_cols][idx % n_cols].axis('off')
+        plt.tight_layout(rect=[0, 0, 1, 0.93])
+        return fig
+
+    saved = []
+
+    for source_id in top_sources:
+        def _draw_combo(ax, vc, src=source_id):
+            v, c = vc
+            _draw_subplot(ax, src, v, c)
+            ax.set_title(f'{v} / {chunk_labels[c]}', fontsize=13, fontweight='bold')
+
+        title = f'Spawn map  {source_id}'
+        fig = _make_grid_fig(active_combos_sorted, _draw_combo, title)
+        fname = f"spawn_map_{source_id}.png"
+        out_path = OUTPUT_DIR / fname
+        fig.savefig(str(out_path), dpi=200, bbox_inches='tight')
+        plt.close(fig)
+        saved.append(out_path)
+        print(f"  Salvato: {fname}")
+
+    print(f"\nTotale file salvati: {len(saved)} in {OUTPUT_DIR}")
 
 
 if __name__ == "__main__":
-    main_fcm_inference()
+    main_spawn_map()
