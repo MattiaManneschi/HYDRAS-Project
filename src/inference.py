@@ -731,19 +731,21 @@ def find_model_for_sensor_range(trained_dir: Path, sensor_range: float) -> Optio
 
 # ─── FCM: Field Climbing Method ───────────────────────────────────────────────
 
-FCM_K_OPT    = 0.124   # rapporto di proporzionalità ottimo (Brent)
 FCM_STEP_MAX = 50.0    # cap superiore passo adattivo [m]
 
-class FCMAgent:
+class AdamFCMAgent:
     """
-    Agente Field Climbing Method.
+    Agente Field Climbing Method con ottimizzatore Adam.
 
     Stima il gradiente locale del campo di concentrazione tramite regressione
-    ai minimi quadrati con approssimazione di Taylor al primo ordine:
+    ai minimi quadrati (Taylor al primo ordine), poi applica Adam per calcolare
+    il vettore di passo adattivo:
 
-        C(p + δ) ≈ C(p) + ∇C · δ   →   sistema overdetermined 8×2 → LS
+        step = lr * m̂ / (√v̂ + ε)
 
-    L'azione scelta è la direzione discreta più allineata al gradiente stimato.
+    Il momentum (β1) mantiene la direzione coerente su più timestep; la
+    normalizzazione per la varianza storica (β2) riduce il passo dove il
+    gradiente oscilla molto.
     """
 
     _DIAG = 1.0 / np.sqrt(2.0)
@@ -758,15 +760,22 @@ class FCMAgent:
         [-_DIAG,-_DIAG ],   # 7: SudOvest
     ], dtype=float)
 
-    def __init__(self, sensor_range: float = 20.0,
-                 K: float = FCM_K_OPT, step_max: float = FCM_STEP_MAX):
+    def __init__(self, sensor_range: float = 50.0, lr: float = 50.0,
+                 beta1: float = 0.9, beta2: float = 0.999,
+                 eps: float = 1e-8, step_max: float = FCM_STEP_MAX):
         self.sensor_range = sensor_range
-        self.K = K
+        self.lr       = lr
+        self.beta1    = beta1
+        self.beta2    = beta2
+        self.eps      = eps
         self.step_max = step_max
-        self._last_step: float = 10.0
+        self._last_step: float = lr
 
     def reset(self):
-        self._last_step = 10.0
+        self.m = np.zeros(2)
+        self.v = np.zeros(2)
+        self.t = 0
+        self._last_step = self.lr
 
     def _estimate_gradient_ls(self, obs: np.ndarray) -> np.ndarray:
         """Stima ∇C tramite minimi quadrati (Taylor 1° ordine)."""
@@ -782,24 +791,28 @@ class FCMAgent:
         deterministic: bool = True,
         action_masks: Optional[np.ndarray] = None,
     ) -> Tuple[np.ndarray, None]:
-        """Seleziona l'azione tramite gradient ascent.
-
-        Interfaccia compatibile con MaskablePPO.predict per riuso di run_episode.
-        """
+        """Seleziona l'azione tramite Adam sul gradiente stimato."""
         flat_obs = obs[0] if obs.ndim == 2 else obs
-        gradient = self._estimate_gradient_ls(flat_obs)
+        g = self._estimate_gradient_ls(flat_obs)
 
-        grad_norm = float(np.linalg.norm(gradient))
-        if grad_norm < 1e-12:
-            self._last_step = self.step_max
+        self.t += 1
+        self.m = self.beta1 * self.m + (1 - self.beta1) * g
+        self.v = self.beta2 * self.v + (1 - self.beta2) * g ** 2
+        m_hat  = self.m / (1 - self.beta1 ** self.t)
+        v_hat  = self.v / (1 - self.beta2 ** self.t)
+        step   = self.lr * m_hat / (np.sqrt(v_hat) + self.eps)
+
+        norm = float(np.linalg.norm(step))
+        self._last_step = min(norm, self.step_max) if norm > 1e-12 else self.lr
+
+        if norm < 1e-12:
             if action_masks is not None:
                 valid = np.where(action_masks)[0]
                 action = int(np.random.choice(valid)) if len(valid) > 0 else 0
             else:
                 action = int(np.random.randint(0, 8))
         else:
-            self._last_step = min(self.K / grad_norm, self.step_max)
-            scores = self._DIRECTIONS @ gradient   # (8,)
+            scores = self._DIRECTIONS @ step
             if action_masks is not None:
                 scores[~action_masks.astype(bool)] = -np.inf
             action = int(np.argmax(scores))
@@ -891,18 +904,20 @@ def run_inference_fcm(
     sources_csv: str = "Coordinate_Sorgenti_FaseII.csv",
     chunk_ids: Optional[List[int]] = None,
     sensor_range: Optional[float] = None,
+    lr: float = 50.0,
     save_plots: bool = True,
     save_videos: bool = True,
     seed: Optional[int] = None,
     config_override: Optional[dict] = None,
 ) -> List[ScenarioStats]:
-    """Inferenza completa con FCMAgent (gradient ascent sui sensori correnti).
+    """Inferenza completa con AdamFCMAgent.
 
-    Stessa struttura e stessi output di run_inference() ma con FCMAgent
+    Stessa struttura e stessi output di run_inference() ma con AdamFCMAgent
     al posto del modello RL.
 
     Args:
         sensor_range: Range sensori in metri (default: da config).
+        lr: Learning rate Adam (corrisponde al passo base in metri).
     """
     if chunk_ids is None:
         chunk_ids = [0, 1, 2]
@@ -922,8 +937,8 @@ def run_inference_fcm(
     if sensor_range is None:
         sensor_range = float(config.get('agent', {}).get('sensor_range', 20.0))
 
-    fcm_agent   = FCMAgent(sensor_range=sensor_range)
-    agent_label = f"FCM (sensor_range={sensor_range}m)"
+    fcm_agent   = AdamFCMAgent(sensor_range=sensor_range, lr=lr)
+    agent_label = f"FCM Adam (lr={lr}m, sensor_range={sensor_range}m)"
 
     data_manager = DataManager(
         data_dir=data_dir,
@@ -1125,21 +1140,26 @@ def run_inference_fcm(
     return all_stats
 
 
-def main_fcm_inference():
-    """Inferenza FCM su SRC107-SRC132 con sensor_range=50m (ottimale dal sweep).
+def main_fcm_adam_sweep():
+    """Sweep su lr=[10,20,30,40,50] per FCM Adam con sensor_range=50m.
 
-    Output: evaluations/evaluations_FCM/fcm_50m/
+    Output: evaluations/evaluations_FCM/fcm_adaptive/lr_{lr}/
     """
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
     DATA_DIR     = str(PROJECT_ROOT / "data")
-    CONFIG_PATH  = str(PROJECT_ROOT / "utils" / "config.yaml")
+    CONFIG_PATH  = str(PROJECT_ROOT / "utils" / "config_base_no_wind_reward.yaml")
 
-    output_dir = str(PROJECT_ROOT / "evaluations" / "evaluations_FCM" / "fcm_50m")
-    run_inference_fcm(
-        config_path=CONFIG_PATH, data_dir=DATA_DIR, output_dir=output_dir,
-        n_episodes=2, sources_csv="Coordinate_Sorgenti_FaseII.csv",
-        chunk_ids=[0, 1, 2], sensor_range=50.0,
-    )
+    for lr in [10, 20, 30, 40, 50]:
+        print(f"\n{'='*80}")
+        print(f"FCM Adam sweep — lr={lr}m")
+        print(f"{'='*80}")
+        output_dir = str(PROJECT_ROOT / "evaluations" / "evaluations_FCM"
+                         / "fcm_adaptive" / f"lr_{lr}")
+        run_inference_fcm(
+            config_path=CONFIG_PATH, data_dir=DATA_DIR, output_dir=output_dir,
+            n_episodes=2, sources_csv="Coordinate_Sorgenti_FaseII.csv",
+            chunk_ids=[0, 1, 2], sensor_range=50.0, lr=float(lr),
+        )
 
 
 # ─── Analysis Plots ──────────────────────────────────────────────────────────
@@ -1683,4 +1703,4 @@ def main_spawn_map():
 
 
 if __name__ == "__main__":
-    main_spawn_map()
+    main_fcm_adam_sweep()
