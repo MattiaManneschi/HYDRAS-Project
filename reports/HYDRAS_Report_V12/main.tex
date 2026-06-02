@@ -224,6 +224,18 @@ Nonostante ci\`o, le prestazioni rimangono nettamente inferiori a quelle del mod
 RL (96{,}9\%), a conferma che il momentum sul gradiente locale non supplisce alla mancanza
 di memoria globale dell'episodio e di informazioni contestuali (vento, correnti).
 
+\`E opportuno notare che $lr$ rappresenta il passo asintotico per direzioni cardinali
+del gradiente: a convergenza dei momenti Adam, $\|\mathbf{s}_t\| \to lr$ per gradienti
+puramente orizzontali o verticali, e fino a $lr\sqrt{2}$ per gradienti diagonali
+(cappato a $\Delta x_{\max} = 50\,\text{m}$).
+Nelle prime iterazioni di ogni episodio il passo \`e pi\`u contenuto per effetto della
+bias correction.
+Con $lr = 50\,\text{m}$ il passo asintotico corrisponde a una velocit\`a fino a
+$5\,\text{m/s}$, cinque volte la velocit\`a nominale del veicolo ($1\,\text{m/s}$),
+con una conseguente perdita di realismo fisico.
+Il valore $lr = 10\,\text{m}$, fisicamente compatibile con la velocit\`a nominale,
+raggiunge gi\`a il 49{,}8\% di SR (+17 punti percentuali rispetto al FCM puro).
+
 \subsection{Analisi dei Risultati --- $lr = 50\,\text{m}$}
 
 \begin{figure}[H]
