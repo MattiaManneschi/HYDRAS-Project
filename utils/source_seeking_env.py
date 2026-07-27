@@ -55,6 +55,10 @@ class SourceSeekingConfig:
     # Spawn
     spawn_start_frame: int = 352  # frame di partenza (25% della simulazione, Chunk 0) - sovrascitto da chunk_id
     spawn_conc_threshold: float = 0.5  # soglia minima concentrazione per spawn
+    spawn_min_distance: float = 300.0   # m - floor assoluto di d_min (no spawn troppo facili)
+    spawn_min_percentile: float = 50.0  # percentile (mediana) delle distanze del plume per d_min (scala con la diffusione)
+    spawn_max_distance: float = 3000.0  # m - limite superiore di d_min..d_max (disco esterno)
+    spawn_min_width: float = 500.0      # m - ampiezza minima dell'intervallo (d_min, d_max)
     chunk_id: int = 0  # supportati: 0 = spawn @1/4, 1 = spawn @1/2, 2 = spawn @3/4 della simulazione
 
     # Reward
@@ -112,6 +116,7 @@ class SourceSeekingConfig:
             max_velocity=agent.get('max_velocity', 1.0),
             memory_length=agent.get('memory_length', 9),
             n_discrete_actions=agent.get('n_discrete_actions', 8),
+            n_velocity_levels=agent.get('n_velocity_levels', 1),
             sensor_range=float(agent.get('sensor_range', 20.0)),
             sensor_range_2=float(agent['sensor_range_2']) if 'sensor_range_2' in agent else None,
             dt=env.get('dt', 10),
@@ -140,6 +145,10 @@ class SourceSeekingConfig:
             spawn_min_land_distance=spawn.get('min_land_distance', 50.0),
             spawn_start_frame=spawn.get('start_frame', 352),
             spawn_conc_threshold=spawn.get('conc_threshold', 0.5),
+            spawn_min_distance=spawn.get('min_distance', 300.0),
+            spawn_min_percentile=spawn.get('min_percentile', 50.0),
+            spawn_max_distance=spawn.get('max_distance', 3000.0),
+            spawn_min_width=spawn.get('min_width', 500.0),
         )
 
     # Land avoidance
@@ -150,6 +159,9 @@ class SourceSeekingConfig:
     # Action
     action_type: str = "discrete"  # "discrete" (N/S/E/W + diagonali)
     n_discrete_actions: int = 8  # 8 direzioni: 4 cardinali + 4 diagonali
+    n_velocity_levels: int = 1   # K livelli di velocità in (0, max_velocity]; 1 = passo fisso.
+                                 # Con K>1 lo spazio azioni diventa Discrete(8*K): l'agente
+                                 # sceglie direzione E velocità. Livelli = max_velocity*{1/K..K/K}.
 
 
 class SourceSeekingEnv(gym.Env):
@@ -376,19 +388,65 @@ class SourceSeekingEnv(gym.Env):
           6 = NordOvest (-x,+y)
           7 = SudOvest  (-x,-y)
         """
-        self.action_space = spaces.Discrete(self.config.n_discrete_actions)
+        self.action_space = spaces.Discrete(
+            self.config.n_discrete_actions * self.config.n_velocity_levels)
+
+    def spawn_disk_bounds(self) -> Tuple[float, float]:
+        """(d_min, d_max) del disco di spawn per il frame/scenario corrente.
+
+        Rispecchia il calcolo dei bordi in _spawn_on_plume; usato per disegnare il disco
+        virtuale di spawn nelle spawn map. Imposta il frame dal chunk_id (come reset()).
+        """
+        if self.field.n_timesteps > 1 and self.config.chunk_id in (0, 1, 2):
+            nt = self.field.n_timesteps
+            frame = {0: nt // 4, 1: nt // 2, 2: (nt * 3) // 4}[self.config.chunk_id]
+            self._start_time_idx = min(frame, nt - 1)
+            self.field.set_time(self._start_time_idx)
+        elif self.field.n_timesteps > 1:
+            self.field.set_time(getattr(self, '_start_time_idx', self.config.spawn_start_frame))
+
+        field_data = np.nan_to_num(self.field.get_current_field(), nan=0.0)
+        vi = np.where(field_data > self.config.spawn_conc_threshold)
+        if len(vi[0]) == 0:
+            raise ValueError("No plume at spawn frame.")
+        y_coords = self.field.y_coords[vi[0]]
+        x_coords = self.field.x_coords[vi[1]]
+        distances = np.sqrt((x_coords - self.source_position[0])**2 +
+                            (y_coords - self.source_position[1])**2)
+        land_safe = np.array([
+            self._min_distance_to_land(x_coords[i], y_coords[i]) >= self.config.spawn_min_land_distance
+            for i in range(len(x_coords))
+        ])
+        if np.any(land_safe):
+            distances = distances[land_safe]
+
+        d_cap = float(self.config.spawn_max_distance)
+        d_disk = distances[distances <= d_cap]
+        if d_disk.size == 0:
+            d_disk = distances
+        d_max = min(d_cap, float(d_disk.max()))
+        d_min = max(float(self.config.spawn_min_distance),
+                    float(np.percentile(d_disk, self.config.spawn_min_percentile)))
+        if d_max - d_min < self.config.spawn_min_width:
+            d_min = max(float(self.config.spawn_min_distance), d_max - self.config.spawn_min_width)
+        if d_min >= d_max:
+            d_min = float(d_disk.min())
+        return d_min, d_max
 
     def _spawn_on_plume(self) -> Tuple[float, float]:
-        """Spawna SEMPRE dentro il plume con vincoli di distanza a cascata.
+        """Spawna dentro il plume nel disco [d_min, d_max] con distribuzione uniforme
+        per distanza dalla sorgente.
 
-        Prova i ring di distanza in _SPAWN_DISTANCE_CASCADE in ordine decrescente.
-        Scende al ring successivo solo se nessun punto del plume rientra in quello corrente.
-        Fallback finale: ovunque nel plume (senza vincoli di distanza).
-
-        Vincoli (in ordine di priorità):
-        1. Deve essere nel plume (conc >= spawn_conc_threshold) ← OBBLIGATORIO
-        2. Ring (min_dist, max_dist) dalla sorgente (cascata)
-        3. Almeno spawn_min_land_distance dal bordo terra
+        Logica:
+        1. Si raccolgono tutte le celle del plume (conc >= soglia) sufficientemente
+           lontane dalla terra.
+        2. Si fissa una distanza massima ``spawn_max_distance`` (es. 2.5 km) e si calcola,
+           per lo specifico scenario, una distanza minima ``d_min`` = max(floor di config,
+           minima distanza realmente disponibile).
+        3. Si campiona una distanza obiettivo in modo UNIFORME su [d_min, d_max] e si
+           sceglie a caso una cella valida prossima a quella distanza. Questo evita che
+           l'agente parta sempre dalla stessa zona (es. sempre l'anello più esterno) e
+           distribuisce i punti di partenza su tutto l'intervallo.
         """
         # Imposta il timestep al frame configurato (quello calcolato dal chunk_id nel reset())
         if self.field.n_timesteps > 1:
@@ -414,67 +472,66 @@ class SourceSeekingEnv(gym.Env):
             (y_coords - self.source_position[1])**2
         )
 
-        # Cascata di ring: prova dal più lontano al più vicino
-        active_min_distance = 0.0
-        active_max_distance = np.inf
-        valid_x = np.array([], dtype=float)
-        valid_y = np.array([], dtype=float)
-
-        for min_dist, max_dist in self._SPAWN_DISTANCE_CASCADE:
-            ring_mask = (distances >= min_dist) & (distances <= max_dist)
-            if np.any(ring_mask):
-                valid_x = x_coords[ring_mask]
-                valid_y = y_coords[ring_mask]
-                active_min_distance = float(min_dist)
-                active_max_distance = float(max_dist)
-                break
-
-        # Fallback finale: ovunque nel plume
-        if len(valid_x) == 0:
-            valid_x = x_coords
-            valid_y = y_coords
-            active_min_distance = 0.0
-            active_max_distance = np.inf
-
         # Filtra punti troppo vicini alla terra
         land_safe_mask = np.array([
-            self._min_distance_to_land(valid_x[i], valid_y[i]) >= self.config.spawn_min_land_distance
-            for i in range(len(valid_x))
+            self._min_distance_to_land(x_coords[i], y_coords[i]) >= self.config.spawn_min_land_distance
+            for i in range(len(x_coords))
         ])
-        enforce_land_constraint = bool(np.any(land_safe_mask))
-        if enforce_land_constraint:
-            valid_x = valid_x[land_safe_mask]
-            valid_y = valid_y[land_safe_mask]
+        if np.any(land_safe_mask):
+            x_coords = x_coords[land_safe_mask]
+            y_coords = y_coords[land_safe_mask]
+            distances = distances[land_safe_mask]
 
-        def is_valid_spawn_position(x: float, y: float) -> bool:
-            if not (self.config.xmin <= x <= self.config.xmax and
-                    self.config.ymin <= y <= self.config.ymax):
-                return False
-            if self.field.get_concentration(x, y) < self.config.spawn_conc_threshold:
-                return False
-            dist = np.sqrt((x - self.source_position[0])**2 + (y - self.source_position[1])**2)
-            if dist < active_min_distance or dist > active_max_distance:
-                return False
-            if enforce_land_constraint and self._min_distance_to_land(x, y) < self.config.spawn_min_land_distance:
-                return False
-            return True
+        # Disco di spawn: [d_min, d_max].
+        #  - d_max è un limite superiore fisso da config (es. 3 km), abbassato alla
+        #    massima estensione del plume se questo non arriva così lontano.
+        #  - d_min SCALA con la diffusione del plume dalla sorgente: è un percentile
+        #    basso delle distanze delle celle di plume. Plume molto diffuso → le celle
+        #    sono distribuite lontano → percentile alto → d_min alta; plume compatto →
+        #    celle vicine → percentile basso → d_min bassa (una d_min alta sarebbe
+        #    inutile/irraggiungibile). Un floor assoluto evita lo spawn nel raggio di
+        #    successo.
+        d_cap = float(self.config.spawn_max_distance)
+        in_disk = distances <= d_cap
+        if not np.any(in_disk):
+            in_disk = np.ones_like(distances, dtype=bool)   # plume non raggiunge d_cap
+        x_disk = x_coords[in_disk]
+        y_disk = y_coords[in_disk]
+        d_disk = distances[in_disk]
 
-        # Primo tentativo: punto random con piccola perturbazione
+        d_max = min(d_cap, float(d_disk.max()))
+        d_min = float(np.percentile(d_disk, self.config.spawn_min_percentile))
+        d_min = max(float(self.config.spawn_min_distance), d_min)
+        # L'intervallo non deve essere troppo stretto, altrimenti gli agenti partono
+        # quasi tutti alla stessa distanza: garantisci un'ampiezza minima abbassando d_min
+        # (fino al floor) quando d_max - d_min è insufficiente.
+        if d_max - d_min < self.config.spawn_min_width:
+            d_min = max(float(self.config.spawn_min_distance),
+                        d_max - self.config.spawn_min_width)
+        if d_min >= d_max:                                  # safety: garantisci d_min < d_max
+            d_min = float(d_disk.min())
+
+        # Campionamento uniforme per distanza: scegli una distanza obiettivo uniforme in
+        # [d_min, d_max], poi una cella valida prossima a quella distanza.
         for _ in range(20):
-            idx = int(self.np_random.integers(len(valid_x)))
-            x = float(valid_x[idx]) + float(self.np_random.uniform(-5, 5))
-            y = float(valid_y[idx]) + float(self.np_random.uniform(-5, 5))
-            if is_valid_spawn_position(x, y):
+            target_d = float(self.np_random.uniform(d_min, d_max))
+            band = np.abs(d_disk - target_d) <= 50.0   # tolleranza ±50 m
+            cand = np.where(band)[0]
+            if len(cand) == 0:
+                cand = np.array([int(np.argmin(np.abs(d_disk - target_d)))])
+            idx = int(self.np_random.choice(cand))
+            x = float(x_disk[idx]) + float(self.np_random.uniform(-5, 5))
+            y = float(y_disk[idx]) + float(self.np_random.uniform(-5, 5))
+            if (self.config.xmin <= x <= self.config.xmax and
+                    self.config.ymin <= y <= self.config.ymax and
+                    self.field.get_concentration(x, y) >= self.config.spawn_conc_threshold and
+                    self._min_distance_to_land(x, y) >= self.config.spawn_min_land_distance):
                 return (x, y)
 
-        # Secondo tentativo: punto esatto dalla griglia
-        for _ in range(20):
-            idx = int(self.np_random.integers(len(valid_x)))
-            x, y = float(valid_x[idx]), float(valid_y[idx])
-            if is_valid_spawn_position(x, y):
-                return (x, y)
-
-        return (float(valid_x[0]), float(valid_y[0]))
+        # Fallback: cella esatta della griglia più vicina a una distanza uniforme
+        target_d = float(self.np_random.uniform(d_min, d_max))
+        idx = int(np.argmin(np.abs(d_disk - target_d)))
+        return (float(x_disk[idx]), float(y_disk[idx]))
 
 
     def _get_observation(self) -> np.ndarray:
@@ -628,17 +685,35 @@ class SourceSeekingEnv(gym.Env):
         7: (-_DIAG,-_DIAG),     # SudOvest
     }
 
-    def _apply_action(self, action):
-        """Applica l'azione discreta all'agente.
-        
-        Azioni: 0=Nord, 1=Sud, 2=Est, 3=Ovest.
-        Spostamento fisso = max_velocity * dt (10m per default).
-        """
-        action_int = int(action)
-        dx_dir, dy_dir = self._ACTION_MAP[action_int]
+    def _decode_action(self, action) -> Tuple[int, float]:
+        """Decodifica l'azione in (indice direzione, velocità).
 
-        vx = dx_dir * self.config.max_velocity
-        vy = dy_dir * self.config.max_velocity
+        Con n_velocity_levels = K, l'azione appartiene a {0, ..., 8K-1} ed è
+        codificata come  action = dir_idx * K + vel_idx:
+          - dir_idx = action // K   -> una delle 8 direzioni
+          - vel_idx = action %  K   -> livello di velocità
+        La velocità è la (vel_idx+1)-esima frazione di max_velocity:
+          velocity = (vel_idx + 1) / K * max_velocity   (K-partizione di (0, v_max]).
+        Con K = 1 si riduce al passo fisso (velocity = max_velocity).
+        """
+        K = self.config.n_velocity_levels
+        action_int = int(action)
+        dir_idx = action_int // K
+        vel_idx = action_int % K
+        velocity = (vel_idx + 1) / K * self.config.max_velocity
+        return dir_idx, velocity
+
+    def _apply_action(self, action):
+        """Applica l'azione all'agente: direzione (8) + velocità (K livelli).
+
+        Spostamento = direzione * velocità * dt, con velocità scelta dall'agente
+        in (0, max_velocity] tramite il livello codificato nell'azione.
+        """
+        dir_idx, velocity = self._decode_action(action)
+        dx_dir, dy_dir = self._ACTION_MAP[dir_idx]
+
+        vx = dx_dir * velocity
+        vy = dy_dir * velocity
 
         # Aggiorna stato
         self.state.vx = vx
@@ -720,32 +795,34 @@ class SourceSeekingEnv(gym.Env):
         Returns:
             np.ndarray di shape (n_actions,) con True per azioni valide
         """
+        n_actions = self.config.n_discrete_actions * self.config.n_velocity_levels
         if self.state is None:
             # Prima del reset, tutte le azioni sono valide
-            return np.ones(self.config.n_discrete_actions, dtype=bool)
-        
-        masks = np.ones(self.config.n_discrete_actions, dtype=bool)
-        step_size = self.config.max_velocity * self.config.dt  # 10m per default
-        
-        for action_idx, (dx_dir, dy_dir) in self._ACTION_MAP.items():
-            # Calcola posizione dopo l'azione
+            return np.ones(n_actions, dtype=bool)
+
+        masks = np.ones(n_actions, dtype=bool)
+
+        # Masking CONGIUNTO: ogni azione (direzione, velocità) è valida solo se il
+        # movimento risultante resta nel dominio e non finisce su terra. Una direzione
+        # può quindi essere valida a bassa velocità e invalida ad alta velocità.
+        for action_idx in range(n_actions):
+            dir_idx, velocity = self._decode_action(action_idx)
+            step_size = velocity * self.config.dt
+            dx_dir, dy_dir = self._ACTION_MAP[dir_idx]
             new_x = self.state.x + dx_dir * step_size
             new_y = self.state.y + dy_dir * step_size
-            
-            # Check boundary
+
             if (new_x < self.config.xmin or new_x > self.config.xmax or
                 new_y < self.config.ymin or new_y > self.config.ymax):
                 masks[action_idx] = False
                 continue
-            
-            # Check land collision
             if self.field.is_land(new_x, new_y):
                 masks[action_idx] = False
-        
+
         # Se tutte le azioni sono mascherate, evita crash di MaskablePPO
         # e lascia al reward il compito di penalizzare scelte non valide.
         if not masks.any():
-            return np.ones(self.config.n_discrete_actions, dtype=bool)
+            return np.ones(n_actions, dtype=bool)
 
         return masks
 

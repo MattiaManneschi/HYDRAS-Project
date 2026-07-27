@@ -58,6 +58,10 @@ environment:
     conc_threshold: 0.5
     min_land_distance: 50
     start_frame: 352
+    min_distance: 300      # m - floor assoluto di d_min (no spawn troppo facili)
+    min_percentile: 50     # percentile (mediana) delle distanze del plume per d_min (scala con la diffusione)
+    max_distance: 3000     # m - limite superiore del disco di spawn
+    min_width: 500         # m - ampiezza minima dell'intervallo (d_min, d_max)
 sources:
   concentration: 1000
   flow_rate: 50

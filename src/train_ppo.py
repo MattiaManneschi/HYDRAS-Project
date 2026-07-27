@@ -513,6 +513,118 @@ def make_env_fn(
     return _init
 
 
+def _warm_start_from_minimal(model, minimal_path, PPOClass,
+                             n_directions, K, suppress: float = 8.0):
+    """Warm-start del modello Discrete(n_directions*K) dal minimal Discrete(n_directions).
+
+    - corpo (mlp_extractor) e value_net: copiati pari pari (stesse forme, obs identica);
+    - action_net (n_dir -> n_dir*K): per ogni direzione d i logit del minimal sono
+      replicati sui K livelli di velocità. Il livello massimo (k=K-1) riceve il logit
+      pieno, gli altri lo stesso logit ridotto di `suppress`. All'avvio il modello si
+      comporta quindi come il minimal (sempre velocità massima); il training impara poi
+      a rallentare solo dove conviene.
+    """
+    import torch
+    minimal = PPOClass.load(minimal_path, device='cpu')
+    src = minimal.policy.state_dict()
+    dst = model.policy.state_dict()
+
+    head_keys = ('action_net.weight', 'action_net.bias')
+    copied, skipped = 0, []
+    with torch.no_grad():
+        # 1) corpo + value_net: copia diretta delle chiavi con forma compatibile
+        for name, p in dst.items():
+            if name in head_keys:
+                continue
+            if name in src and src[name].shape == p.shape:
+                p.copy_(src[name]); copied += 1
+            else:
+                skipped.append(name)
+
+        # 2) testa azione: espansione per replicazione (variante "max-bias")
+        w_min, b_min = src['action_net.weight'], src['action_net.bias']   # [n_dir,F],[n_dir]
+        W, B = dst['action_net.weight'], dst['action_net.bias']           # [n_dir*K,F],[n_dir*K]
+        assert w_min.shape[0] == n_directions, \
+            f"minimal action_net ha {w_min.shape[0]} azioni, attese {n_directions}"
+        assert W.shape[0] == n_directions * K, \
+            f"nuovo action_net ha {W.shape[0]} azioni, attese {n_directions*K}"
+        for d in range(n_directions):
+            for k in range(K):
+                row = d * K + k
+                W[row].copy_(w_min[d])
+                B[row] = b_min[d] - (0.0 if k == K - 1 else suppress)
+
+    model.policy.load_state_dict(dst)
+    del minimal
+    print(f"  Warm-start: {copied} tensori del corpo copiati dal minimal; "
+          f"testa azione {n_directions}->{n_directions*K} per replicazione "
+          f"(bias sul livello max, suppress={suppress:g}).")
+    if skipped:
+        print(f"  Warm-start: tensori saltati (forma diversa): {skipped}")
+
+
+def _expand_116_to_196(arr116, fill: float, axis: int = -1):
+    """Espande un array da obs SINGOLA corona (116) a DOPPIA corona (196) inserendo `fill`
+    nelle posizioni della corona-2 ([36:44] corrente, [116:188] storica). Mappatura:
+      dual[0:36]    <- single[0:36]     (conc, storico conc, spostamenti, corona1 corrente)
+      dual[44:116]  <- single[36:108]   (corona1 storica)
+      dual[188:196] <- single[108:116]  (vento, corrente, max-vector, max-val, steps)
+    """
+    import numpy as np
+    arr116 = np.asarray(arr116)
+    shape = list(arr116.shape); shape[axis] = 196
+    out = np.full(shape, fill, dtype=arr116.dtype)
+    def _put(dst, src):
+        di = [slice(None)] * len(shape); di[axis] = dst
+        si = [slice(None)] * len(shape); si[axis] = src
+        out[tuple(di)] = arr116[tuple(si)]
+    _put(slice(0, 36),    slice(0, 36))
+    _put(slice(44, 116),  slice(36, 108))
+    _put(slice(188, 196), slice(108, 116))
+    return out
+
+
+def _warm_start_dualcorona_from_single(model, single_path, PPOClass):
+    """Warm-start del modello a DOPPIA corona (obs 196) dal modello a SINGOLA corona (obs 116).
+
+    Copia tutti i pesi del single; per lo strato d'ingresso (196<-116) rimappa le colonne
+    sulle posizioni non-corona-2 e AZZERA le colonne della corona-2. All'avvio il modello
+    si comporta esattamente come il single (corona-2 contribuisce 0); il training impara a
+    usarla solo se aiuta. Action space e corpo (256x256), value/action head: invariati.
+    """
+    import torch, numpy as np
+    src = PPOClass.load(single_path, device='cpu')
+    s = src.policy.state_dict()
+    d = model.policy.state_dict()
+    in_keys = ('mlp_extractor.policy_net.0.weight', 'mlp_extractor.value_net.0.weight')
+    with torch.no_grad():
+        for name, p in d.items():
+            if name in in_keys:
+                continue
+            if name in s and s[name].shape == p.shape:
+                p.copy_(s[name])
+        for k in in_keys:
+            assert s[k].shape[1] == 116 and d[k].shape[1] == 196, \
+                f"layout obs inatteso: {k} {tuple(s[k].shape)}->{tuple(d[k].shape)}"
+            d[k].copy_(torch.from_numpy(_expand_116_to_196(s[k].cpu().numpy(), 0.0, axis=1)))
+    model.policy.load_state_dict(d)
+    del src
+    print("  Warm-start doppia corona: input 116->196 (colonne corona-2 azzerate), "
+          "resto copiato dal single.")
+
+
+def _transplant_obs_rms_116_to_196(dual_vecnorm, single_vecnorm_path):
+    """Trasferisce le statistiche VecNormalize dal single (116) al dual (196): le 116 colonne
+    condivise prendono media/var del single, le 80 della corona-2 restano neutre (media 0,
+    var 1). Così il warm-start vede gli stessi input normalizzati del single."""
+    import numpy as np, pickle
+    with open(single_vecnorm_path, 'rb') as f:
+        src = pickle.load(f)
+    dual_vecnorm.obs_rms.mean = _expand_116_to_196(np.asarray(src.obs_rms.mean), 0.0, axis=0)
+    dual_vecnorm.obs_rms.var  = _expand_116_to_196(np.asarray(src.obs_rms.var),  1.0, axis=0)
+    dual_vecnorm.obs_rms.count = src.obs_rms.count
+
+
 def train(
     config_path: str = "utils/config.yaml",
     output_dir: str = "trained_models",
@@ -520,6 +632,8 @@ def train(
     total_timesteps: Optional[int] = None,
     seed: int = 42,
     resume_from: Optional[str] = None,
+    warm_start_from: Optional[str] = None,
+    warm_start_dualcorona_from: Optional[str] = None,
     *,
     data_dir: str,
 ):
@@ -532,7 +646,10 @@ def train(
         n_envs: Numero di ambienti paralleli
         total_timesteps: Timesteps totali (override config)
         seed: Seed per riproducibilità
-        resume_from: Path a checkpoint per riprendere training
+        resume_from: Path a checkpoint per riprendere training (stesso action space)
+        warm_start_from: Path al modello minimal Discrete(8) da cui fare il warm-start
+            verso lo spazio Discrete(8*K) (trapianto corpo + replicazione testa azione).
+            Mutuamente esclusivo con resume_from.
         data_dir: Directory con file NC (obbligatoria)
     """
     if not STABLE_BASELINES_AVAILABLE:
@@ -743,11 +860,13 @@ def train(
     use_vec_normalize = config.get('environment', {}).get('normalize_obs', True)
     norm_reward_enabled = config.get('environment', {}).get('normalize_reward', False)
     if use_vec_normalize:
-        # In resume, ricarica le statistiche VecNormalize del run precedente
-        # senza creare doppi wrapper VecNormalize.
+        # In resume (o warm-start), ricarica le statistiche VecNormalize del modello
+        # di partenza senza creare doppi wrapper VecNormalize. L'osservazione è la
+        # stessa (116-dim) anche nel warm-start da minimal, quindi le stat sono valide.
         loaded_vecnorm = False
-        if resume_from:
-            resume_path = Path(resume_from)
+        vecnorm_source = resume_from or warm_start_from
+        if vecnorm_source:
+            resume_path = Path(vecnorm_source)
             vecnorm_candidates = [
                 resume_path.parent / "vec_normalize.pkl",            # .../models/vec_normalize.pkl
                 resume_path.parent.parent / "vec_normalize.pkl",     # .../models/best/../vec_normalize.pkl
@@ -758,19 +877,33 @@ def train(
                     vec_env = VecNormalize.load(str(vecnorm_path), base_vec_env)
                     vec_env.training = True
                     vec_env.norm_reward = norm_reward_enabled
+                    # VecNormalize.load conserva gli spazi del modello salvato. In warm-start
+                    # (minimal Discrete(8) -> Discrete(8*K)) l'action space va riallineato al
+                    # nuovo env, altrimenti il modello verrebbe costruito con 8 azioni.
+                    vec_env.action_space = base_vec_env.action_space
+                    vec_env.observation_space = base_vec_env.observation_space
                     print(f"  Loaded VecNormalize stats from: {vecnorm_path}")
                     loaded_vecnorm = True
                     break
 
         if not loaded_vecnorm:
-            if resume_from:
-                print("  WARNING: resume_from set but vec_normalize.pkl not found; using fresh normalization stats")
+            if vecnorm_source:
+                print("  WARNING: resume/warm-start set but vec_normalize.pkl not found; using fresh normalization stats")
             vec_env = VecNormalize(
                 base_vec_env,
                 norm_obs=True,
                 norm_reward=norm_reward_enabled,
                 clip_obs=10.0
             )
+            # Warm-start doppia corona: trapianta le statistiche obs del single (116) nelle
+            # 116 colonne condivise del dual (196); corona-2 resta neutra (media 0, var 1).
+            if warm_start_dualcorona_from:
+                sv = Path(warm_start_dualcorona_from).parent / "vec_normalize.pkl"
+                if sv.exists():
+                    _transplant_obs_rms_116_to_196(vec_env, str(sv))
+                    print(f"  obs_rms trapiantato dal single (116->196): {sv}")
+                else:
+                    print(f"  WARNING: vec_normalize.pkl del single non trovato: {sv}")
 
     # Learning rate schedule: step-wise decay allineato alle fasi del curriculum
     lr_schedule_config = training_config.get('lr_schedule', [])
@@ -848,6 +981,16 @@ def train(
         loaded_model = PPOClass.load(resume_from, device='cpu')
         model.set_parameters(loaded_model.get_parameters(), exact_match=False)
         del loaded_model
+    elif warm_start_from:
+        print(f"\nWarm-start from minimal: {warm_start_from}")
+        model = PPOClass(**model_kwargs)
+        n_dir = int(config['agent'].get('n_discrete_actions', 8))
+        K = int(config['agent'].get('n_velocity_levels', 1))
+        _warm_start_from_minimal(model, warm_start_from, PPOClass, n_dir, K)
+    elif warm_start_dualcorona_from:
+        print(f"\nWarm-start doppia corona dal single: {warm_start_dualcorona_from}")
+        model = PPOClass(**model_kwargs)
+        _warm_start_dualcorona_from_single(model, warm_start_dualcorona_from, PPOClass)
     else:
         print(f"\nCreating new {algo_name} model...")
         if use_maskable:
@@ -884,22 +1027,26 @@ def train(
         )
         callbacks.append(curriculum_callback)
 
-    # Multi-scenario eval callback
+    # Multi-scenario eval callback (saltato se eval_scenarios è vuoto: la catena di
+    # sweep usa final_model.zip e non richiede best_model → niente eval in training)
     eval_freq = training_config.get('eval_freq', 100000)
     eval_scenarios = training_config.get('eval_scenarios', [])
-    eval_callback = MultiScenarioEvalCallback(
-        scenarios=eval_scenarios,
-        data_manager=data_manager,
-        config=config,
-        train_vec_env=vec_env,
-        wind_mapping=wind_mapping,
-        current_mapping=current_mapping,
-        best_model_save_path=str(model_dir / "best"),
-        eval_freq=eval_freq,
-        n_eval_episodes=training_config.get('n_eval_episodes', 3),
-        verbose=1,
-    )
-    callbacks.append(eval_callback)
+    if eval_scenarios:
+        eval_callback = MultiScenarioEvalCallback(
+            scenarios=eval_scenarios,
+            data_manager=data_manager,
+            config=config,
+            train_vec_env=vec_env,
+            wind_mapping=wind_mapping,
+            current_mapping=current_mapping,
+            best_model_save_path=str(model_dir / "best"),
+            eval_freq=eval_freq,
+            n_eval_episodes=training_config.get('n_eval_episodes', 3),
+            verbose=1,
+        )
+        callbacks.append(eval_callback)
+    else:
+        print("[train] eval_scenarios vuoto → MultiScenarioEvalCallback disattivato.")
 
     # Checkpoint callback
     checkpoint_callback = CheckpointCallback(
@@ -1059,5 +1206,74 @@ def main():
             resume_from=resume_from,
         )
 
+def main_velocity_sweep():
+    """Sweep sulla velocità massima con passo deciso dall'agente (K=5 livelli).
+
+    Per ogni v_max in {1,2,3,4,5} m/s l'agente sceglie la velocità in (0, v_max]
+    tramite K=5 livelli proporzionali -> action space Discrete(8*5)=40 (identico per
+    tutti i v_max, così i pesi si trasferiscono). Fine-tuning A CATENA: il primo
+    (v_max=1) da zero, gli altri partono dal modello dello stadio precedente
+    (1 -> 2 -> 3 -> 4 -> 5). Usa la nuova logica di spawn distribuito.
+
+    A v_max=5 i 5 livelli corrispondono a passi {10,20,30,40,50} m, allineati allo
+    sweep FCM Adam.
+    """
+    import os
+    os.chdir(PROJECT_ROOT)
+
+    # Config "migliore" (modello minimal 96.9%): reward minimal, sensori 20 m, singola corona.
+    base_config = str(PROJECT_ROOT / "utils" / "config_base_no_wind_reward.yaml")
+    output_dir  = str(PROJECT_ROOT / "trained_models")
+    data_dir    = str(PROJECT_ROOT / "data")
+
+    K = 5
+    VMAX_LIST = [1, 2, 3, 4, 5]          # m/s
+    TIMESTEPS_FIRST    = 6_000_000        # v_max=1, da zero
+    TIMESTEPS_FINETUNE = 2_000_000        # stadi successivi (a catena)
+    FINETUNE_LR        = 1.0e-5           # LR costante per il fine-tuning (come la catena del report v8)
+    N_ENVS = 2
+
+    prev_model = None  # il primo stadio parte da zero (action space nuovo, niente minimal)
+
+    for vmax in VMAX_LIST:
+        # Config dedicato: K livelli di velocità, v_max corrente, singola corona (116-dim)
+        cfg = load_config(base_config)
+        cfg['agent']['n_velocity_levels'] = K
+        cfg['agent']['max_velocity'] = float(vmax)
+        cfg['agent'].pop('sensor_range_2', None)        # singola corona (obs 116-dim)
+        cfg.setdefault('agent', {})['sensor_range'] = cfg['agent'].get('sensor_range', 20)
+        cfg.setdefault('training', {})['target_kl'] = 0.02   # evita early stopping sistematico
+        # Fine-tuning: LR costante più basso (lo schedule è tarato su 6M; su 2M
+        # resterebbe bloccato a 3e-4). Il primo stadio (6M da zero) tiene lo schedule.
+        if prev_model is not None:
+            cfg.setdefault('training', {}).pop('lr_schedule', None)
+            cfg['training']['learning_rate'] = FINETUNE_LR
+        cfg_path = str(PROJECT_ROOT / "utils" / f"config_vmax{vmax}.yaml")
+        with open(cfg_path, 'w') as f:
+            yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False)
+
+        timesteps = TIMESTEPS_FIRST if prev_model is None else TIMESTEPS_FINETUNE
+        print(f"\n{'='*70}")
+        print(f"  VELOCITY SWEEP  |  v_max = {vmax} m/s  (passo max {vmax*10} m, K={K} livelli)")
+        print(f"  livelli velocità: {[round((i+1)/K*vmax,2) for i in range(K)]} m/s")
+        print(f"  resume_from: {prev_model if prev_model else 'NIENTE (da zero)'}")
+        print(f"  timesteps: {timesteps:,}")
+        print(f"{'='*70}\n")
+
+        _, run_dir = train(
+            config_path=cfg_path,
+            output_dir=output_dir,
+            n_envs=N_ENVS,
+            total_timesteps=timesteps,
+            seed=42,
+            data_dir=data_dir,
+            resume_from=prev_model,
+        )
+        prev_model = str(run_dir / "models" / "final_model.zip")   # catena: prossimo stadio
+        print(f"\n  → v_max={vmax} m/s completato. Modello: {prev_model}")
+
+    print(f"\nVelocity sweep completato. Modelli in: {output_dir}")
+
+
 if __name__ == "__main__":
-    main()
+    main_velocity_sweep()

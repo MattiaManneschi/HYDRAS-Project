@@ -130,6 +130,8 @@ class EpisodeResult:
     end_frame: int = 0     # Frame finale (al quale plottare)
     spawn_x: float = 0.0   # Posizione iniziale agente
     spawn_y: float = 0.0
+    velocities: np.ndarray = field(default_factory=lambda: np.array([]))    # m/s scelta per step
+    dist_history: np.ndarray = field(default_factory=lambda: np.array([]))  # m, distanza dalla sorgente per step
 
 
 @dataclass
@@ -303,6 +305,8 @@ def run_episode(model, vec_env, deterministic=True) -> EpisodeResult:
     initial_dist = float(np.linalg.norm(spawn_pos - source_pos))
 
     trajectory = [spawn_pos]
+    velocities = []        # andamento della velocità: m/s scelta dall'agente a ogni step
+    dist_hist = []         # distanza dalla sorgente a ogni step (post-step)
     done = False
     last_info = {}
 
@@ -313,10 +317,23 @@ def run_episode(model, vec_env, deterministic=True) -> EpisodeResult:
         else:
             action, _ = model.predict(obs, deterministic=deterministic)
 
+        # Velocità scelta: decodifica l'azione (dir_idx, velocity). Indipendente
+        # dallo stato → valida anche se l'env si è già auto-resettato a done=True.
+        try:
+            a_int = int(np.asarray(action).flatten()[0])
+            _, vel = inner._decode_action(a_int)
+            velocities.append(float(vel))
+        except Exception:
+            pass
+
         obs, _, dones, infos = vec_env.step(action)
         done = dones[0]
         last_info = infos[0]
-        
+
+        d = last_info.get('distance_to_source')
+        if d is not None:
+            dist_hist.append(float(d))
+
         # Usa posizione dall'info (inner è già resettato quando done=True)
         pos = last_info.get('position', inner.state.position.tolist())
         trajectory.append(np.array(pos))
@@ -356,6 +373,8 @@ def run_episode(model, vec_env, deterministic=True) -> EpisodeResult:
         end_frame=end_frame,
         spawn_x=float(spawn_pos[0]),
         spawn_y=float(spawn_pos[1]),
+        velocities=np.array(velocities),
+        dist_history=np.array(dist_hist),
     )
 
 
@@ -434,6 +453,112 @@ def save_trajectory_plot(result: EpisodeResult, field, output_path: Path, thresh
     plt.close(fig)
 
 
+def plot_velocity_mean_over_time(results, output_path, max_velocity: float,
+                                 n_levels: int, dt_seconds: float = 10.0):
+    """Andamento MEDIO della velocità nel tempo per un dato v_max.
+
+    Prende l'andamento della velocità di ogni run (episodio) registrato durante
+    l'inferenza e ne calcola la media (± dev.std.) fra tutte le run, per indice di
+    step. Le linee tratteggiate indicano i K livelli di velocità ammessi in (0, v_max].
+    Salva il grafico in  output_path/analysis/velocity_mean_over_time.png .
+    """
+    series = [r.velocities for r in results
+              if getattr(r, 'velocities', None) is not None and len(r.velocities) > 0]
+    if not series:
+        print("[velocity] nessun andamento di velocità registrato: grafico saltato.")
+        return
+
+    n_levels = max(1, int(n_levels))
+    levels = [(j + 1) / n_levels * max_velocity for j in range(n_levels)]
+
+    # Media/std per indice di step su andamenti di lunghezza diversa (ragged)
+    max_len = max(len(v) for v in series)
+    mean_t, std_t, n_t = [], [], []
+    for i in range(max_len):
+        col = [v[i] for v in series if len(v) > i]
+        n_t.append(len(col)); mean_t.append(float(np.mean(col))); std_t.append(float(np.std(col)))
+    mean_t, std_t, n_t = np.array(mean_t), np.array(std_t), np.array(n_t)
+    t_min = np.arange(max_len) * dt_seconds / 60.0
+    keep = n_t >= 3          # taglia la coda con pochissimi episodi (rumorosa)
+
+    fig, ax = plt.subplots(figsize=(11, 5))
+    ax.plot(t_min[keep], mean_t[keep], color='tab:blue', lw=2, label='velocità media')
+    # La velocità è fisicamente limitata a [0, v_max] (livelli discreti (vel_idx+1)/K·v_max):
+    # la media è sempre <= v_max, ma la banda ±std, essendo simmetrica su una quantità
+    # bounded, sfora v_max quando la media è vicina al tetto. Si clippa la banda ai limiti
+    # fisici (la MEDIA non è toccata).
+    lo = np.maximum(mean_t - std_t, 0.0)
+    hi = np.minimum(mean_t + std_t, max_velocity)
+    ax.fill_between(t_min[keep], lo[keep], hi[keep],
+                    color='tab:blue', alpha=0.2, label='±1 std')
+    for lv in levels:
+        ax.axhline(lv, ls='--', color='gray', lw=0.7, alpha=0.6)
+    ax.set_xlabel('tempo [min]'); ax.set_ylabel('velocità [m/s]')
+    ax.set_ylim(0, max_velocity * 1.08); ax.grid(alpha=0.3); ax.legend(loc='upper right')
+
+    overall = float(np.mean(np.concatenate(series)))
+    ax.set_title(f'Andamento medio della velocità nel tempo — v_max={max_velocity:g} m/s, K={n_levels}\n'
+                 f'media su {len(series)} run  (velocità media globale {overall:.2f} m/s)', fontsize=12)
+    fig.tight_layout()
+
+    analysis_dir = Path(output_path) / "analysis"
+    analysis_dir.mkdir(parents=True, exist_ok=True)
+    out = analysis_dir / "velocity_mean_over_time.png"
+    fig.savefig(str(out), dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"Andamento medio velocità salvato in: {out}")
+
+
+def plot_velocity_vs_distance(results, output_path, max_velocity: float,
+                              n_levels: int, success_radius: float = 50.0):
+    """Velocità media in funzione della distanza dalla sorgente (binned su tutte le run).
+
+    È il grafico diagnostico per la MODULAZIONE: se l'agente rallenta avvicinandosi,
+    la curva scende verso destra (vicino alla sorgente). Asse x invertito: sinistra =
+    lontano, destra = vicino. La linea verticale segna il raggio di successo.
+    """
+    dv = [(r.dist_history, r.velocities) for r in results
+          if getattr(r, 'dist_history', None) is not None and len(getattr(r, 'dist_history', [])) > 0
+          and len(r.velocities) > 0]
+    if not dv:
+        print("[velocity-dist] nessun dato distanza/velocità: grafico saltato.")
+        return
+
+    n_levels = max(1, int(n_levels))
+    levels = [(j + 1) / n_levels * max_velocity for j in range(n_levels)]
+    dists = np.concatenate([d[:min(len(d), len(v))] for d, v in dv])
+    vels  = np.concatenate([v[:min(len(d), len(v))] for d, v in dv])
+
+    nb = 30
+    edges = np.linspace(0, np.percentile(dists, 99), nb + 1)
+    idx = np.clip(np.digitize(dists, edges) - 1, 0, nb - 1)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    bmean = np.array([vels[idx == b].mean() if np.any(idx == b) else np.nan for b in range(nb)])
+    bstd  = np.array([vels[idx == b].std()  if np.any(idx == b) else np.nan for b in range(nb)])
+    ok = ~np.isnan(bmean)
+
+    fig, ax = plt.subplots(figsize=(11, 5))
+    ax.plot(centers[ok], bmean[ok], color='tab:green', lw=2, marker='o', ms=3, label='velocità media')
+    lo = np.maximum(bmean - bstd, 0.0); hi = np.minimum(bmean + bstd, max_velocity)   # banda in [0, v_max]
+    ax.fill_between(centers[ok], lo[ok], hi[ok], color='tab:green', alpha=0.15, label='±1 std')
+    for lv in levels:
+        ax.axhline(lv, ls='--', color='gray', lw=0.7, alpha=0.6)
+    ax.axvline(success_radius, ls=':', color='red', lw=1.2, label=f'raggio successo {success_radius:g} m')
+    ax.set_xlabel('distanza dalla sorgente [m]'); ax.set_ylabel('velocità media [m/s]')
+    ax.set_ylim(0, max_velocity * 1.08); ax.grid(alpha=0.3); ax.legend(loc='upper left')
+    ax.invert_xaxis()    # sinistra = lontano, destra = vicino
+    ax.set_title(f'Velocità media vs distanza dalla sorgente — v_max={max_velocity:g} m/s, K={n_levels}\n'
+                 f'(curva che scende a destra = rallenta avvicinandosi)', fontsize=12)
+    fig.tight_layout()
+
+    analysis_dir = Path(output_path) / "analysis"
+    analysis_dir.mkdir(parents=True, exist_ok=True)
+    out = analysis_dir / "velocity_vs_distance.png"
+    fig.savefig(str(out), dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"Velocità vs distanza salvato in: {out}")
+
+
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 
@@ -450,6 +575,7 @@ def run_inference(
     config_override: Optional[dict] = None,
     save_plots: bool = True,
     seed: Optional[int] = None,
+    plot_velocity: bool = False,
 ):
     """
     Esegue l'inferenza completa su 26 sorgenti held-out (SRC107-SRC132, 20% del totale 132) con chunk multipli per fonte.
@@ -708,6 +834,19 @@ def run_inference(
     generate_analysis_plots(episodes_data, output_path, dt_seconds=dt_seconds,
                             max_steps=config.get('environment', {}).get('max_episode_steps', 1080))
 
+    if plot_velocity:
+        agent_cfg = config.get('agent', {})
+        mv = float(agent_cfg.get('max_velocity', 1.0))
+        kl = int(agent_cfg.get('n_velocity_levels', 1))
+        plot_velocity_mean_over_time(
+            all_results_global, output_path,
+            max_velocity=mv, n_levels=kl, dt_seconds=dt_seconds,
+        )
+        plot_velocity_vs_distance(
+            all_results_global, output_path,
+            max_velocity=mv, n_levels=kl, success_radius=float(success_threshold),
+        )
+
     return all_stats
 
 
@@ -893,6 +1032,8 @@ def run_episode_fcm(fcm_agent, vec_env, deterministic: bool = True) -> EpisodeRe
         trajectory=np.array(trajectory),
         start_frame=start_frame,
         end_frame=last_info.get('end_time_idx', start_frame),
+        spawn_x=float(spawn_pos[0]),
+        spawn_y=float(spawn_pos[1]),
     )
 
 
@@ -1153,7 +1294,7 @@ def main_fcm_adam_sweep():
         print(f"\n{'='*80}")
         print(f"FCM Adam sweep — lr={lr}m")
         print(f"{'='*80}")
-        output_dir = str(PROJECT_ROOT / "evaluations" / "evaluations_FCM"
+        output_dir = str(PROJECT_ROOT / "thesis" / "evaluations" / "evaluations_FCM"
                          / "fcm_adaptive" / f"lr_{lr}")
         run_inference_fcm(
             config_path=CONFIG_PATH, data_dir=DATA_DIR, output_dir=output_dir,
@@ -1414,7 +1555,7 @@ def main():
                 print(f"[SKIP] Nessun modello trovato per sensor_range={sr}m in {trained_dir}")
                 continue
 
-            output_dir = str(PROJECT_ROOT / "evaluations" / "evaluations_RL" / f"evaluations_v{BASE_VERSION + i}")
+            output_dir = str(PROJECT_ROOT / "thesis" / "evaluations" / "evaluations_RL" / f"evaluations_v{BASE_VERSION + i}")
 
             cfg_override = load_config(CONFIG_PATH)
             cfg_override['agent']['sensor_range'] = sr
@@ -1464,7 +1605,7 @@ def main():
             cfg_override['agent']['sensor_range_2'] = sr2
             print(f"sensor_range dal modello: {sr}m  |  sensor_range_2: {sr2}m")
 
-        output_dir = str(PROJECT_ROOT / "evaluations" / "evaluations_RL" / "evaluations_v13")
+        output_dir = str(PROJECT_ROOT / "thesis" / "evaluations" / "evaluations_RL" / "evaluations_v13")
 
         print(f"Modello selezionato: {model_path}")
         print(f"Output valutazioni: {output_dir}")
@@ -1481,13 +1622,17 @@ def main():
             chunk_ids=[0, 1, 2],
         )
 
-def main_spawn_map():
+def main_spawn_map(mode: str = 'ppo'):
     """
-    Per ogni combinazione V*/Q* con SR<100%, seleziona le sorgenti con più
-    fallimenti e genera una griglia di spawn maps:
-    - sfondo: plume della sorgente al frame del chunk (spawn sempre nel plume)
-    - marker: spawn dell'agente → verde=successo, X rossa=fallimento
-    Modello: base_no_wind_reward (96.9% SR).
+    Genera griglie di spawn map (una per sorgente, subplot per combo vento/chunk):
+    - sfondo: plume della sorgente al frame del chunk;
+    - disco virtuale di spawn: 2 circonferenze tratteggiate a d_min e d_max (centro =
+      sorgente), clippate al dominio;
+    - marker: spawn → verde=successo, X rossa=fallimento secondo il "coloratore".
+
+    mode='fcm' → coloratore FCM Adam (sensor 50, lr 40); output spawn_maps_fcm/
+    mode='ppo' → coloratore PPO v1 warm-start;             output spawn_maps_ppo/
+    Lo spawn (punti + disco) è la NUOVA metrica e identico nei due (dipende dall'env).
     """
     import matplotlib
     matplotlib.use('Agg')
@@ -1500,15 +1645,11 @@ def main_spawn_map():
 
     N_SOURCES  = 5    # sorgenti con più fallimenti da selezionare
     N_EPISODES = 10   # episodi per terna (sorgente, versione, chunk)
+    mode = mode.lower()
 
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
     DATA_DIR     = str(PROJECT_ROOT / "data")
-    CONFIG_PATH  = str(PROJECT_ROOT / "utils" / "config_base_no_wind_reward.yaml")
-    MODEL_PATH   = str(PROJECT_ROOT / "trained_models" / "ppo_20260516_143937" / "models" / "final_model.zip")
-    OUTPUT_DIR   = PROJECT_ROOT / "evaluations" / "evaluations_RL" / "evaluations_minimal_reward" / "spawn_maps"
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-    config = load_config(CONFIG_PATH)
+    SPAWN_ROOT   = PROJECT_ROOT / "thesis" / "evaluations" / "spawn_maps"
     chunk_labels = {0: 'Q1/4', 1: 'Q1/2', 2: 'Q3/4'}
 
     data_manager = DataManager(data_dir=DATA_DIR, preload_all=False,
@@ -1518,12 +1659,39 @@ def main_spawn_map():
     current_mapping = {"_V0": "CL02_V0_SRC000_U_V_10mGrid.nc", "_V1": "CL02_V1_SRC000_U_V_10mGrid.nc",
                        "_V2": "CL02_V2_SRC000_U_V_10mGrid.nc", "_V3": "CL02_V3_SRC000_U_V_10mGrid.nc"}
 
-    model = load_model(MODEL_PATH)
-    vec_norm_path = Path(MODEL_PATH).parent / "vec_normalize.pkl"
+    # Coloratore: FCM Adam (config migliore) oppure v1 PPO warm-start. Lo SPAWN (punti +
+    # disco) è identico nei due — dipende solo dalla logica di spawn dell'env, non dall'agente.
+    model = None; fcm_agent = None; vec_norm_path = None
+    if mode == 'fcm':
+        OUTPUT_DIR = SPAWN_ROOT / "spawn_maps_fcm"
+        config = load_config(str(PROJECT_ROOT / "utils" / "config_base_no_wind_reward.yaml"))
+        config['agent']['sensor_range'] = 50          # FCM ottimale
+        config['agent'].pop('sensor_range_2', None)
+        config['agent']['n_velocity_levels'] = 1      # Discrete(8): FCM sceglie solo direzione
+        fcm_agent = AdamFCMAgent(sensor_range=50.0, lr=40.0)   # migliore dallo sweep (63.5%)
+        print(f"Spawn map — coloratore FCM Adam (sensor 50 m, lr 40 m)  →  {OUTPUT_DIR}")
+    elif mode == 'ppo_double':  # doppia corona (sensor_range_2=50), warm-start da v1
+        OUTPUT_DIR = SPAWN_ROOT / "spawn_maps_ppo" / "spawn_maps_ppo_double"
+        run_dir    = PROJECT_ROOT / "trained_models" / "ppo_20260630_145300"
+        config     = load_config(str(run_dir / "config.yaml"))
+        MODEL_PATH = str(run_dir / "models" / "final_model.zip")
+        model = load_model(MODEL_PATH)
+        vec_norm_path = Path(MODEL_PATH).parent / "vec_normalize.pkl"
+        print(f"Spawn map — coloratore PPO doppia corona  →  {OUTPUT_DIR}")
+    else:  # ppo: v1 warm-start (passo variabile, di fatto 1 m/s)
+        OUTPUT_DIR = SPAWN_ROOT / "spawn_maps_ppo"
+        run_dir    = PROJECT_ROOT / "trained_models" / "ppo_20260628_192155"
+        config     = load_config(str(run_dir / "config.yaml"))
+        MODEL_PATH = str(run_dir / "models" / "final_model.zip")
+        model = load_model(MODEL_PATH)
+        vec_norm_path = Path(MODEL_PATH).parent / "vec_normalize.pkl"
+        print(f"Spawn map — coloratore PPO v1 warm-start  →  {OUTPUT_DIR}")
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
     inference_sources = [s for s in data_manager.get_discovered_sources() if int(s[3:]) > 106]
 
     # ── 1. Combinazioni con SR < 100% dai dati esistenti ──────────────────────
-    eval_path = (PROJECT_ROOT / "evaluations" / "evaluations_RL"
+    eval_path = (PROJECT_ROOT / "thesis" / "evaluations" / "evaluations_RL"
                  / "evaluations_minimal_reward" / "episodes_data.json")
     eps_data = _json.loads(eval_path.read_text())
 
@@ -1584,30 +1752,39 @@ def main_spawn_map():
             results[key] = []
 
             for _ in range(N_EPISODES):
-                def _make(f=field, cfg=env_cfg):
-                    env = SourceSeekingEnv(config=cfg,
-                                           concentration_field=copy.deepcopy(f),
-                                           data_manager=data_manager,
-                                           wind_mapping=wind_mapping,
-                                           current_mapping=current_mapping)
-                    from stable_baselines3.common.monitor import Monitor as _Mon
-                    env = _Mon(env)
-                    if MASKABLE_PPO_AVAILABLE:
-                        from sb3_contrib.common.wrappers import ActionMasker
-                        env = ActionMasker(env, mask_fn)
-                    return env
+                if mode == 'fcm':
+                    vec_env = build_env_fcm(
+                        SourceSeekingConfig.from_config(config, chunk_id=chunk_id),
+                        copy.deepcopy(field), use_masking=MASKABLE_PPO_AVAILABLE,
+                        data_manager=data_manager, wind_mapping=wind_mapping,
+                        current_mapping=current_mapping)
+                    r = run_episode_fcm(fcm_agent, vec_env, deterministic=True)
+                else:
+                    def _make(f=field, cfg=env_cfg):
+                        env = SourceSeekingEnv(config=cfg,
+                                               concentration_field=copy.deepcopy(f),
+                                               data_manager=data_manager,
+                                               wind_mapping=wind_mapping,
+                                               current_mapping=current_mapping)
+                        from stable_baselines3.common.monitor import Monitor as _Mon
+                        env = _Mon(env)
+                        if MASKABLE_PPO_AVAILABLE:
+                            from sb3_contrib.common.wrappers import ActionMasker
+                            env = ActionMasker(env, mask_fn)
+                        return env
 
-                vec_env = DummyVecEnv([_make])
-                if vec_norm_path.exists():
-                    vec_env = VecNormalize.load(str(vec_norm_path), vec_env)
-                    vec_env.training = False
-                r = run_episode(model, vec_env, deterministic=True)
+                    vec_env = DummyVecEnv([_make])
+                    if vec_norm_path is not None and vec_norm_path.exists():
+                        vec_env = VecNormalize.load(str(vec_norm_path), vec_env)
+                        vec_env.training = False
+                    r = run_episode(model, vec_env, deterministic=True)
                 vec_env.close()
                 results[key].append((r.spawn_x, r.spawn_y, r.success))
 
     # ── 4. Plot: by_combo e by_source ─────────────────────────────────────────
     def _draw_subplot(ax, source_id, version, chunk_id):
         key = (source_id, version, chunk_id)
+        _draw_extent = [None]   # extent del dominio, per fissare i limiti (clip cerchi)
         nc_files = [f for f in data_manager._nc_files
                     if f'_{version}_' in f.name and source_id in f.name and 'Conc' in f.name]
         bg_field = None
@@ -1640,6 +1817,28 @@ def main_spawn_map():
             ax.imshow(conc_m, origin='lower', extent=extent, cmap='YlOrRd',
                       alpha=0.9, vmin=0, vmax=max(float(conc.max()), 0.1),
                       zorder=2, aspect='auto')
+            _draw_extent[0] = extent   # per fissare i limiti (clip dei cerchi al dominio)
+
+            # Disco virtuale di spawn: 2 circonferenze nere tratteggiate a d_min e d_max,
+            # centro = sorgente. Clippate al dominio (appaiono come sezione di disco).
+            try:
+                disk_env = SourceSeekingEnv(
+                    config=SourceSeekingConfig.from_config(config, chunk_id=chunk_id),
+                    concentration_field=bg_field, data_manager=data_manager,
+                    wind_mapping=wind_mapping, current_mapping=current_mapping)
+                disk_env.field = bg_field
+                if bg_field.source_position is not None:
+                    disk_env.source_position = np.array(bg_field.source_position, dtype=float)
+                d_min, d_max = disk_env.spawn_disk_bounds()
+                sx0, sy0 = bg_field.source_position
+                from matplotlib.patches import Circle as _Circle
+                for dd in (d_min, d_max):
+                    ax.add_patch(_Circle((sx0, sy0), dd, fill=False, ls='--',
+                                         ec='black', lw=1.3, zorder=4))
+                ax.plot([], [], ls='--', color='black', lw=1.3,
+                        label=f'disco spawn ({d_min:.0f}–{d_max:.0f} m)')
+            except Exception as _e:
+                print(f"    [disk] {source_id} {version} Q{chunk_id}: {_e}")
 
         pts = results.get(key, [])
         xs_ok   = [p[0] for p in pts if p[2]]
@@ -1661,6 +1860,11 @@ def main_spawn_map():
         ax.set_ylabel('Y [m]', fontsize=11)
         ax.tick_params(labelsize=10)
         ax.legend(fontsize=10, loc='upper right')
+        # Fissa i limiti al dominio: i cerchi del disco di spawn (anche > dominio)
+        # restano clippati → appaiono come sezione di disco.
+        if _draw_extent[0] is not None:
+            ax.set_xlim(_draw_extent[0][0], _draw_extent[0][1])
+            ax.set_ylim(_draw_extent[0][2], _draw_extent[0][3])
 
     import math
 
@@ -1702,5 +1906,457 @@ def main_spawn_map():
     print(f"\nTotale file salvati: {len(saved)} in {OUTPUT_DIR}")
 
 
+def _find_velocity_run(trained_dir: Path, vmax: int, K: int) -> Optional[Path]:
+    """Run dir più recente addestrato con n_velocity_levels==K e max_velocity==vmax.
+
+    I modelli della catena a velocità adattiva si distinguono da quelli a passo
+    fisso (n_velocity_levels==1) proprio per K=5. A parità di v_max prende il più
+    recente (le directory ppo_<timestamp> sono ordinabili cronologicamente).
+    """
+    best = None
+    for d in sorted(trained_dir.glob("ppo_*")):
+        cfg_p = d / "config.yaml"
+        if not cfg_p.exists():
+            continue
+        try:
+            c = load_config(str(cfg_p))
+        except Exception:
+            continue
+        ag = c.get('agent', {})
+        thr = c.get('environment', {}).get('reward', {}).get('distance_threshold', 50)
+        # Esclude esperimenti non-standard dalla catena normale: raggio ≠ 50 (r10) e
+        # doppia corona (sensor_range_2 presente) → non sovrascrivono i vmax_X.
+        if abs(float(thr) - 50.0) > 1e-6 or ag.get('sensor_range_2') is not None:
+            continue
+        if (int(ag.get('n_velocity_levels', 1)) == K
+                and abs(float(ag.get('max_velocity', 1.0)) - float(vmax)) < 1e-6):
+            best = d
+    return best
+
+
+def _read_global_sr(output_dir: Path) -> float:
+    """Legge il Global Success Rate (%) dal log.txt prodotto dall'inferenza."""
+    import re
+    log = Path(output_dir) / "log.txt"
+    if log.exists():
+        for ln in log.read_text(errors="ignore").splitlines():
+            if "Global Success Rate" in ln:
+                m = re.search(r"([\d.,]+)\s*%", ln)
+                if m:
+                    return float(m.group(1).replace(",", "."))
+    return float("nan")
+
+
+def main_velocity_inference():
+    """Inferenza multi-modello sulla catena a velocità adattiva (v_max 1→5 m/s).
+
+    Per ogni modello: 5 episodi per combinazione (sorgente × scenario vento × chunk),
+    policy deterministica, niente video. I modelli sono individuati automaticamente
+    in trained_models/ (K=5, max_velocity corrispondente), e l'ambiente è ricostruito
+    dal config.yaml salvato nel run (n_velocity_levels, max_velocity, sensori, spawn).
+
+    Output: thesis/evaluations/evaluations_RL/evaluations_RL_adaptive/vmax_{v}/
+    """
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
+    DATA_DIR     = str(PROJECT_ROOT / "data")
+    trained_dir  = PROJECT_ROOT / "trained_models"
+    out_root     = (PROJECT_ROOT / "thesis" / "evaluations"
+                    / "evaluations_RL" / "evaluations_RL_adaptive")
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    K          = 5
+    VMAX_LIST  = [1, 2, 3, 4, 5]
+    N_EPISODES = 5          # episodi per combinazione (sorgente × vento × chunk)
+
+    print(f"\n{'#'*100}")
+    print(f"#  INFERENZA MULTI-MODELLO — catena velocità adattiva  (v_max 1→5 m/s, K={K})")
+    print(f"#  {N_EPISODES} episodi/combinazione, deterministica, no video")
+    print(f"{'#'*100}")
+
+    results = []
+    for vmax in VMAX_LIST:
+        run_dir = _find_velocity_run(trained_dir, vmax, K)
+        if run_dir is None:
+            print(f"\n[SKIP] Nessun modello con K={K}, v_max={vmax} m/s in {trained_dir}")
+            results.append((vmax, None, float("nan")))
+            continue
+        model_path = run_dir / "models" / "final_model.zip"
+        if not model_path.exists():
+            print(f"\n[SKIP] final_model.zip mancante in {run_dir / 'models'}")
+            results.append((vmax, None, float("nan")))
+            continue
+
+        cfg_override = load_config(str(run_dir / "config.yaml"))
+        out = out_root / f"vmax_{vmax}"
+        print(f"\n{'='*100}")
+        print(f"  v_max = {vmax} m/s   →   {out.name}")
+        print(f"  modello: {model_path}")
+        print(f"{'='*100}")
+
+        run_inference(
+            model_path=str(model_path),
+            config_path=str(run_dir / "config.yaml"),
+            config_override=cfg_override,
+            data_dir=DATA_DIR,
+            output_dir=str(out),
+            n_episodes=N_EPISODES,
+            deterministic=True,
+            sources_csv="Coordinate_Sorgenti_FaseII.csv",
+            chunk_ids=[0, 1, 2],
+            save_videos=False,
+            plot_velocity=True,
+        )
+        results.append((vmax, model_path, _read_global_sr(out)))
+
+    # --- Tabella riepilogo SR vs v_max ---
+    print(f"\n{'#'*100}")
+    print("#  RIEPILOGO — Global Success Rate per v_max")
+    print(f"{'#'*100}")
+    print(f"  {'v_max':>8}{'SR':>10}   modello")
+    print(f"  {'-'*88}")
+    for vmax, mp, sr in results:
+        sr_s = f"{sr:.1f}%" if sr == sr else "n/d"
+        print(f"  {str(vmax)+' m/s':>8}{sr_s:>10}   {mp if mp else '— (assente)'}")
+    print(f"  {'-'*88}\n")
+    return results
+
+
+def _find_radius10_run(trained_dir: Path, K: int = 5):
+    """Run più recente dell'esperimento raggio 10 m (K=5, max_velocity=5, distance_threshold==10)."""
+    best = None
+    for d in sorted(trained_dir.glob("ppo_*")):
+        cfg_p = d / "config.yaml"
+        if not cfg_p.exists():
+            continue
+        try:
+            c = load_config(str(cfg_p))
+        except Exception:
+            continue
+        ag = c.get('agent', {})
+        thr = c.get('environment', {}).get('reward', {}).get('distance_threshold', 50)
+        if (int(ag.get('n_velocity_levels', 1)) == K
+                and abs(float(ag.get('max_velocity', 1.0)) - 5.0) < 1e-6
+                and abs(float(thr) - 10.0) < 1e-6):
+            best = d
+    return best
+
+
+def main_radius10_inference():
+    """Inferenza dell'esperimento 'raggio di successo 10 m' (v_max=5, modulazione forzata).
+
+    Output dedicato (vmax_5_r10/) per non sovrascrivere la catena. Genera entrambi i
+    grafici velocità: nel tempo e — soprattutto — VS DISTANZA (il diagnostico per la
+    modulazione: se rallenta vicino alla sorgente la curva scende verso destra).
+    """
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
+    DATA_DIR     = str(PROJECT_ROOT / "data")
+    trained_dir  = PROJECT_ROOT / "trained_models"
+    out = (PROJECT_ROOT / "thesis" / "evaluations"
+           / "evaluations_RL" / "evaluations_RL_adaptive" / "r10")
+
+    run_dir = _find_radius10_run(trained_dir)
+    if run_dir is None:
+        print("[ERRORE] Nessun modello raggio-10 trovato (K=5, v_max=5, distance_threshold=10).")
+        return
+    model_path = run_dir / "models" / "final_model.zip"
+    if not model_path.exists():
+        print(f"[ERRORE] final_model.zip mancante in {run_dir / 'models'}")
+        return
+
+    cfg_override = load_config(str(run_dir / "config.yaml"))
+    print(f"\n{'#'*100}")
+    print(f"#  INFERENZA ESPERIMENTO RAGGIO 10 m — v_max=5, modulazione forzata")
+    print(f"#  modello: {model_path}")
+    print(f"{'#'*100}")
+    run_inference(
+        model_path=str(model_path),
+        config_path=str(run_dir / "config.yaml"),
+        config_override=cfg_override,
+        data_dir=DATA_DIR,
+        output_dir=str(out),
+        n_episodes=5,
+        deterministic=True,
+        sources_csv="Coordinate_Sorgenti_FaseII.csv",
+        chunk_ids=[0, 1, 2],
+        save_videos=False,
+        plot_velocity=True,
+    )
+    print(f"\nSR globale: {_read_global_sr(out):.1f}%   →  vedi {out}/analysis/velocity_vs_distance.png")
+
+
+def _find_dualcorona_run(trained_dir: Path, vmax: float = 1.0, K: int = 5):
+    """Run più recente della doppia corona per il dato v_max: K livelli, sensor_range_2 presente."""
+    best = None
+    for d in sorted(trained_dir.glob("ppo_*")):
+        cfg_p = d / "config.yaml"
+        if not cfg_p.exists():
+            continue
+        try:
+            ag = load_config(str(cfg_p)).get('agent', {})
+        except Exception:
+            continue
+        if (int(ag.get('n_velocity_levels', 1)) == K
+                and abs(float(ag.get('max_velocity', 1.0)) - float(vmax)) < 1e-6
+                and ag.get('sensor_range_2') is not None):
+            best = d
+    return best
+
+
+def main_dualcorona_inference(vmax: int = 1):
+    """Inferenza della doppia corona a un dato v_max — confronto SR + step-to-success.
+
+    Output dedicato (dualcorona_v{vmax}/). Stesso protocollo held-out della catena, così i
+    numeri sono confrontabili con vmax_{vmax} (singola corona). Ritorna la cartella di output
+    (o None se il modello non c'è).
+    """
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
+    DATA_DIR     = str(PROJECT_ROOT / "data")
+    trained_dir  = PROJECT_ROOT / "trained_models"
+    out = (PROJECT_ROOT / "thesis" / "evaluations"
+           / "evaluations_RL" / "evaluations_RL_adaptive" / f"dualcorona_v{vmax}")
+
+    run_dir = _find_dualcorona_run(trained_dir, vmax=vmax)
+    if run_dir is None:
+        print(f"[ERRORE] Nessun modello doppia corona v_max={vmax} trovato "
+              f"(K=5, sensor_range_2 presente).")
+        return None
+    model_path = run_dir / "models" / "final_model.zip"
+    if not model_path.exists():
+        print(f"[ERRORE] final_model.zip mancante in {run_dir / 'models'}")
+        return None
+
+    cfg_override = load_config(str(run_dir / "config.yaml"))
+    print(f"\n{'#'*100}")
+    print(f"#  INFERENZA DOPPIA CORONA v_max={vmax} — confronto vs singola corona (vmax_{vmax})")
+    print(f"#  modello: {model_path}")
+    print(f"{'#'*100}")
+    run_inference(
+        model_path=str(model_path),
+        config_path=str(run_dir / "config.yaml"),
+        config_override=cfg_override,
+        data_dir=DATA_DIR,
+        output_dir=str(out),
+        n_episodes=5,
+        deterministic=True,
+        sources_csv="Coordinate_Sorgenti_FaseII.csv",
+        chunk_ids=[0, 1, 2],
+        save_videos=False,
+    )
+    print(f"\nSR globale doppia corona v_max={vmax}: {_read_global_sr(out):.1f}%   →  {out}/log.txt")
+    return out
+
+
+def _dualcorona_step_table(vmax_list):
+    """Stampa la tabella riassuntiva doppia vs singola corona: SR e step medi al successo
+    per ogni v_max, con il guadagno percentuale di step (obiettivo dello sweep opzione 2)."""
+    import json as _json
+    base = (Path(__file__).resolve().parent.parent / "thesis" / "evaluations"
+            / "evaluations_RL" / "evaluations_RL_adaptive")
+
+    def _stats(p: Path):
+        d = _json.loads(p.read_text())
+        sr = float(np.mean([e['success'] for e in d]) * 100.0)
+        st = [e['steps'] for e in d if e['success']]
+        return sr, (float(np.mean(st)) if st else float('nan')), len(d)
+
+    print(f"\n{'='*84}")
+    print("  DOPPIA vs SINGOLA CORONA — step medi al successo per v_max (guadagno %)")
+    print(f"{'='*84}")
+    print(f"  {'v_max':>6} | {'SR sing.':>9} {'SR dopp.':>9} | "
+          f"{'step sing.':>10} {'step dopp.':>10} | {'Δstep':>8} {'Δstep%':>8}")
+    print(f"  {'-'*80}")
+    for vmax in vmax_list:
+        sp = base / f"vmax_{vmax}" / "episodes_data.json"
+        dp = base / f"dualcorona_v{vmax}" / "episodes_data.json"
+        if not (sp.exists() and dp.exists()):
+            miss = ([] if sp.exists() else ["singola"]) + ([] if dp.exists() else ["doppia"])
+            print(f"  {vmax:>6} | (dati mancanti: {', '.join(miss)})")
+            continue
+        ssr, sst, _ = _stats(sp)
+        dsr, dst, _ = _stats(dp)
+        dstep = dst - sst
+        dstep_pct = 100.0 * dstep / sst if sst == sst and sst > 0 else float('nan')
+        print(f"  {vmax:>6} | {ssr:>8.1f}% {dsr:>8.1f}% | "
+              f"{sst:>10.1f} {dst:>10.1f} | {dstep:>+8.1f} {dstep_pct:>+7.1f}%")
+    print(f"  {'-'*80}")
+    print("  (Δstep% < 0 = la doppia corona è più veloce; obiettivo: vedere se il -18% di v1 regge)")
+
+
+def main_dualcorona_sweep_inference(vmax_list=(1, 2, 3, 4, 5)):
+    """Inferenza della doppia corona a TUTTI i v_max (opzione 2) + tabella Δstep vs singola.
+
+    Cerca ed esegue i modelli dualcorona_v{X} presenti; alla fine stampa il confronto degli
+    step medi al successo contro la catena singola (vmax_X). I livelli senza modello vengono
+    saltati (utile per lanciarla mentre i training procedono).
+    """
+    print(f"\n{'#'*100}")
+    print(f"#  SWEEP INFERENZA DOPPIA CORONA — v_max = {list(vmax_list)}")
+    print(f"{'#'*100}")
+    done = []
+    for vmax in vmax_list:
+        if main_dualcorona_inference(vmax=vmax) is not None:
+            done.append(vmax)
+    if done:
+        _dualcorona_step_table(done)
+    else:
+        print("\n[nota] Nessun modello doppia corona trovato per i v_max richiesti.")
+
+
+def main_agent_heatmap(scenarios=None, n_episodes: int = 10,
+                       ppo_single_run: str = "ppo_20260629_065041",
+                       ppo_double_run: str = "ppo_20260704_015003",
+                       fcm_sensor: float = 50.0, fcm_lr: float = 50.0):
+    """Heatmap di occupazione dell'agente (densità di presenza) per scenario.
+
+    Per ogni scenario (source_id, versione, chunk_id) esegue `n_episodes` episodi con tre
+    agenti alla stessa velocità massima --- FCM (sensor/lr indicati, $\\sim$5 m/s), PPO singola
+    corona (v5) e PPO doppia corona (v5) --- accumula le posizioni in una densità di presenza
+    (istogramma fine + smoothing gaussiano) e disegna 3 pannelli affiancati (mare/costa/
+    sorgente + heatmap) su SCALA COMUNE, fissata sui due modelli PPO; l'FCM, che oscilla a
+    lungo negli stessi punti, ha picchi più alti e satura.
+    Output: thesis/evaluations/agent_heatmaps/heatmap_<i>_<src>_<ver>_Q<chunk>.png
+    """
+    import copy
+    from scipy.ndimage import gaussian_filter
+    from matplotlib.colors import ListedColormap
+    from utils.data_loader import NetCDFLoader as _NCLoader
+
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
+    DATA_DIR = str(PROJECT_ROOT / "data")
+    OUT = PROJECT_ROOT / "thesis" / "evaluations" / "agent_heatmaps"
+    OUT.mkdir(parents=True, exist_ok=True)
+    if scenarios is None:   # default: 5 scenari difficili (V1/V2 × Q1/2,Q3/4)
+        scenarios = [('SRC114', 'V2', 2), ('SRC120', 'V2', 1), ('SRC117', 'V2', 2),
+                     ('SRC109', 'V1', 2), ('SRC130', 'V2', 1)]
+    chunk_lbl = {0: 'Q1/4', 1: 'Q1/2', 2: 'Q3/4'}
+
+    dm = DataManager(data_dir=DATA_DIR, preload_all=False, sources_csv="Coordinate_Sorgenti_FaseII.csv")
+    wind_mapping = {"_V0": "CI_WIND_faseII_V0.txt", "_V1": "CI_WIND_faseII_V1.txt",
+                    "_V2": "CI_WIND_faseII_V2.txt", "_V3": "CI_WIND_faseII_V3.txt"}
+    current_mapping = {"_V0": "CL02_V0_SRC000_U_V_10mGrid.nc", "_V1": "CL02_V1_SRC000_U_V_10mGrid.nc",
+                       "_V2": "CL02_V2_SRC000_U_V_10mGrid.nc", "_V3": "CL02_V3_SRC000_U_V_10mGrid.nc"}
+
+    # --- agenti: FCM Adam + PPO singola (v5) + PPO doppia (v5) ---
+    fcm_cfg = load_config(str(PROJECT_ROOT / "utils" / "config_base_no_wind_reward.yaml"))
+    fcm_cfg['agent']['sensor_range'] = fcm_sensor
+    fcm_cfg['agent'].pop('sensor_range_2', None)
+    fcm_cfg['agent']['n_velocity_levels'] = 1
+    fcm_agent = AdamFCMAgent(sensor_range=fcm_sensor, lr=fcm_lr)
+    ps_dir = PROJECT_ROOT / "trained_models" / ppo_single_run
+    pd_dir = PROJECT_ROOT / "trained_models" / ppo_double_run
+    ps_cfg = load_config(str(ps_dir / "config.yaml")); ps_model = load_model(str(ps_dir / "models" / "final_model.zip")); ps_vn = ps_dir / "models" / "vec_normalize.pkl"
+    pd_cfg = load_config(str(pd_dir / "config.yaml")); pd_model = load_model(str(pd_dir / "models" / "final_model.zip")); pd_vn = pd_dir / "models" / "vec_normalize.pkl"
+
+    def _load_field(src, ver):
+        files = [f for f in dm._nc_files if f'_{ver}_' in f.name and src in f.name and 'Conc' in f.name]
+        if not files:
+            return None
+        fld = _NCLoader(DATA_DIR).load(str(files[0]), concentration_var="Concentration - component 1")
+        if fld is None:
+            return None
+        c = dm.get_source_coordinates(src)
+        if c:
+            fld.source_position = c
+        fld.run_id = f'{src}_{ver}'
+        return fld
+
+    def _collect(kind, ch, field):
+        env_cfg = SourceSeekingConfig.from_config(fcm_cfg if kind == 'fcm' else (ps_cfg if kind == 'ps' else pd_cfg), chunk_id=ch)
+        pts = []; succ = 0
+        for _ in range(n_episodes):
+            if kind == 'fcm':
+                ve = build_env_fcm(SourceSeekingConfig.from_config(fcm_cfg, chunk_id=ch), copy.deepcopy(field),
+                                   use_masking=MASKABLE_PPO_AVAILABLE, data_manager=dm,
+                                   wind_mapping=wind_mapping, current_mapping=current_mapping)
+                r = run_episode_fcm(fcm_agent, ve, deterministic=True)
+            else:
+                model = ps_model if kind == 'ps' else pd_model
+                vn = ps_vn if kind == 'ps' else pd_vn
+                ve = build_env(env_cfg, copy.deepcopy(field), vn, use_masking=MASKABLE_PPO_AVAILABLE,
+                               data_manager=dm, wind_mapping=wind_mapping, current_mapping=current_mapping)
+                r = run_episode(model, ve, deterministic=False)
+            ve.close()
+            pts.append(np.asarray(r.trajectory)); succ += int(r.success)
+        return np.concatenate(pts, axis=0), succ
+
+    def _density(pts, field):
+        xc, yc = np.asarray(field.x_coords), np.asarray(field.y_coords)
+        dx = float(xc[1]-xc[0]) if len(xc) > 1 else 10.0
+        dy = float(yc[1]-yc[0]) if len(yc) > 1 else 10.0
+        x0, x1 = float(xc[0])-dx/2, float(xc[-1])+dx/2
+        y0, y1 = float(yc[0])-dy/2, float(yc[-1])+dy/2
+        xe = np.linspace(x0, x1, 181); ye = np.linspace(y0, y1, 151)   # ~17 m/bin
+        H, _, _ = np.histogram2d(pts[:, 0], pts[:, 1], bins=[xe, ye])
+        H = gaussian_filter(H.T, sigma=3.2)
+        s = H.sum()
+        if s > 0:
+            H = H / s
+        return H, [x0, x1, y0, y1]
+
+    def _draw(ax, H, extent, field, src_pos, title, vmax):
+        ax.set_facecolor('#87CEEB')                                    # mare
+        if field.land_mask is not None:                                # terra bianca
+            land = np.ma.masked_where(~field.land_mask, np.ones(field.land_mask.shape))
+            ax.imshow(land, origin='lower', extent=extent, cmap=ListedColormap(['#FFFFFF']), zorder=1, aspect='auto')
+        Hm = np.ma.masked_where(H < vmax * 0.03, H)                    # heatmap (scala comune)
+        im = ax.imshow(Hm, origin='lower', extent=extent, cmap='hot', alpha=0.85, zorder=3,
+                       aspect='auto', interpolation='bilinear', vmin=0.0, vmax=vmax)
+        ax.scatter(*src_pos, marker='*', s=260, c='lime', edgecolors='k', linewidths=0.8, zorder=6)
+        ax.set_xlim(extent[0], extent[1]); ax.set_ylim(extent[2], extent[3])
+        ax.set_title(title, fontsize=10); ax.set_xticks([]); ax.set_yticks([])
+        return im
+
+    print(f"\n{'#'*92}")
+    print(f"#  HEATMAP DI OCCUPAZIONE — {len(scenarios)} scenari, {n_episodes} episodi/modello")
+    print(f"{'#'*92}")
+    for si, (src, ver, ch) in enumerate(scenarios, 1):
+        fld = _load_field(src, ver)
+        if fld is None:
+            print(f"  [SKIP] {src} {ver}: campo non trovato"); continue
+        sp = np.array(dm.get_source_coordinates(src), dtype=float)
+        panels = []
+        for kind, name in zip(['fcm', 'ps', 'pd'], ['FCM (5 m/s)', 'PPO singola v5', 'PPO doppia v5']):
+            pts, succ = _collect(kind, ch, fld)
+            H, extent = _density(pts, fld)
+            panels.append((H, extent, succ, name))
+            print(f"  {src} {ver} {chunk_lbl[ch]} [{name}] {len(pts)} punti, {succ}/{n_episodes}")
+        vmax = max(panels[1][0].max(), panels[2][0].max())             # scala comune fissata sui PPO
+        fig, axes = plt.subplots(1, 3, figsize=(15.5, 4.6))
+        im = None
+        for ax, (H, extent, succ, name) in zip(axes, panels):
+            im = _draw(ax, H, extent, fld, sp, f'{name}  —  {succ}/{n_episodes} successi', vmax)
+        cb = fig.colorbar(im, ax=list(axes), fraction=0.02, pad=0.015)
+        cb.set_label('densità di presenza (norm., scala comune)', fontsize=8); cb.ax.tick_params(labelsize=7)
+        fig.suptitle(f'Heatmap di occupazione — {src}, {ver}, {chunk_lbl[ch]}', fontsize=13)
+        out = OUT / f'heatmap_{si}_{src}_{ver}_Q{ch}.png'
+        fig.savefig(str(out), dpi=160, bbox_inches='tight'); plt.close(fig)
+        print(f"  salvato: {out.name}")
+    print(f"\nTotale in {OUT}")
+
+
 if __name__ == "__main__":
-    main_fcm_adam_sweep()
+    import sys as _sys
+    arg = _sys.argv[1] if len(_sys.argv) > 1 else ""
+    if arg == "r10":
+        main_radius10_inference()
+    elif arg == "dc":
+        _vmax = int(_sys.argv[2]) if len(_sys.argv) > 2 else 1
+        main_dualcorona_inference(vmax=_vmax)
+    elif arg == "dc-sweep":
+        if len(_sys.argv) > 2:
+            main_dualcorona_sweep_inference(vmax_list=[int(x) for x in _sys.argv[2:]])
+        else:
+            main_dualcorona_sweep_inference()
+    elif arg == "spawn-fcm":
+        main_spawn_map(mode='fcm')
+    elif arg == "spawn-ppo":
+        main_spawn_map(mode='ppo')
+    elif arg == "spawn-ppo-double":
+        main_spawn_map(mode='ppo_double')
+    elif arg == "spawn":
+        main_spawn_map(mode='ppo')
+    elif arg == "heatmaps":
+        _n = int(_sys.argv[2]) if len(_sys.argv) > 2 else 10
+        main_agent_heatmap(n_episodes=_n)
+    else:
+        main_velocity_inference()
