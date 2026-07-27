@@ -27,6 +27,7 @@ Uso:
 """
 
 import argparse
+import re
 import sys
 import threading
 import time
@@ -82,13 +83,13 @@ DEFAULTS = {"tech": "PPO", "version": "V0", "chunk": "Q1/4",
 # ─── Requisiti / dati / modelli: check e download ────────────────────────────
 REPO_SLUG = "MattiaManneschi/HYDRAS-Project"
 MODELS_TARBALL_URL = f"https://codeload.github.com/{REPO_SLUG}/tar.gz/refs/heads/master"
-# URL dell'archivio dei dati .nc (34 GB) su host esterno (Zenodo/Drive/...): non
-# possono stare su GitHub (40 file > 100 MB). Inserisci qui il link; se vuoto e i
-# dati mancano, l'avvio si ferma con un messaggio invece di scaricare.
-DATA_ARCHIVE_URL = ""
+# Cartella Google Drive con i dati .nc (34 GB): non possono stare su GitHub
+# (40 file > 100 MB). DEVE essere condivisa come "Chiunque abbia il link",
+# altrimenti gdown riceve 401. Scaricata con gdown (vedi requirements.txt).
+DATA_DRIVE_URL = "https://drive.google.com/drive/folders/1wk0zDNH4upq1giz7nMoOvjrgrj6W35rN"
 
 REQUIRED_PACKAGES = ["torch", "stable_baselines3", "sb3_contrib", "gymnasium",
-                     "numpy", "scipy", "matplotlib", "netCDF4", "yaml"]
+                     "numpy", "scipy", "matplotlib", "netCDF4", "yaml", "gdown"]
 
 
 def missing_packages() -> list:
@@ -176,24 +177,69 @@ def extract_models_tarball(tar_path: Path, root_dir: Path) -> None:
                 tf.extract(m, path=str(root_dir))
 
 
-def download_and_extract_data(url: str, root_dir: Path, progress_cb=None) -> None:
-    """Scarica l'archivio dati (.zip o .tar.gz) da url e lo estrae in data/."""
-    import tempfile, tarfile, zipfile
-    (root_dir / "data").mkdir(exist_ok=True)
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".dl") as tmp:
-        tmp_path = Path(tmp.name)
+_SRC_CONC_RE = re.compile(r"SRC(\d+)_Conc_10mGrid\.nc$")
+
+
+def _needed_for_live(rel_path: str) -> bool:
+    """True se il file Drive serve alla simulazione live: concentrazioni delle
+    sole sorgenti held-out (SRC107-132), 1 corrente per versione, i 4 vento e il
+    CSV delle coordinate. Esclude le sorgenti di training (SRC001-106) e il PDF."""
+    name = rel_path.rsplit("/", 1)[-1]
+    m = _SRC_CONC_RE.search(name)
+    if m:
+        return int(m.group(1)) > 106                 # solo held-out
+    if name.endswith("_U_V_10mGrid.nc"):
+        return "SRC000" in name                      # 1 file corrente per versione
+    if name.startswith("CI_WIND_faseII_V"):
+        return True                                  # 4 file vento
+    if name == "Coordinate_Sorgenti_FaseII.csv":
+        return True
+    return False
+
+
+def download_data_from_drive(url: str, root_dir: Path, held_out_only: bool = True,
+                             progress_cb=None) -> None:
+    """Scarica da una cartella Google Drive i dati .nc necessari, in data/.
+
+    Enumera la cartella (gdown, skip_download) e scarica i file uno per uno: così
+    l'avanzamento è una frazione reale (file fatti / totale) e il download è
+    ripristinabile (salta i file già presenti). Con held_out_only scarica solo il
+    sottoinsieme che serve alla simulazione live (~8 GB) anziché l'intera cartella.
+
+    La cartella Drive DEVE essere condivisa come 'Chiunque abbia il link'.
+    """
+    import gdown
+    data_dir = root_dir / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
     try:
-        download_file(url, tmp_path, progress_cb)
-        if zipfile.is_zipfile(tmp_path):
-            with zipfile.ZipFile(tmp_path) as z:
-                z.extractall(root_dir / "data")
-        elif tarfile.is_tarfile(tmp_path):
-            with tarfile.open(tmp_path) as t:
-                t.extractall(root_dir / "data")
-        else:
-            raise RuntimeError("Formato archivio dati non riconosciuto (atteso .zip o .tar.gz).")
-    finally:
-        tmp_path.unlink(missing_ok=True)
+        entries = gdown.download_folder(url=url, skip_download=True, quiet=True,
+                                        use_cookies=False)
+    except Exception as e:
+        raise RuntimeError(
+            "Impossibile elencare la cartella Google Drive. Verifica che sia "
+            f"condivisa come 'Chiunque abbia il link'. Dettaglio: {e}")
+    if not entries:
+        raise RuntimeError("Cartella Google Drive vuota o inaccessibile.")
+
+    wanted = []
+    for f in entries:
+        rel, fid = getattr(f, "path", None), getattr(f, "id", None)
+        if not rel or not fid:
+            continue
+        if held_out_only and not _needed_for_live(rel):
+            continue
+        wanted.append((rel, fid))
+    if not wanted:
+        raise RuntimeError("Nessun file dati corrispondente trovato nella cartella Drive.")
+
+    total = len(wanted)
+    for i, (rel, fid) in enumerate(wanted):
+        dest = data_dir / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if not (dest.exists() and dest.stat().st_size > 0):     # resume: salta i già scaricati
+            gdown.download(id=fid, output=str(dest), quiet=True, resume=True)
+        if progress_cb:
+            progress_cb((i + 1) / total)
 
 
 def held_out_sources(dm: DataManager) -> list:
@@ -597,16 +643,12 @@ def run_gui(fps: float) -> None:
                     raise RuntimeError("Requisiti mancanti: " + ", ".join(still))
             loader["pct"] = 10
 
-            # Fase 2 — dati .nc
+            # Fase 2 — dati .nc (sottoinsieme live scaricato da Google Drive)
             loader["caption"] = "Caricamento dei dati .nc…"
             if not data_present(root_dir):
-                if not DATA_ARCHIVE_URL:
-                    raise RuntimeError(
-                        "Dati .nc mancanti in data/ e nessun URL configurato. "
-                        "Imposta DATA_ARCHIVE_URL in src/live_sim.py con il link "
-                        "all'archivio dati.")
-                download_and_extract_data(DATA_ARCHIVE_URL, root_dir,
-                                          lambda f: loader.__setitem__("pct", 10 + 35 * f))
+                download_data_from_drive(
+                    DATA_DRIVE_URL, root_dir, held_out_only=True,
+                    progress_cb=lambda f: loader.__setitem__("pct", 10 + 35 * f))
             loader["pct"] = 45
 
             # Fase 3 — modelli PPO (dal repo GitHub, se mancanti)
