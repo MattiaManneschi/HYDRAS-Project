@@ -26,35 +26,63 @@ Uso:
     python src/live_sim.py
 """
 
+from __future__ import annotations
+
 import argparse
+import importlib
+import importlib.util
+import os
 import re
+import ssl
+import subprocess
 import sys
+import tarfile
+import tempfile
 import threading
 import time
+import urllib.request
 from pathlib import Path
 from typing import Optional, Tuple
 
-import numpy as np
-from matplotlib.colors import ListedColormap
-from matplotlib.figure import Figure
-from matplotlib.patches import Circle
+# Gli import "pesanti" (numpy, matplotlib, inference, utils) NON stanno in cima di
+# proposito: questo stesso file fa da bootstrapper su una macchina fresca, dove
+# quei moduli ancora non esistono (vengono installati/scaricati dalle fasi 1-2 di
+# main()). Sono caricati in modo lazy da _import_heavy() ed esposti come globali.
+# 'from __future__ import annotations' evita che le annotazioni (np.ndarray,
+# DataManager, …) vengano valutate all'import, quando quei nomi non esistono ancora.
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+_HEAVY_LOADED = False
 
-from inference import (
-    MASKABLE_PPO_AVAILABLE,
-    AdamFCMAgent,
-    _find_dualcorona_run,
-    _find_velocity_run,
-    build_env,
-    build_env_fcm,
-    get_inner_env,
-    load_config,
-    load_model,
-    make_env_config,
-)
-from utils.data_loader import DataManager
+
+def _import_heavy() -> None:
+    """Carica numpy, matplotlib e il codice del progetto (inference, utils) e li
+    espone come globali del modulo. Idempotente. Da chiamare DOPO che requisiti e
+    script sono stati installati/scaricati (fasi 1-2 di main())."""
+    global _HEAVY_LOADED
+    if _HEAVY_LOADED:
+        return
+    here = Path(__file__).resolve()
+    for p in (str(here.parent), str(here.parent.parent)):
+        if p not in sys.path:
+            sys.path.insert(0, p)
+    importlib.invalidate_caches()
+    import numpy as _np
+    from matplotlib.colors import ListedColormap as _LCM
+    from matplotlib.figure import Figure as _Figure
+    from matplotlib.patches import Circle as _Circle
+    from inference import (
+        MASKABLE_PPO_AVAILABLE as _MPA, AdamFCMAgent as _AFA,
+        _find_dualcorona_run as _fdr, _find_velocity_run as _fvr,
+        build_env as _be, build_env_fcm as _bef, get_inner_env as _gie,
+        load_config as _lc, load_model as _lm, make_env_config as _mec)
+    from utils.data_loader import DataManager as _DM
+    globals().update(
+        np=_np, ListedColormap=_LCM, Figure=_Figure, Circle=_Circle,
+        MASKABLE_PPO_AVAILABLE=_MPA, AdamFCMAgent=_AFA,
+        _find_dualcorona_run=_fdr, _find_velocity_run=_fvr,
+        build_env=_be, build_env_fcm=_bef, get_inner_env=_gie,
+        load_config=_lc, load_model=_lm, make_env_config=_mec, DataManager=_DM)
+    _HEAVY_LOADED = True
 
 
 # ─── Costanti ────────────────────────────────────────────────────────────────
@@ -80,9 +108,14 @@ DEFAULTS = {"tech": "PPO", "version": "V0", "chunk": "Q1/4",
             "vmax": "2", "formation": "Doppia"}
 
 
-# ─── Requisiti / dati / modelli: check e download ────────────────────────────
+# ─── Requisiti / dati / modelli / script: check e download ───────────────────
 REPO_SLUG = "MattiaManneschi/HYDRAS-Project"
-MODELS_TARBALL_URL = f"https://codeload.github.com/{REPO_SLUG}/tar.gz/refs/heads/master"
+BRANCH = "master"
+TARBALL_URL = f"https://codeload.github.com/{REPO_SLUG}/tar.gz/refs/heads/{BRANCH}"
+MODELS_TARBALL_URL = TARBALL_URL   # stesso tarball: contiene sia script sia modelli
+REQUIREMENTS_URL = f"https://raw.githubusercontent.com/{REPO_SLUG}/{BRANCH}/requirements.txt"
+# Radice di installazione: la cartella del progetto (parent di src/), o override.
+INSTALL_DIR = Path(os.environ.get("HYDRAS_HOME", Path(__file__).resolve().parent.parent))
 # Cartella Google Drive con i dati .nc (34 GB): non possono stare su GitHub
 # (40 file > 100 MB). DEVE essere condivisa come "Chiunque abbia il link",
 # altrimenti gdown riceve 401. Scaricata con gdown (vedi requirements.txt).
@@ -175,6 +208,40 @@ def extract_models_tarball(tar_path: Path, root_dir: Path) -> None:
             if len(parts) == 2 and parts[1].startswith("trained_models/"):
                 m.name = parts[1]                 # rimuove il prefisso top-level
                 tf.extract(m, path=str(root_dir))
+
+
+def scripts_present(root_dir: Path) -> bool:
+    """Dipendenze-codice necessarie a questo file (che le importa in modo lazy):
+    inference.py e il pacchetto utils. Questo stesso file NON è nel check (esiste
+    già: è quello in esecuzione)."""
+    return (root_dir / "src" / "inference.py").exists() and \
+           (root_dir / "utils" / "data_loader.py").exists()
+
+
+def _extract_prefixes(tar_path: Path, root_dir: Path, prefixes: tuple) -> int:
+    """Estrae dal tarball del repo le voci il cui path (tolto il prefisso
+    top-level 'HYDRAS-Project-<branch>/') inizia con uno dei prefissi dati."""
+    n = 0
+    with tarfile.open(tar_path, "r:gz") as tf:
+        for m in tf.getmembers():
+            parts = m.name.split("/", 1)
+            if len(parts) != 2:
+                continue
+            rel = parts[1]
+            if any(rel.startswith(p) for p in prefixes):
+                m.name = rel
+                tf.extract(m, path=str(root_dir))
+                n += 1
+    return n
+
+
+def _get_tarball(cache: dict, cb=None) -> Path:
+    """Scarica il tarball del repo una sola volta (riusato da script e modelli)."""
+    if cache.get("path") is None:
+        tmp = Path(tempfile.mkdtemp()) / "hydras.tar.gz"
+        download_file(TARBALL_URL, tmp, cb)
+        cache["path"] = tmp
+    return cache["path"]
 
 
 _SRC_CONC_RE = re.compile(r"SRC(\d+)_Conc_10mGrid\.nc$")
@@ -420,7 +487,11 @@ def draw_scene(ax, inner, title: str) -> None:
 
 # ─── GUI ─────────────────────────────────────────────────────────────────────
 
-def run_gui(fps: float) -> None:
+def build_gui(root, dm, fps: float = 15.0) -> None:
+    """Popola `root` con la GUI della simulazione usando il DataManager `dm` già
+    caricato. NON crea la finestra e NON avvia il mainloop: lo fa il chiamante
+    (main(), dopo le fasi di caricamento)."""
+    _import_heavy()
     import tkinter as tk
     from tkinter import ttk
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -429,8 +500,9 @@ def run_gui(fps: float) -> None:
     rng = np.random.default_rng()
     delay_ms = int(1000.0 / max(fps, 1.0))
 
-    root = tk.Tk()
     root.title("HYDRAS — Simulazione live")
+    root.rowconfigure(1, weight=1)
+    root.columnconfigure(0, weight=1)
 
     ctrl = ttk.Frame(root, padding=10)
     ctrl.grid(row=0, column=0, sticky="ew")
@@ -498,7 +570,7 @@ def run_gui(fps: float) -> None:
     tech_cb.bind("<<ComboboxSelected>>", sync_ppo_visibility)
 
     state = {"vec_env": None, "obs": None, "agent": None, "is_fcm": False,
-             "label": "", "running": False, "steps": 0, "dm": None}
+             "label": "", "running": False, "steps": 0, "dm": dm}
 
     def set_controls(enabled: bool):
         st = "readonly" if enabled else "disabled"
@@ -611,119 +683,138 @@ def run_gui(fps: float) -> None:
     root.protocol("WM_DELETE_WINDOW", on_close)
     sync_ppo_visibility()
 
-    # ── Schermata di caricamento a fasi ──────────────────────────────────────
-    # La finestra appare subito; le fasi (requisiti → dati → modelli → ambiente)
-    # girano in un thread e aggiornano didascalia + barra. Le fasi 1-3 sono
-    # check-e-scarica (progresso reale se c'è un download); la fase 4 (DataManager,
-    # ~13 s, opaca) è animata a tempo dal poll.
-    set_controls(False)
-    cancel_btn.configure(state="disabled")
+    # GUI pronta: mostra il canvas, abilita i controlli, schermata inerte.
+    canvas.get_tk_widget().grid(row=1, column=0, sticky="nsew")
+    set_controls(True)
+    show_idle()
+    status.configure(text="Pronto — scegli le opzioni e premi Avvia.")
+
+
+def main() -> None:
+    """Entry point unico: bootstrapper + GUI in un solo file. Una schermata di
+    caricamento con 5 fasi (requisiti → script → dati → modelli → ambiente), poi la
+    simulazione nella stessa finestra. Ogni fase è saltata se già soddisfatta
+    (idempotente e non distruttivo). Gli import pesanti sono differiti a dopo che
+    requisiti e script sono presenti (_import_heavy)."""
+    ap = argparse.ArgumentParser(description="HYDRAS — simulazione live")
+    ap.add_argument("--fps", type=float, default=15.0,
+                    help="frame al secondo della visualizzazione (default 15)")
+    args = ap.parse_args()
+
+    import tkinter as tk
+    from tkinter import ttk
+
+    root_dir = INSTALL_DIR
+    root = tk.Tk()
+    root.title("HYDRAS — Avvio")
+    root.geometry("900x680")
+    root.rowconfigure(1, weight=1)
+    root.columnconfigure(0, weight=1)
 
     loading = ttk.Frame(root, padding=40)
     loading.grid(row=1, column=0, sticky="nsew")
     cap_label = ttk.Label(loading, text="Avvio…", font=("", 13))
-    cap_label.pack(pady=(80, 14))
-    pbar = ttk.Progressbar(loading, mode="determinate", maximum=100, length=380)
+    cap_label.pack(pady=(120, 14))
+    pbar = ttk.Progressbar(loading, mode="determinate", maximum=100, length=420)
     pbar.pack()
     pct_label = ttk.Label(loading, text="0%")
     pct_label.pack(pady=(8, 0))
-    status.configure(text="Avvio in corso…")
 
     loader = {"dm": None, "error": None, "done": False,
-              "caption": "Avvio…", "pct": 0.0, "phase4_start": None}
+              "caption": "Avvio…", "pct": 0.0, "env_start": None}
 
-    def load_worker():
+    def rep(caption=None, pct=None):
+        if caption is not None:
+            loader["caption"] = caption
+        if pct is not None:
+            loader["pct"] = pct
+
+    def worker():
+        cache = {"path": None}
         try:
-            # Fase 1 — requisiti
-            loader["caption"] = "Installazione requisiti…"; loader["pct"] = 3
+            # 1) Requisiti ------------------------------------------------------
+            rep("Installazione dei requirements in corso…", 2)
             if missing_packages():
+                req = root_dir / "requirements.txt"
+                if not req.exists():
+                    download_file(REQUIREMENTS_URL, req)
                 install_requirements(root_dir)
-                still = missing_packages()
-                if still:
-                    raise RuntimeError("Requisiti mancanti: " + ", ".join(still))
-            loader["pct"] = 10
+                importlib.invalidate_caches()
+                if missing_packages():
+                    raise RuntimeError("Requisiti mancanti dopo pip: "
+                                       + ", ".join(missing_packages()))
+            rep(pct=15)
 
-            # Fase 2 — dati .nc (sottoinsieme live scaricato da Google Drive)
-            loader["caption"] = "Caricamento dei dati .nc…"
+            # 2) Script (inference.py + utils/): dipendenze di QUESTO file -------
+            rep("Download degli script in corso…", 15)
+            if not scripts_present(root_dir):
+                tar = _get_tarball(cache, cb=lambda f: rep(pct=15 + 10 * f))
+                _extract_prefixes(tar, root_dir, ("src/", "utils/"))
+                if not scripts_present(root_dir):
+                    raise RuntimeError("Script del progetto mancanti dopo l'estrazione.")
+            rep(pct=30)
+
+            # Requisiti e script ci sono: ora si possono caricare numpy/inference/
+            # DataManager (e i finder dei modelli usati nella fase 4).
+            _import_heavy()
+
+            # 3) Dati -----------------------------------------------------------
+            rep("Download dei dati in corso…", 30)
             if not data_present(root_dir):
                 download_data_from_drive(
                     DATA_DRIVE_URL, root_dir, held_out_only=True,
-                    progress_cb=lambda f: loader.__setitem__("pct", 10 + 35 * f))
-            loader["pct"] = 45
+                    progress_cb=lambda f: rep(pct=30 + 35 * f))
+            rep(pct=65)
 
-            # Fase 3 — modelli PPO (dal repo GitHub, se mancanti)
-            loader["caption"] = "Caricamento dei modelli PPO…"
+            # 4) Modelli --------------------------------------------------------
+            rep("Download dei modelli in corso…", 65)
             if missing_models(root_dir):
-                import tempfile
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".tar.gz") as tmp:
-                    tar_path = Path(tmp.name)
-                try:
-                    download_file(MODELS_TARBALL_URL, tar_path,
-                                  lambda f: loader.__setitem__("pct", 45 + 15 * f))
-                    extract_models_tarball(tar_path, root_dir)
-                finally:
-                    tar_path.unlink(missing_ok=True)
+                tar = _get_tarball(cache, cb=lambda f: rep(pct=65 + 8 * f))
+                _extract_prefixes(tar, root_dir, ("trained_models/",))
                 if missing_models(root_dir):
-                    raise RuntimeError("Modelli PPO ancora mancanti dopo il download.")
-            loader["pct"] = 62
+                    raise RuntimeError("Modelli PPO mancanti dopo l'estrazione.")
+            rep(pct=75)
+            if cache["path"]:
+                cache["path"].unlink(missing_ok=True)
 
-            # Fase 4 — ambiente di simulazione (DataManager, ~13 s opachi)
-            loader["caption"] = "Caricamento ambiente di simulazione…"
-            loader["phase4_start"] = time.perf_counter()
-            loader["dm"] = DataManager(data_dir=str(root_dir / "data"),
-                                       preload_all=False,
+            # 5) Ambiente -------------------------------------------------------
+            rep("Caricamento dell'ambiente in corso…", 75)
+            loader["env_start"] = time.perf_counter()
+            loader["dm"] = DataManager(data_dir=str(root_dir / "data"), preload_all=False,
                                        sources_csv="Coordinate_Sorgenti_FaseII.csv")
         except Exception as e:                 # marshallato nel poll (thread principale)
             loader["error"] = e
         finally:
             loader["done"] = True
 
-    def finalize_loading():
-        state["dm"] = loader["dm"]
-        loading.destroy()
-        canvas.get_tk_widget().grid(row=1, column=0, sticky="nsew")
-        show_idle()
-        set_controls(True)
-        cancel_btn.configure(state="normal")
-        status.configure(text="Pronto — scegli le opzioni e premi Avvia.")
-
-    phase4_est = 13.0
-
-    def poll_loading():
+    def poll():
         if loader["error"] is not None:
+            cap_label.configure(text=f"Errore all'avvio: {loader['error']}")
             pct_label.configure(text="")
-            cap_label.configure(text="Errore all'avvio")
-            status.configure(text=f"Errore all'avvio: {loader['error']}")
             return
         if loader["done"]:
-            pbar["value"] = 100
-            pct_label.configure(text="100%")
+            pbar["value"] = 100; pct_label.configure(text="100%")
             cap_label.configure(text=loader["caption"])
-            root.after(200, finalize_loading)     # mostra brevemente il 100%
+
+            def finalize():
+                loading.destroy()
+                root.title("HYDRAS — Simulazione live")
+                build_gui(root, loader["dm"], args.fps)
+
+            root.after(200, finalize)          # mostra brevemente il 100%
             return
-        if loader["phase4_start"] is not None:
-            # Fase 4 opaca: anima la barra a tempo tra 62% e 99%.
-            el = time.perf_counter() - loader["phase4_start"]
-            pct = 62.0 + min(37.0, 37.0 * el / phase4_est)
+        if loader["env_start"] is not None:    # fase ambiente opaca: anima a tempo
+            el = time.perf_counter() - loader["env_start"]
+            pct = 75.0 + min(24.0, 24.0 * el / 13.0)
         else:
             pct = loader["pct"]
-        pbar["value"] = pct
-        pct_label.configure(text=f"{int(pct)}%")
+        pbar["value"] = pct; pct_label.configure(text=f"{int(pct)}%")
         cap_label.configure(text=loader["caption"])
-        root.after(100, poll_loading)
+        root.after(100, poll)
 
-    threading.Thread(target=load_worker, daemon=True).start()
-    root.after(100, poll_loading)
-
+    threading.Thread(target=worker, daemon=True).start()
+    root.after(100, poll)
     root.mainloop()
-
-
-def main() -> None:
-    ap = argparse.ArgumentParser(description="Simulazione live HYDRAS con GUI")
-    ap.add_argument("--fps", type=float, default=15.0,
-                    help="frame al secondo della visualizzazione (default 15)")
-    args = ap.parse_args()
-    run_gui(args.fps)
 
 
 if __name__ == "__main__":
