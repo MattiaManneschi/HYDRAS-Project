@@ -134,15 +134,34 @@ def missing_models(root_dir: Path) -> list:
     return miss
 
 
+def _ssl_context():
+    """Contesto SSL con il bundle CA di certifi: il Python di python.org su macOS
+    non usa il cert store di sistema e fallirebbe la verifica (CERTIFICATE_VERIFY_
+    FAILED). Fallback al contesto di default se certifi non è disponibile."""
+    import ssl
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
 def download_file(url: str, dest: Path, progress_cb=None) -> None:
-    """Scarica url in dest; progress_cb(frazione 0..1) se la dimensione è nota."""
+    """Scarica url in dest in streaming; progress_cb(frazione 0..1) se la
+    dimensione è nota. Usa un contesto SSL con certifi."""
     import urllib.request
-
-    def hook(blocks, bsize, total):
-        if progress_cb and total > 0:
-            progress_cb(min(1.0, blocks * bsize / total))
-
-    urllib.request.urlretrieve(url, str(dest), reporthook=hook)
+    req = urllib.request.Request(url, headers={"User-Agent": "HYDRAS-live-sim"})
+    with urllib.request.urlopen(req, context=_ssl_context()) as resp, open(dest, "wb") as f:
+        total = int(resp.headers.get("Content-Length", 0))
+        read = 0
+        while True:
+            chunk = resp.read(1 << 16)
+            if not chunk:
+                break
+            f.write(chunk)
+            read += len(chunk)
+            if progress_cb and total > 0:
+                progress_cb(min(1.0, read / total))
 
 
 def extract_models_tarball(tar_path: Path, root_dir: Path) -> None:
