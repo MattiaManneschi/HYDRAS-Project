@@ -1,6 +1,9 @@
 # Data files (NetCDF) - raw data stays local
 data/
 
+template_latex_mem/
+thesis/
+
 # Python cache
 __pycache__/
 *.py[cod]
@@ -24,6 +27,7 @@ venv/
 
 # IDE
 .vscode/
+.claude/
 *.swp
 *.swo
 
