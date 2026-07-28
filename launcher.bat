@@ -29,6 +29,8 @@ if not exist "%TARGET%" (
 
 if not exist "%TARGET%" (
   echo Errore: download di live_sim.py fallito.
+  echo.
+  pause
   exit /b 1
 )
 
@@ -37,6 +39,8 @@ where python >nul 2>nul && set "PY=python"
 if not defined PY ( where py >nul 2>nul && set "PY=py" )
 if not defined PY (
   echo Errore: Python non e' installato. Installa Python 3 e riprova.
+  echo.
+  pause
   exit /b 1
 )
 
