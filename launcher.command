@@ -42,4 +42,27 @@ if [[ -z "$PYTHON" ]]; then
 fi
 
 export HYDRAS_HOME="$HOME_DIR"
-exec "$PYTHON" "$TARGET" "$@"
+
+# Avvia l'app (NON con exec: così, quando chiudi la GUI, lo script prosegue e
+# chiude anche questa finestra del Terminale).
+TTY_NAME="$(tty 2>/dev/null || true)"
+"$PYTHON" "$TARGET" "$@"
+
+# App chiusa: chiudi la finestra del Terminale che ha eseguito questo launcher.
+# Aggancio la finestra al tty di questo script (non alla "frontmost"), in modo
+# detached e con un piccolo ritardo: a quel punto la shell è già uscita, quindi
+# la finestra si chiude senza il prompt "terminare i processi?".
+# NB: la prima volta macOS chiede il permesso di controllare Terminale (una volta).
+if [[ "$TTY_NAME" == /dev/* ]]; then
+  ( sleep 0.4
+    /usr/bin/osascript \
+      -e "set theTTY to \"$TTY_NAME\"" \
+      -e 'tell application "Terminal"' \
+      -e '  repeat with w in windows' \
+      -e '    repeat with t in tabs of w' \
+      -e '      if tty of t is theTTY then close w' \
+      -e '    end repeat' \
+      -e '  end repeat' \
+      -e 'end tell' >/dev/null 2>&1
+  ) >/dev/null 2>&1 &
+fi
