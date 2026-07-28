@@ -24,7 +24,5 @@ simulations of the Cecina bay.
 | **Max Speed** | 1–5 m/s | Agent's maximum speed. *(PPO only.)* |
 | **Formation** | Single · Double ring | Single sensor ring (20 m) or double ring (20 m + 50 m). *(PPO only.)* |
 
-Once **Wind** and **Time Chunk** are set, a random held-out source is picked for
+Once **Wind** and **Time Chunk** are set, a random source is picked for
 that scenario. Each run shows a single episode; press **Start** again for a new one.
-
-Requires Python 3 (with Tkinter) and `curl`, both already present on macOS.
