@@ -27,8 +27,7 @@ pyyaml>=6.0
 tensorboard>=2.13.0
 
 # Download dati/modelli (fase di check in src/live_sim.py)
-gdown>=5.1.0       # download della cartella dati da Google Drive
-certifi>=2023.0.0  # bundle CA per il download HTTPS dei modelli su macOS
+certifi>=2023.0.0  # bundle CA per il download HTTPS (dati/modelli) su macOS
 
 # Optional: per multi-agent (fase successiva)
 # pettingzoo>=1.24.0

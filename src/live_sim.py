@@ -31,8 +31,10 @@ from __future__ import annotations
 import argparse
 import importlib
 import importlib.util
+import json
 import os
 import re
+import shutil
 import ssl
 import subprocess
 import sys
@@ -116,13 +118,15 @@ MODELS_TARBALL_URL = TARBALL_URL   # stesso tarball: contiene sia script sia mod
 REQUIREMENTS_URL = f"https://raw.githubusercontent.com/{REPO_SLUG}/{BRANCH}/requirements.txt"
 # Radice di installazione: la cartella del progetto (parent di src/), o override.
 INSTALL_DIR = Path(os.environ.get("HYDRAS_HOME", Path(__file__).resolve().parent.parent))
-# Cartella Google Drive con i dati .nc (34 GB): non possono stare su GitHub
-# (40 file > 100 MB). DEVE essere condivisa come "Chiunque abbia il link",
-# altrimenti gdown riceve 401. Scaricata con gdown (vedi requirements.txt).
-DATA_DRIVE_URL = "https://drive.google.com/drive/folders/1wk0zDNH4upq1giz7nMoOvjrgrj6W35rN"
+# Dati .nc (subset live, ~7,4 GB): su una GitHub Release (niente Google Drive, che
+# blocca i download pubblici in massa con la sua quota). Gli asset 'hydras_data.part-*'
+# della release, concatenati in ordine, formano un tar del subset. Vedi
+# make_data_release.sh per crearli. Download HTTPS diretto, senza gdown.
+DATA_RELEASE_TAG = "data-v1"
+DATA_ASSET_PREFIX = "hydras_data.part-"
 
 REQUIRED_PACKAGES = ["torch", "stable_baselines3", "sb3_contrib", "gymnasium",
-                     "numpy", "scipy", "matplotlib", "netCDF4", "yaml", "gdown"]
+                     "numpy", "scipy", "matplotlib", "netCDF4", "yaml"]
 
 
 def missing_packages() -> list:
@@ -244,69 +248,61 @@ def _get_tarball(cache: dict, cb=None) -> Path:
     return cache["path"]
 
 
-_SRC_CONC_RE = re.compile(r"SRC(\d+)_Conc_10mGrid\.nc$")
+def _download_stream(url: str, fileobj, base: int = 0, total: int = 0,
+                     progress_cb=None) -> None:
+    """Scarica url scrivendo i byte in `fileobj` (aperto in append), riportando il
+    progresso in byte CUMULATIVI: progress_cb(base + letti_finora, total)."""
+    req = urllib.request.Request(url, headers={"User-Agent": "HYDRAS-live-sim"})
+    with urllib.request.urlopen(req, context=_ssl_context()) as resp:
+        read = 0
+        while True:
+            b = resp.read(1 << 16)
+            if not b:
+                break
+            fileobj.write(b)
+            read += len(b)
+            if progress_cb and total > 0:
+                progress_cb(base + read, total)
 
 
-def _needed_for_live(rel_path: str) -> bool:
-    """True se il file Drive serve alla simulazione live: concentrazioni delle
-    sole sorgenti held-out (SRC107-132), 1 corrente per versione, i 4 vento e il
-    CSV delle coordinate. Esclude le sorgenti di training (SRC001-106) e il PDF."""
-    name = rel_path.rsplit("/", 1)[-1]
-    m = _SRC_CONC_RE.search(name)
-    if m:
-        return int(m.group(1)) > 106                 # solo held-out
-    if name.endswith("_U_V_10mGrid.nc"):
-        return "SRC000" in name                      # 1 file corrente per versione
-    if name.startswith("CI_WIND_faseII_V"):
-        return True                                  # 4 file vento
-    if name == "Coordinate_Sorgenti_FaseII.csv":
-        return True
-    return False
+def download_data_from_release(root_dir: Path, tag: str = DATA_RELEASE_TAG,
+                               progress_cb=None) -> None:
+    """Scarica i dati (subset live) da una GitHub Release ed estraeli in data/.
 
-
-def download_data_from_drive(url: str, root_dir: Path, held_out_only: bool = True,
-                             progress_cb=None) -> None:
-    """Scarica da una cartella Google Drive i dati .nc necessari, in data/.
-
-    Enumera la cartella (gdown, skip_download) e scarica i file uno per uno: così
-    l'avanzamento è una frazione reale (file fatti / totale) e il download è
-    ripristinabile (salta i file già presenti). Con held_out_only scarica solo il
-    sottoinsieme che serve alla simulazione live (~8 GB) anziché l'intera cartella.
-
-    La cartella Drive DEVE essere condivisa come 'Chiunque abbia il link'.
+    La release `tag` contiene gli asset 'hydras_data.part-*' che, concatenati in
+    ordine alfabetico, formano un tar del subset (creato da make_data_release.sh).
+    Download HTTPS diretto: niente gdown, niente quota di Google Drive.
+    progress_cb(byte_scaricati, byte_totali) consente una barra in GB.
     """
-    import gdown
+    api = f"https://api.github.com/repos/{REPO_SLUG}/releases/tags/{tag}"
+    req = urllib.request.Request(api, headers={
+        "User-Agent": "HYDRAS-live-sim", "Accept": "application/vnd.github+json"})
+    with urllib.request.urlopen(req, context=_ssl_context()) as r:
+        rel = json.load(r)
+    assets = sorted((a for a in rel.get("assets", [])
+                     if a.get("name", "").startswith(DATA_ASSET_PREFIX)),
+                    key=lambda a: a["name"])
+    if not assets:
+        raise RuntimeError(f"Nessun asset '{DATA_ASSET_PREFIX}*' nella release "
+                           f"'{tag}' di {REPO_SLUG}. Carica i dati con "
+                           f"make_data_release.sh.")
+    total = sum(int(a.get("size", 0)) for a in assets)
+
     data_dir = root_dir / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
+    tmpdir = Path(tempfile.mkdtemp())
     try:
-        entries = gdown.download_folder(url=url, skip_download=True, quiet=True,
-                                        use_cookies=False)
-    except Exception as e:
-        raise RuntimeError(
-            "Impossibile elencare la cartella Google Drive. Verifica che sia "
-            f"condivisa come 'Chiunque abbia il link'. Dettaglio: {e}")
-    if not entries:
-        raise RuntimeError("Cartella Google Drive vuota o inaccessibile.")
-
-    wanted = []
-    for f in entries:
-        rel, fid = getattr(f, "path", None), getattr(f, "id", None)
-        if not rel or not fid:
-            continue
-        if held_out_only and not _needed_for_live(rel):
-            continue
-        wanted.append((rel, fid))
-    if not wanted:
-        raise RuntimeError("Nessun file dati corrispondente trovato nella cartella Drive.")
-
-    total = len(wanted)
-    for i, (rel, fid) in enumerate(wanted):
-        dest = data_dir / rel
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if not (dest.exists() and dest.stat().st_size > 0):     # resume: salta i già scaricati
-            gdown.download(id=fid, output=str(dest), quiet=True, resume=True)
-        if progress_cb:
-            progress_cb((i + 1) / total)
+        tar_path = tmpdir / "hydras_data.tar"
+        done = 0
+        with open(tar_path, "wb") as tar_out:      # ricompone i pezzi in un unico tar
+            for a in assets:
+                _download_stream(a["browser_download_url"], tar_out,
+                                 base=done, total=total, progress_cb=progress_cb)
+                done += int(a.get("size", 0))
+        with tarfile.open(tar_path) as tf:
+            tf.extractall(data_dir)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def held_out_sources(dm: DataManager) -> list:
@@ -760,12 +756,17 @@ def main() -> None:
             # DataManager (e i finder dei modelli usati nella fase 4).
             _import_heavy()
 
-            # 3) Dati -----------------------------------------------------------
+            # 3) Dati (da GitHub Release, con progresso in GB) ------------------
             rep("Download dei dati in corso…", 30)
             if not data_present(root_dir):
-                download_data_from_drive(
-                    DATA_DRIVE_URL, root_dir, held_out_only=True,
-                    progress_cb=lambda f: rep(pct=30 + 35 * f))
+                _GB = 1073741824
+
+                def data_prog(done, tot):
+                    rep(f"Download dei dati in corso… {done/_GB:.1f} / {tot/_GB:.1f} GB",
+                        30 + 35 * (done / tot))
+
+                download_data_from_release(root_dir, DATA_RELEASE_TAG,
+                                           progress_cb=data_prog)
             rep(pct=65)
 
             # 4) Modelli --------------------------------------------------------
