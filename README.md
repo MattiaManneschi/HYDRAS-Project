@@ -1,4 +1,4 @@
-# HYDRAS Source Seeking
+# HYDRAS - Hydrodynamic-aware Distributed Robots for Marine Source-Seeking
 
 Marine pollutant source localization with autonomous underwater vehicles (AUVs).
 The project compares a gradient method (Field Climbing Method) and a Reinforcement
