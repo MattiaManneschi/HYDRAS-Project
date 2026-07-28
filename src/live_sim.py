@@ -517,9 +517,9 @@ def build_gui(root, dm, fps: float = 15.0) -> None:
         return cb
 
     tech_cb = combo(ctrl, "Tecnologia", tech_var, ["PPO", "FCM"], 0)
-    ver_cb = combo(ctrl, "V", ver_var, VERSIONS, 1)
-    chunk_cb = combo(ctrl, "Q", chunk_var, list(CHUNK_BY_LABEL.keys()), 2)
-    vmax_cb = combo(ctrl, "v_max", vmax_var, ["1", "2", "3", "4", "5"], 3)
+    ver_cb = combo(ctrl, "Vento", ver_var, VERSIONS, 1)
+    chunk_cb = combo(ctrl, "Chunk Temporale", chunk_var, list(CHUNK_BY_LABEL.keys()), 2)
+    vmax_cb = combo(ctrl, "Velocità Massima", vmax_var, ["1", "2", "3", "4", "5"], 3)
     form_cb = combo(ctrl, "Formazione", form_var, ["Singola", "Doppia"], 4)
 
     # Centro: la simulazione live occupa la maggior parte della finestra. Il canvas
