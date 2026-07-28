@@ -745,11 +745,13 @@ def main() -> None:
                                        + ", ".join(missing_packages()))
             rep(pct=15)
 
-            # 2) Script (inference.py + utils/): dipendenze di QUESTO file -------
+            # 2) Script: solo le dipendenze effettive di live_sim (inference.py +
+            # utils/). Si escludono explainability.py, train_ppo.py e
+            # run_adaptive_sweeps.py, che live_sim non importa mai.
             rep("Download degli script in corso…", 15)
             if not scripts_present(root_dir):
                 tar = _get_tarball(cache, cb=lambda f: rep(pct=15 + 10 * f))
-                _extract_prefixes(tar, root_dir, ("src/", "utils/"))
+                _extract_prefixes(tar, root_dir, ("src/inference.py", "utils/"))
                 if not scripts_present(root_dir):
                     raise RuntimeError("Script del progetto mancanti dopo l'estrazione.")
             rep(pct=30)
