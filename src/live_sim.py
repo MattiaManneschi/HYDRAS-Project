@@ -1,28 +1,28 @@
 #!/usr/bin/env python3
 """
-HYDRAS Source Seeking — Simulazione LIVE con pannello di controllo.
+HYDRAS Source Seeking — LIVE simulation with a control panel.
 
-Piccola GUI (Tkinter): l'utente sceglie da menu a tendina lo scenario e l'agente,
-preme "Avvia" e guarda UN episodio svolgersi in tempo reale nella stessa finestra.
-A episodio concluso il programma si ripristina (tutte le tendine ai valori di
-default) e resta pronto per una nuova esecuzione.
+Small GUI (Tkinter): the user picks the scenario and the agent from drop-down
+menus, presses "Start" and watches ONE episode play out in real time in the same
+window. When the episode ends the program resets and stays ready for a new run.
 
-Menu a tendina:
-  - Tecnologia   : PPO  oppure  FCM Adam
-  - V (vento)    : V0 / V1 / V2 / V3
-  - Q (chunk)    : Q1/4 / Q1/2 / Q3/4
-  - v_max        : 1..5           (solo PPO)
-  - Formazione   : Singola / Doppia corona   (solo PPO)
+Drop-down menus:
+  - Technology  : PPO  or  FCM Adam
+  - Wind        : V0 / V1 / V2 / V3
+  - Time Chunk  : Q1/4 / Q1/2 / Q3/4
+  - Max Speed   : 1..5                (PPO only)
+  - Formation   : Single / Double ring   (PPO only)
 
-Scelti V e Q, viene pescata una sorgente held-out a caso con quella versione.
-FCM usa sempre FCM Adam nella configurazione migliore (lr=40 m, sensor_range=50 m).
+Once Wind and Time Chunk are set, a random held-out source is picked for that
+scenario. FCM always uses FCM Adam in its best configuration (lr=40 m,
+sensor_range=50 m).
 
-Il codice è diviso in due parti:
-  - il MOTORE (make_agent_env / step_once / draw_scene): costruisce agente+env,
-    avanza di un passo e disegna. Non dipende da Tkinter ed è testabile headless.
-  - la GUI (App): i widget e il loop non bloccante via root.after().
+The code has two parts:
+  - the ENGINE (make_agent_env / step_once / draw_scene): builds agent+env, steps
+    once and draws. No Tkinter dependency, testable headless.
+  - the GUI (App): the widgets and the non-blocking loop via root.after().
 
-Uso:
+Usage:
     python src/live_sim.py
 """
 
@@ -107,7 +107,7 @@ FCM_SENSOR_RANGE = 50.0
 
 # Default dei menu a tendina (ripristinati a fine episodio).
 DEFAULTS = {"tech": "PPO", "version": "V0", "chunk": "Q1/4",
-            "vmax": "2", "formation": "Doppia"}
+            "vmax": "2", "formation": "Double"}
 
 
 # ─── Requisiti / dati / modelli / script: check e download ───────────────────
@@ -283,9 +283,8 @@ def download_data_from_release(root_dir: Path, tag: str = DATA_RELEASE_TAG,
                      if a.get("name", "").startswith(DATA_ASSET_PREFIX)),
                     key=lambda a: a["name"])
     if not assets:
-        raise RuntimeError(f"Nessun asset '{DATA_ASSET_PREFIX}*' nella release "
-                           f"'{tag}' di {REPO_SLUG}. Carica i dati con "
-                           f"make_data_release.sh.")
+        raise RuntimeError(f"No '{DATA_ASSET_PREFIX}*' asset in release "
+                           f"'{tag}' of {REPO_SLUG}.")
     total = sum(int(a.get("size", 0)) for a in assets)
 
     data_dir = root_dir / "data"
@@ -384,19 +383,19 @@ def make_agent_env(dm: DataManager, root_dir: Path, tech: str, version: str,
 
     # PPO ---------------------------------------------------------------------
     trained = root_dir / "trained_models"
-    if formation == "Doppia":
+    if formation == "Double":
         run_dir = _find_dualcorona_run(trained, vmax=float(vmax), K=5)
-        form_lbl = "doppia corona"
+        form_lbl = "double ring"
     else:
         run_dir = _find_velocity_run(trained, vmax=int(vmax), K=5)
-        form_lbl = "singola corona"
+        form_lbl = "single ring"
     if run_dir is None:
-        raise RuntimeError(f"Nessun modello PPO {form_lbl} v_max={vmax}.")
+        raise RuntimeError(f"No PPO {form_lbl} model for max speed {vmax}.")
 
     model_path = run_dir / "models" / "final_model.zip"
     vec_norm_path = run_dir / "models" / "vec_normalize.pkl"
     if not model_path.exists():
-        raise RuntimeError(f"final_model.zip mancante in {run_dir/'models'}.")
+        raise RuntimeError(f"final_model.zip missing in {run_dir/'models'}.")
 
     config = load_config(str(run_dir / "config.yaml"))
     env_cfg = make_env_config(config, chunk_id=chunk)
@@ -478,11 +477,11 @@ def draw_scene(ax, inner, title: str) -> None:
     if len(inner.trajectory) > 1:
         traj = np.array(inner.trajectory)
         ax.plot(traj[:, 0], traj[:, 1], "-", color="#1f4fd6", linewidth=1.8,
-                alpha=0.9, label="Traiettoria", zorder=4)
+                alpha=0.9, label="Trajectory", zorder=4)
 
     # Agente + freccia di direzione.
     ax.scatter(inner.state.x, inner.state.y, c="#0b3d91", s=90, marker="o",
-               edgecolors="white", linewidths=1.2, zorder=6, label="Agente")
+               edgecolors="white", linewidths=1.2, zorder=6, label="Agent")
     if inner.state.vx != 0 or inner.state.vy != 0:
         ax.arrow(inner.state.x, inner.state.y, inner.state.vx * 50, inner.state.vy * 50,
                  head_width=30, head_length=20, fc="#0b3d91", ec="#0b3d91", zorder=5)
@@ -490,7 +489,7 @@ def draw_scene(ax, inner, title: str) -> None:
     # Sorgente (stella gialla) e raggio di successo.
     sx, sy = inner.source_position
     ax.scatter(sx, sy, c="yellow", s=220, marker="*", edgecolors="black",
-               zorder=7, label="Sorgente")
+               zorder=7, label="Source")
     ax.add_patch(Circle((sx, sy), inner.config.source_distance_threshold,
                         fill=False, color="red", linestyle="--", zorder=7))
 
@@ -518,7 +517,7 @@ def build_gui(root, dm, fps: float = 15.0) -> None:
     rng = np.random.default_rng()
     delay_ms = int(1000.0 / max(fps, 1.0))
 
-    root.title("HYDRAS — Simulazione live")
+    root.title("HYDRAS — Live Simulation")
     root.rowconfigure(1, weight=1)
     root.columnconfigure(0, weight=1)
 
@@ -538,11 +537,11 @@ def build_gui(root, dm, fps: float = 15.0) -> None:
         cb.grid(row=0, column=col * 2 + 1, padx=(0, 6))
         return cb
 
-    tech_cb = combo(ctrl, "Tecnologia", tech_var, ["PPO", "FCM"], 0)
-    ver_cb = combo(ctrl, "Vento", ver_var, VERSIONS, 1)
-    chunk_cb = combo(ctrl, "Chunk Temporale", chunk_var, list(CHUNK_BY_LABEL.keys()), 2)
-    vmax_cb = combo(ctrl, "Velocità Massima", vmax_var, ["1", "2", "3", "4", "5"], 3)
-    form_cb = combo(ctrl, "Formazione", form_var, ["Singola", "Doppia"], 4)
+    tech_cb = combo(ctrl, "Technology", tech_var, ["PPO", "FCM"], 0)
+    ver_cb = combo(ctrl, "Wind", ver_var, VERSIONS, 1)
+    chunk_cb = combo(ctrl, "Time Chunk", chunk_var, list(CHUNK_BY_LABEL.keys()), 2)
+    vmax_cb = combo(ctrl, "Max Speed", vmax_var, ["1", "2", "3", "4", "5"], 3)
+    form_cb = combo(ctrl, "Formation", form_var, ["Single", "Double"], 4)
 
     # Centro: la simulazione live occupa la maggior parte della finestra. Il canvas
     # viene messo in griglia solo a caricamento completato (finalize_loading);
@@ -561,18 +560,18 @@ def build_gui(root, dm, fps: float = 15.0) -> None:
         ax.set_facecolor("white")
         ax.set_xticks([])
         ax.set_yticks([])
-        ax.set_title("Nessuna simulazione in corso")
+        ax.set_title("No simulation running")
         canvas.draw_idle()
 
     # Basso: pulsanti Avvia / Annulla.
     btns = ttk.Frame(root, padding=(10, 6))
     btns.grid(row=2, column=0, sticky="ew")
-    start_btn = ttk.Button(btns, text="Avvia")
+    start_btn = ttk.Button(btns, text="Start")
     start_btn.grid(row=0, column=0, padx=(0, 8))
-    cancel_btn = ttk.Button(btns, text="Annulla")
+    cancel_btn = ttk.Button(btns, text="Cancel")
     cancel_btn.grid(row=0, column=1)
 
-    status = ttk.Label(root, text="Pronto — scegli le opzioni e premi Avvia.",
+    status = ttk.Label(root, text="Ready — choose the options and press Start.",
                        padding=(10, 4))
     status.grid(row=3, column=0, sticky="w")
 
@@ -625,8 +624,8 @@ def build_gui(root, dm, fps: float = 15.0) -> None:
         cleanup_env()
         state.update(running=False, obs=None, agent=None, steps=0)
         set_controls(True)
-        status.configure(text=f"Episodio terminato: {outcome.upper()}. "
-                              f"Configurazioni mantenute — premi Avvia per rieseguire.")
+        status.configure(text=f"Episode finished: {outcome.upper()}. "
+                              f"Settings kept — press Start to run again.")
 
     def step():
         if not state["running"]:
@@ -635,7 +634,7 @@ def build_gui(root, dm, fps: float = 15.0) -> None:
             obs, done, info = step_once(state["agent"], state["vec_env"],
                                         state["obs"], state["is_fcm"])
         except Exception as e:
-            status.configure(text=f"Errore durante la simulazione: {e}")
+            status.configure(text=f"Error during the simulation: {e}")
             reset_program()
             return
         state["obs"] = obs
@@ -658,11 +657,11 @@ def build_gui(root, dm, fps: float = 15.0) -> None:
 
         source = pick_source(state["dm"], version, rng)
         if source is None:
-            status.configure(text=f"Nessuna sorgente held-out con versione {version}.")
+            status.configure(text=f"No held-out source for wind {version}.")
             return
 
         set_controls(False)
-        status.configure(text=f"Caricamento {tech} … scenario {source} {version} "
+        status.configure(text=f"Loading {tech} … scenario {source} {version} "
                               f"{chunk_var.get()}")
         root.update_idletasks()
 
@@ -670,7 +669,7 @@ def build_gui(root, dm, fps: float = 15.0) -> None:
             agent, vec_env, is_fcm, label = make_agent_env(
                 state["dm"], root_dir, tech, version, chunk, vmax, formation, source)
         except Exception as e:
-            status.configure(text=f"Errore nel caricamento: {e}")
+            status.configure(text=f"Loading error: {e}")
             set_controls(True)
             return
 
@@ -678,7 +677,7 @@ def build_gui(root, dm, fps: float = 15.0) -> None:
                      label=f"{label} · {source} {version} {chunk_var.get()}",
                      steps=0, running=True)
         state["obs"] = vec_env.reset()
-        status.configure(text=f"In esecuzione: {state['label']}")
+        status.configure(text=f"Running: {state['label']}")
         root.after(delay_ms, step)
 
     def cancel():
@@ -687,8 +686,8 @@ def build_gui(root, dm, fps: float = 15.0) -> None:
         was_running = state["running"]
         show_idle()
         reset_program()
-        status.configure(text=("Simulazione annullata. " if was_running else "")
-                              + "Configurazioni ripristinate — pronto per una nuova esecuzione.")
+        status.configure(text=("Simulation cancelled. " if was_running else "")
+                              + "Settings reset — ready for a new run.")
 
     start_btn.configure(command=start)
     cancel_btn.configure(command=cancel)
@@ -705,7 +704,7 @@ def build_gui(root, dm, fps: float = 15.0) -> None:
     canvas.get_tk_widget().grid(row=1, column=0, sticky="nsew")
     set_controls(True)
     show_idle()
-    status.configure(text="Pronto — scegli le opzioni e premi Avvia.")
+    status.configure(text="Ready — choose the options and press Start.")
 
 
 def main() -> None:
@@ -724,14 +723,14 @@ def main() -> None:
 
     root_dir = INSTALL_DIR
     root = tk.Tk()
-    root.title("HYDRAS — Avvio")
+    root.title("HYDRAS — Startup")
     root.geometry("900x680")
     root.rowconfigure(1, weight=1)
     root.columnconfigure(0, weight=1)
 
     loading = ttk.Frame(root, padding=40)
     loading.grid(row=1, column=0, sticky="nsew")
-    cap_label = ttk.Label(loading, text="Avvio…", font=("", 13))
+    cap_label = ttk.Label(loading, text="Starting…", font=("", 13))
     cap_label.pack(pady=(120, 14))
     pbar = ttk.Progressbar(loading, mode="determinate", maximum=100, length=420)
     pbar.pack()
@@ -739,7 +738,7 @@ def main() -> None:
     pct_label.pack(pady=(8, 0))
 
     loader = {"dm": None, "error": None, "done": False,
-              "caption": "Avvio…", "pct": 0.0, "env_start": None}
+              "caption": "Starting…", "pct": 0.0, "env_start": None}
 
     def rep(caption=None, pct=None):
         if caption is not None:
@@ -751,7 +750,7 @@ def main() -> None:
         cache = {"path": None}
         try:
             # 1) Requisiti ------------------------------------------------------
-            rep("Installazione dei requirements in corso…", 2)
+            rep("Installing requirements…", 2)
             if missing_packages():
                 req = root_dir / "requirements.txt"
                 if not req.exists():
@@ -759,19 +758,19 @@ def main() -> None:
                 install_requirements(root_dir)
                 importlib.invalidate_caches()
                 if missing_packages():
-                    raise RuntimeError("Requisiti mancanti dopo pip: "
+                    raise RuntimeError("Requirements still missing after pip: "
                                        + ", ".join(missing_packages()))
             rep(pct=15)
 
             # 2) Script: solo le dipendenze effettive di live_sim (inference.py +
             # utils/). Si escludono explainability.py, train_ppo.py e
             # run_adaptive_sweeps.py, che live_sim non importa mai.
-            rep("Download degli script in corso…", 15)
+            rep("Downloading scripts…", 15)
             if not scripts_present(root_dir):
                 tar = _get_tarball(cache, cb=lambda f: rep(pct=15 + 10 * f))
                 _extract_prefixes(tar, root_dir, ("src/inference.py", "utils/"))
                 if not scripts_present(root_dir):
-                    raise RuntimeError("Script del progetto mancanti dopo l'estrazione.")
+                    raise RuntimeError("Project scripts missing after extraction.")
             rep(pct=30)
 
             # Requisiti e script ci sono: ora si possono caricare numpy/inference/
@@ -779,12 +778,12 @@ def main() -> None:
             _import_heavy()
 
             # 3) Dati (da GitHub Release, con progresso in GB) ------------------
-            rep("Download dei dati in corso…", 30)
+            rep("Downloading data…", 30)
             if not data_present(root_dir):
                 _GB = 1073741824
 
                 def data_prog(done, tot):
-                    rep(f"Download dei dati in corso… {done/_GB:.1f} / {tot/_GB:.1f} GB",
+                    rep(f"Downloading data… {done/_GB:.1f} / {tot/_GB:.1f} GB",
                         30 + 35 * (done / tot))
 
                 download_data_from_release(root_dir, DATA_RELEASE_TAG,
@@ -795,18 +794,18 @@ def main() -> None:
             rep(pct=65)
 
             # 4) Modelli --------------------------------------------------------
-            rep("Download dei modelli in corso…", 65)
+            rep("Downloading models…", 65)
             if missing_models(root_dir):
                 tar = _get_tarball(cache, cb=lambda f: rep(pct=65 + 8 * f))
                 _extract_prefixes(tar, root_dir, ("trained_models/",))
                 if missing_models(root_dir):
-                    raise RuntimeError("Modelli PPO mancanti dopo l'estrazione.")
+                    raise RuntimeError("PPO models missing after extraction.")
             rep(pct=75)
             if cache["path"]:
                 cache["path"].unlink(missing_ok=True)
 
             # 5) Ambiente -------------------------------------------------------
-            rep("Caricamento dell'ambiente in corso…", 75)
+            rep("Loading environment…", 75)
             loader["env_start"] = time.perf_counter()
             loader["dm"] = DataManager(data_dir=str(root_dir / "data"), preload_all=False,
                                        sources_csv="Coordinate_Sorgenti_FaseII.csv")
@@ -817,7 +816,7 @@ def main() -> None:
 
     def poll():
         if loader["error"] is not None:
-            cap_label.configure(text=f"Errore all'avvio: {loader['error']}")
+            cap_label.configure(text=f"Startup error: {loader['error']}")
             pct_label.configure(text="")
             return
         if loader["done"]:
@@ -826,7 +825,7 @@ def main() -> None:
 
             def finalize():
                 loading.destroy()
-                root.title("HYDRAS — Simulazione live")
+                root.title("HYDRAS — Live Simulation")
                 build_gui(root, loader["dm"], args.fps)
 
             root.after(200, finalize)          # mostra brevemente il 100%

@@ -12,18 +12,19 @@ simulations of the Cecina bay.
 2. Double-click it. On first launch it downloads everything it needs (code, data,
    models) into that same folder, then opens the interface.
 3. Configure the scenario and the agent with the drop-down menus (see below), then
-   press **Avvia** to watch one episode play out in real time.
+   press **Start** to watch one episode play out in real time.
 
 ### Scenario configuration
 
 | Menu | Options | Meaning |
 |---|---|---|
-| **Tecnologia** | PPO · FCM Adam | Which algorithm drives the agent: the learned PPO policy or the gradient method (FCM with Adam). |
-| **Vento** | V0 · V1 · V2 · V3 | Wind scenario (four hydrodynamic runs with different wind conditions). |
-| **Chunk Temporale** | Q1/4 · Q1/2 · Q3/4 | When in the simulation the episode starts — first quarter, middle, or third quarter (plume more or less dispersed). |
-| **Velocità Massima** | 1–5 m/s | Agent's maximum speed. *(PPO only.)* |
-| **Formazione** | Singola · Doppia corona | Single sensor ring (20 m) or double ring (20 m + 50 m). *(PPO only.)* |
+| **Technology** | PPO · FCM Adam | Which algorithm drives the agent: the learned PPO policy or the gradient method (FCM with Adam). |
+| **Wind** | V0 · V1 · V2 · V3 | Wind scenario (four hydrodynamic runs with different wind conditions). |
+| **Time Chunk** | Q1/4 · Q1/2 · Q3/4 | When in the simulation the episode starts — first quarter, middle, or third quarter (plume more or less dispersed). |
+| **Max Speed** | 1–5 m/s | Agent's maximum speed. *(PPO only.)* |
+| **Formation** | Single · Double ring | Single sensor ring (20 m) or double ring (20 m + 50 m). *(PPO only.)* |
 
-Once **Vento** and **Chunk Temporale** are set, a random held-out source is picked
-for that scenario. Each run shows a single episode; press **Avvia** again for a new
-one.
+Once **Wind** and **Time Chunk** are set, a random held-out source is picked for
+that scenario. Each run shows a single episode; press **Start** again for a new one.
+
+Requires Python 3 (with Tkinter) and `curl`, both already present on macOS.
