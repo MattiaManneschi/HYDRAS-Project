@@ -1,0 +1,5 @@
+# I .bat DEVONO avere fine-riga CRLF, altrimenti cmd.exe su Windows può
+# interpretarli male (specie nei blocchi if/else). Gli script Unix restano LF.
+*.bat      text eol=crlf
+*.command  text eol=lf
+*.sh       text eol=lf
