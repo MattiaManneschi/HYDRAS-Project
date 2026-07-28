@@ -1,3 +1,29 @@
 # HYDRAS Source Seeking
 
-Addestramento di agenti autonomi (AUV) con MaskablePPO per localizzare sorgenti di inquinante marino. Il progetto utilizza simulazioni idrodinamiche MIKE21 dell'area del Porto di Cecina e dati CMEMS per addestrare gli agenti a seguire gradienti di concentrazione e individuare la sorgente di emissione, considerando i fattori di vento e corrente marina.
+Marine pollutant source localization with autonomous underwater vehicles (AUVs).
+The project compares a gradient method (Field Climbing Method) and a Reinforcement
+Learning approach (PPO) in guiding an agent up the concentration field to the
+source, accounting for wind and sea current. Data come from MIKE21 hydrodynamic
+simulations of the Cecina bay.
+
+## Demo (macOS)
+
+1. Download **`launcher.command`** and place it in a folder with ~8 GB free.
+2. Double-click it. On first launch it downloads everything it needs (code, data,
+   models) into that same folder, then opens the interface.
+3. Configure the scenario and the agent with the drop-down menus (see below), then
+   press **Avvia** to watch one episode play out in real time.
+
+### Scenario configuration
+
+| Menu | Options | Meaning |
+|---|---|---|
+| **Tecnologia** | PPO · FCM Adam | Which algorithm drives the agent: the learned PPO policy or the gradient method (FCM with Adam). |
+| **Vento** | V0 · V1 · V2 · V3 | Wind scenario (four hydrodynamic runs with different wind conditions). |
+| **Chunk Temporale** | Q1/4 · Q1/2 · Q3/4 | When in the simulation the episode starts — first quarter, middle, or third quarter (plume more or less dispersed). |
+| **Velocità Massima** | 1–5 m/s | Agent's maximum speed. *(PPO only.)* |
+| **Formazione** | Singola · Doppia corona | Single sensor ring (20 m) or double ring (20 m + 50 m). *(PPO only.)* |
+
+Once **Vento** and **Chunk Temporale** are set, a random held-out source is picked
+for that scenario. Each run shows a single episode; press **Avvia** again for a new
+one.
