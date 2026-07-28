@@ -300,9 +300,31 @@ def download_data_from_release(root_dir: Path, tag: str = DATA_RELEASE_TAG,
                                  base=done, total=total, progress_cb=progress_cb)
                 done += int(a.get("size", 0))
         with tarfile.open(tar_path) as tf:
-            tf.extractall(data_dir)
+            # Salta i companion di macOS (._*, .DS_Store) che il tar di macOS può
+            # includere: DataManager li scambierebbe per dati (._*.nc) e netCDF
+            # fallirebbe con "Unknown file format".
+            members = [m for m in tf.getmembers() if not _is_apple_junk(m.name)]
+            tf.extractall(data_dir, members=members)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _is_apple_junk(path: str) -> bool:
+    name = path.rsplit("/", 1)[-1]
+    return name.startswith("._") or name == ".DS_Store"
+
+
+def _remove_apple_junk(data_dir: Path) -> None:
+    """Ripulisce i file companion di macOS già finiti in data/ (self-heal per
+    installazioni fatte prima di questo fix)."""
+    if not data_dir.exists():
+        return
+    for pat in ("._*", ".DS_Store"):
+        for p in data_dir.rglob(pat):
+            try:
+                p.unlink()
+            except OSError:
+                pass
 
 
 def held_out_sources(dm: DataManager) -> list:
@@ -767,6 +789,9 @@ def main() -> None:
 
                 download_data_from_release(root_dir, DATA_RELEASE_TAG,
                                            progress_cb=data_prog)
+            # Ripulisce eventuali companion di macOS (anche da installazioni
+            # precedenti): DataManager li scambierebbe per file .nc.
+            _remove_apple_junk(root_dir / "data")
             rep(pct=65)
 
             # 4) Modelli --------------------------------------------------------
