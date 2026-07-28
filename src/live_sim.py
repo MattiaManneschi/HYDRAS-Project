@@ -13,8 +13,7 @@ Drop-down menus:
   - Max Speed   : 1..5                (PPO only)
   - Formation   : Single / Double ring   (PPO only)
 
-Once Wind and Time Chunk are set, a random held-out source is picked for that
-scenario. FCM always uses FCM Adam in its best configuration (lr=40 m,
+Once Wind and Time Chunk are set, a random source is picked for that scenario. FCM always uses FCM Adam in its best configuration (lr=40 m,
 sensor_range=50 m).
 
 The code has two parts:
@@ -326,14 +325,14 @@ def _remove_apple_junk(data_dir: Path) -> None:
                 pass
 
 
-def held_out_sources(dm: DataManager) -> list:
-    """Sorgenti mai viste in addestramento (SRC107-SRC132)."""
+def available_sources(dm: DataManager) -> list:
+    """Sorgenti disponibili per la demo (SRC107-SRC132)."""
     return sorted(s for s in dm.get_discovered_sources() if int(s[3:]) > 106)
 
 
 def pick_source(dm: DataManager, version: str, rng: np.random.Generator) -> Optional[str]:
-    """Sorgente held-out a caso che possiede un file per la versione data."""
-    sources = held_out_sources(dm)
+    """Sorgente a caso che possiede un file per la versione data."""
+    sources = available_sources(dm)
     for s in rng.permutation(sources):
         if any(version in f.name and s in f.name for f in dm._nc_files):
             return str(s)
@@ -657,7 +656,7 @@ def build_gui(root, dm, fps: float = 15.0) -> None:
 
         source = pick_source(state["dm"], version, rng)
         if source is None:
-            status.configure(text=f"No held-out source for wind {version}.")
+            status.configure(text=f"No source available for wind {version}.")
             return
 
         set_controls(False)
