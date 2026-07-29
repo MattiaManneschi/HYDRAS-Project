@@ -6,9 +6,10 @@ Learning approach (PPO) in guiding an agent up the concentration field to the
 source, accounting for wind and sea current. Data come from MIKE21 hydrodynamic
 simulations of the Cecina bay.
 
-## Demo (macOS)
+## Demo (macOS · Windows)
 
-1. Download **`launcher.command`** and place it in a folder with at least ~8 GB free.
+1. Download the launcher for your system — **`launcher.command`** (macOS) or
+   **`launcher.bat`** (Windows) — and place it in a folder with at least ~8 GB free.
 2. Double-click it. On first launch it downloads everything it needs (code, data,
    models) into that same folder, then opens the interface.
 3. Configure the scenario and the agent with the drop-down menus (see below), then
