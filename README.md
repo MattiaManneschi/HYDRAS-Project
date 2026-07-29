@@ -6,7 +6,7 @@ Learning approach (PPO) in guiding an agent up the concentration field to the
 source, accounting for wind and sea current. Data come from MIKE21 hydrodynamic
 simulations of the Cecina bay.
 
-## Demo (macOS · Windows)
+## How to use it (macOS · Windows)
 
 1. Download the launcher for your system — **`launcher.command`** (macOS) or
    **`launcher.bat`** (Windows) — and place it in a folder with at least ~8 GB free.
