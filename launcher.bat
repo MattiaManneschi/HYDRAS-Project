@@ -8,7 +8,7 @@ rem PowerShell. Usage: double-click, or run  launcher.bat
 rem ---------------------------------------------------------------------------
 setlocal enabledelayedexpansion
 
-set "REPO=MattiaManneschi/HYDRAS-Project"
+set "REPO=MattiaManneschi/HYDRAS-SourceSeeker"
 set "BRANCH=master"
 set "RAW_URL=https://raw.githubusercontent.com/%REPO%/%BRANCH%/src/live_sim.py"
 

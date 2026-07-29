@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-REPO="MattiaManneschi/HYDRAS-Project"
+REPO="MattiaManneschi/HYDRAS-SourceSeeker"
 BRANCH="master"
 RAW_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/src/live_sim.py"
 

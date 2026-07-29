@@ -110,7 +110,7 @@ DEFAULTS = {"tech": "PPO", "version": "V0", "chunk": "Q1/4",
 
 
 # ─── Requisiti / dati / modelli / script: check e download ───────────────────
-REPO_SLUG = "MattiaManneschi/HYDRAS-Project"
+REPO_SLUG = "MattiaManneschi/HYDRAS-SourceSeeker"
 BRANCH = "master"
 TARBALL_URL = f"https://codeload.github.com/{REPO_SLUG}/tar.gz/refs/heads/{BRANCH}"
 MODELS_TARBALL_URL = TARBALL_URL   # stesso tarball: contiene sia script sia modelli
@@ -203,7 +203,7 @@ def download_file(url: str, dest: Path, progress_cb=None) -> None:
 
 def extract_models_tarball(tar_path: Path, root_dir: Path) -> None:
     """Estrae solo trained_models/** dal tarball del repo (entry del tipo
-    'HYDRAS-Project-master/trained_models/…') in root_dir/trained_models."""
+    'HYDRAS-SourceSeeker-master/trained_models/…') in root_dir/trained_models."""
     import tarfile
     with tarfile.open(tar_path, "r:gz") as tf:
         for m in tf.getmembers():
@@ -223,7 +223,7 @@ def scripts_present(root_dir: Path) -> bool:
 
 def _extract_prefixes(tar_path: Path, root_dir: Path, prefixes: tuple) -> int:
     """Estrae dal tarball del repo le voci il cui path (tolto il prefisso
-    top-level 'HYDRAS-Project-<branch>/') inizia con uno dei prefissi dati."""
+    top-level 'HYDRAS-SourceSeeker-<branch>/') inizia con uno dei prefissi dati."""
     n = 0
     with tarfile.open(tar_path, "r:gz") as tf:
         for m in tf.getmembers():
