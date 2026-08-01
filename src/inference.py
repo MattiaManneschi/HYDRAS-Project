@@ -1947,15 +1947,17 @@ def _read_global_sr(output_dir: Path) -> float:
     return float("nan")
 
 
-def main_velocity_inference():
-    """Inferenza multi-modello sulla catena a velocità adattiva (v_max 1→5 m/s).
+def main_velocity_inference(vmax_list=(1, 2, 3, 4, 5)):
+    """Inferenza multi-modello sulla catena a velocità adattiva (v_max da `vmax_list`).
 
-    Per ogni modello: 5 episodi per combinazione (sorgente × scenario vento × chunk),
-    policy deterministica, niente video. I modelli sono individuati automaticamente
-    in trained_models/ (K=5, max_velocity corrispondente), e l'ambiente è ricostruito
-    dal config.yaml salvato nel run (n_velocity_levels, max_velocity, sensori, spawn).
+    Per ogni v_max in `vmax_list`: 5 episodi per combinazione (sorgente × scenario
+    vento × chunk) → 1560 episodi/modello, policy deterministica, niente video. I
+    modelli sono individuati automaticamente in trained_models/ (K=5, max_velocity
+    corrispondente), e l'ambiente è ricostruito dal config.yaml salvato nel run
+    (n_velocity_levels, max_velocity, sensori, spawn).
 
     Output: thesis/evaluations/evaluations_RL/evaluations_RL_adaptive/vmax_{v}/
+    (v_max float → es. vmax_1.2, che NON sovrascrive vmax_1 della catena intera).
     """
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
     DATA_DIR     = str(PROJECT_ROOT / "data")
@@ -1965,12 +1967,12 @@ def main_velocity_inference():
     out_root.mkdir(parents=True, exist_ok=True)
 
     K          = 5
-    VMAX_LIST  = [1, 2, 3, 4, 5]
-    N_EPISODES = 5          # episodi per combinazione (sorgente × vento × chunk)
+    VMAX_LIST  = list(vmax_list)
+    N_EPISODES = 5          # episodi per combinazione (sorgente × vento × chunk) → 1560/modello
 
     print(f"\n{'#'*100}")
-    print(f"#  INFERENZA MULTI-MODELLO — catena velocità adattiva  (v_max 1→5 m/s, K={K})")
-    print(f"#  {N_EPISODES} episodi/combinazione, deterministica, no video")
+    print(f"#  INFERENZA MULTI-MODELLO — catena velocità adattiva  (v_max = {VMAX_LIST} m/s, K={K})")
+    print(f"#  {N_EPISODES} episodi/combinazione (= 1560/modello), deterministica, no video")
     print(f"{'#'*100}")
 
     results = []
@@ -2358,5 +2360,9 @@ if __name__ == "__main__":
     elif arg == "heatmaps":
         _n = int(_sys.argv[2]) if len(_sys.argv) > 2 else 10
         main_agent_heatmap(n_episodes=_n)
+    elif arg in ("full", "chain", "1-5"):
+        # Catena INTERA v_max 1→5 m/s (5 run × 1560 ep).
+        main_velocity_inference(vmax_list=[1, 2, 3, 4, 5])
     else:
-        main_velocity_inference()
+        # DEFAULT: catena v_max INTERMEDI 1.2/1.5/1.7/1.9 (4 run × 1560 ep).
+        main_velocity_inference(vmax_list=[1.2, 1.5, 1.7, 1.9])

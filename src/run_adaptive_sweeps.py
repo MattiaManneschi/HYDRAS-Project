@@ -14,9 +14,9 @@ e SENZA generazione video (più rapido; i video si fanno eventualmente dopo):
                           Le inferenze si faranno dopo, separatamente.
 
 Uso:
-  python3 src/run_adaptive_sweeps.py
-  # solo FCM:  STAGE=fcm python3 src/run_adaptive_sweeps.py
-  # solo PPO:  STAGE=ppo python3 src/run_adaptive_sweeps.py
+  python3 src/run_adaptive_sweeps.py            # DEFAULT: catena v_max INTERMEDI 1.2/1.5/1.7/1.9 (fine-tuning da v1)
+  STAGE=ppo python3 src/run_adaptive_sweeps.py  # catena piena v_max 1→5
+  STAGE=fcm python3 src/run_adaptive_sweeps.py  # solo sweep FCM
 """
 import os
 import re
@@ -197,6 +197,78 @@ def ppo_sweep():
         print(f"\n  ✓ [PPO {i}/{len(VMAX_LIST)}] v_max={vmax} m/s addestrato   ({_fmt_dt(dt)})\n"
               f"    modello: {model_path}", flush=True)
 
+    return results
+
+
+# ─── 2b) Sweep PPO v_max INTERMEDI fra 1 e 2 m/s (catena di fine-tuning) ───────
+# Il salto di SR più marcato della catena è fra v_max=1 e v_max=2 (es. vento V2:
+# 89,7 → 99,2; SR aggregata 97,1 → 99,7). Per risolvere la curva in quell'intervallo
+# si addestrano modelli a v_max intermedi. Protocollo IDENTICO ai passaggi
+# v2←v1←... della catena originale: fine-tuning puro (resume) dell'ULTIMO modello,
+# LR FINETUNE_LR, 2M step, α 0.8, singola corona. Ancora = modello single v_max=1
+# ESISTENTE (l'architettura Discrete(8*K) è già la sua → resume, non warm-start).
+# Catena:  v1(esistente) → 1.2 → 1.5 → 1.7 → 1.9   (ogni stadio parte dall'ultimo).
+# SOLO training; le inferenze si fanno dopo con la stessa pipeline della tabella.
+VMAX_MID_LIST = [1.2, 1.5, 1.7, 1.9]      # m/s, fra v1 e v2
+
+
+def ppo_intermediate_sweep():
+    # Override via env (usati dal micro-run di calibrazione, non dal run reale):
+    #   MID_VMAX="1.2"  MID_TIMESTEPS=20000  MID_OUTDIR=/tmp/...
+    vmax_list = [float(x) for x in os.environ.get(
+        "MID_VMAX", ",".join(str(v) for v in VMAX_MID_LIST)).split(",") if x.strip()]
+    timesteps = int(os.environ.get("MID_TIMESTEPS", TIMESTEPS_FINETUNE))
+    out_dir = os.environ.get("MID_OUTDIR", str(ROOT / "trained_models"))
+
+    anchor = _find_single_vmax_model(1)
+    if anchor is None:
+        print("  [ERRORE] modello single v_max=1 non trovato: catena non ancorabile.", flush=True)
+        return [("intermedi", "no-base", 0.0)]
+
+    prev_model = str(anchor)
+    results = []
+    print(f"  Ancora catena (single v_max=1): {anchor}")
+    print(f"  v_max intermedi: {vmax_list}   |   timesteps/stadio: {timesteps:,}   |   out: {out_dir}", flush=True)
+
+    for i, vmax in enumerate(vmax_list, 1):
+        # Config identico al ramo single-corona di ppo_sweep, sempre in FINE-TUNING.
+        cfg = load_config(BASE_CONFIG)
+        cfg['agent']['n_velocity_levels'] = K_VELOCITY_LEVELS
+        cfg['agent']['max_velocity'] = float(vmax)
+        cfg['agent'].pop('sensor_range_2', None)
+        cfg['agent']['sensor_range'] = cfg['agent'].get('sensor_range', 20)
+        cfg.setdefault('training', {})['target_kl'] = 0.02
+        cfg['training'].pop('lr_schedule', None)
+        cfg['training']['learning_rate'] = FINETUNE_LR
+        cfg['training']['eval_scenarios'] = []
+        cfg['training']['scenario_curriculum'] = [{'end': timesteps, 'alpha': FINETUNE_ALPHA}]
+
+        cfg_path = str(ROOT / "utils" / f"config_vmax{vmax}.yaml")
+        with open(cfg_path, 'w') as f:
+            yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False)
+
+        levels = [round((j + 1) / K_VELOCITY_LEVELS * vmax, 2) for j in range(K_VELOCITY_LEVELS)]
+        _banner(f"  [PPO MID {i}/{len(vmax_list)}]  v_max = {vmax} m/s   "
+                f"(livelli {levels} m/s, K={K_VELOCITY_LEVELS})")
+        print(f"    tipo      : fine-tuning (lr {FINETUNE_LR:g}, α={FINETUNE_ALPHA:g})")
+        print(f"    timesteps : {timesteps:,}")
+        print(f"    parte da  : {prev_model}", flush=True)
+
+        t0 = time.time()
+        print(f"\n  ▸ training v_max={vmax} m/s ...", flush=True)
+        _, run_dir = train(
+            config_path=cfg_path, output_dir=out_dir,
+            n_envs=N_ENVS, total_timesteps=timesteps, seed=42,
+            data_dir=DATA_DIR,
+            resume_from=prev_model,
+            warm_start_from=None,
+        )
+        model_path = str(run_dir / "models" / "final_model.zip")
+        prev_model = model_path             # catena: il prossimo stadio parte da qui
+        dt = time.time() - t0
+        results.append((f"v_max={vmax}m/s", "addestrato", dt))
+        print(f"\n  ✓ [PPO MID {i}/{len(vmax_list)}] v_max={vmax} m/s addestrato   ({_fmt_dt(dt)})\n"
+              f"    modello: {model_path}", flush=True)
     return results
 
 
@@ -382,13 +454,25 @@ def dualcorona_chain_experiment():
 
 
 def main():
-    stage = os.environ.get("STAGE", "dc2")   # all | fcm | ppo | r10 | dc | dc2
+    stage = os.environ.get("STAGE", "ppo_mid")   # all | fcm | ppo | ppo_mid | r10 | dc | dc2
     t_start = time.time()
     fcm_res, ppo_res = [], []
 
-    _banner("  SWEEP ADATTIVI IN SEQUENZA   (spawn distribuito, no video)", "#")
-    print(f"  Stadi: {'FCM + PPO' if stage=='all' else stage.upper()}   |   "
-          f"episodi/scenario: {N_EPISODES}   |   sorgenti test: SRC107–SRC132")
+    stage_labels = {
+        "all":     "FCM + PPO (v_max 1→5)",
+        "fcm":     "FCM Adam (passo 10→50 m)",
+        "ppo":     "PPO velocità adattiva (v_max 1→5, catena)",
+        "ppo_mid": "PPO v_max INTERMEDI (1.2/1.5/1.7/1.9, catena da v1)",
+        "r10":     "PPO raggio 10 m (modulazione forzata)",
+        "dc":      "Doppia corona (warm-start da v1)",
+        "dc2":     "Doppia corona a ogni v_max (opzione 2)",
+    }
+    _banner("  SWEEP ADATTIVI   (spawn distribuito, no video)", "#")
+    label = stage_labels.get(stage, stage.upper())
+    if stage in ("all", "fcm"):
+        print(f"  Stadio: {label}   |   episodi/scenario: {N_EPISODES}   |   sorgenti test: SRC107–SRC132")
+    else:
+        print(f"  Stadio: {label}   |   SOLO TRAINING (le inferenze si fanno dopo, separatamente)")
 
     if stage in ("all", "fcm"):
         _banner("  ###  STADIO 1/2 — SWEEP FCM ADAM (passo 10→50 m, sensor 50 m)  ###", "#")
@@ -397,6 +481,10 @@ def main():
     if stage in ("all", "ppo"):
         _banner("  ###  STADIO 2/2 — SWEEP PPO VELOCITÀ ADATTIVA (v_max 1→5 m/s, catena)  ###", "#")
         ppo_res = ppo_sweep()
+
+    if stage == "ppo_mid":
+        _banner("  ###  SWEEP PPO v_max INTERMEDI (1.2/1.5/1.7/1.9, catena da v1)  ###", "#")
+        ppo_res = ppo_intermediate_sweep()
 
     if stage == "r10":
         _banner("  ###  ESPERIMENTO RAGGIO 10 m (modulazione forzata)  ###", "#")
