@@ -140,11 +140,35 @@ def missing_packages() -> list:
     return out
 
 
-def install_requirements(root_dir: Path) -> None:
-    """pip install -r requirements.txt nell'interprete corrente."""
-    import subprocess
-    subprocess.run([sys.executable, "-m", "pip", "install", "-r",
-                    str(root_dir / "requirements.txt")], check=True)
+def install_requirements(root_dir: Path, progress_cb=None) -> None:
+    """pip install -r requirements.txt nell'interprete corrente.
+
+    Se `progress_cb` è dato, riceve il nome del pacchetto man mano che pip lo
+    raccoglie/scarica (per aggiornare la didascalia); le righe di pip sono comunque
+    ri-emesse su stdout, così restano visibili nel terminale del launcher."""
+    import subprocess, re
+    cmd = [sys.executable, "-m", "pip", "install", "-r",
+           str(root_dir / "requirements.txt")]
+    if progress_cb is None:
+        subprocess.run(cmd, check=True)
+        return
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, bufsize=1)
+    for line in proc.stdout:
+        sys.stdout.write(line)                        # tee: resta visibile nel terminale
+        s = line.strip()
+        name = None
+        if s.startswith("Collecting "):
+            name = re.split(r"[<>=!~;\[\s]", s[11:].strip(), maxsplit=1)[0]
+        elif s.startswith("Downloading "):
+            tok = s[12:].strip().split()[0]           # nome file del wheel/sdist
+            m = re.match(r"(.+?)-\d", tok)             # 'torch-2.5.0-...' -> 'torch'
+            name = m.group(1) if m else tok
+        if name:
+            progress_cb(name)
+    proc.wait()
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd)
 
 
 def data_present(root_dir: Path) -> bool:
@@ -761,7 +785,7 @@ def main() -> None:
     pct_label = ttk.Label(loading, text="0%")
     pct_label.pack(pady=(8, 0))
 
-    loader = {"dm": None, "error": None, "done": False,
+    loader = {"dm": None, "error": None, "done": False, "installing": False,
               "caption": "Starting…", "pct": 0.0, "env_start": None}
 
     def rep(caption=None, pct=None):
@@ -779,7 +803,19 @@ def main() -> None:
                 req = root_dir / "requirements.txt"
                 if not req.exists():
                     download_file(REQUIREMENTS_URL, req)
-                install_requirements(root_dir)
+                # pip è lungo e (su pipe) non espone la % del singolo download: il
+                # poll() stima una percentuale che AVANZA dai pacchetti visti + tempo,
+                # e la didascalia mostra il pacchetto corrente ("Downloading torch…").
+                loader["pkgs"] = set()
+                loader["install_start"] = time.perf_counter()
+                loader["installing"] = True
+
+                def _pip_cb(pkg):
+                    loader["pkgs"].add(pkg)
+                    rep(f"Downloading {pkg}…")
+
+                install_requirements(root_dir, progress_cb=_pip_cb)
+                loader["installing"] = False
                 importlib.invalidate_caches()
                 if missing_packages():
                     raise RuntimeError("Requirements still missing after pip: "
@@ -854,7 +890,11 @@ def main() -> None:
 
             root.after(200, finalize)          # mostra brevemente il 100%
             return
-        if loader["env_start"] is not None:    # fase ambiente opaca: anima a tempo
+        if loader.get("installing"):           # pip: % stimata da pacchetti + tempo
+            n = len(loader.get("pkgs") or ())
+            el = time.perf_counter() - (loader.get("install_start") or time.perf_counter())
+            pct = 2.0 + 13.0 * (1.0 - 1.0 / (1.0 + (n + el / 15.0) / 12.0))
+        elif loader["env_start"] is not None:  # fase ambiente opaca: anima a tempo
             el = time.perf_counter() - loader["env_start"]
             pct = 75.0 + min(24.0, 24.0 * el / 13.0)
         else:
