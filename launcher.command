@@ -26,11 +26,30 @@ if [[ -z "$PYTHON" ]]; then
   read -n 1 -s -r -p "Premi un tasto per chiudere…"; exit 1
 fi
 
+# Tkinter (tcl/tk) serve alla GUI: senza, live_sim.py si chiuderebbe subito.
+if ! "$PYTHON" -c "import tkinter" >/dev/null 2>&1; then
+  echo "Errore: questo Python non ha il modulo Tkinter (tcl/tk)."
+  echo "Reinstalla Python 3 da python.org (build con Tcl/Tk)."
+  read -n 1 -s -r -p "Premi un tasto per chiudere…"; exit 1
+fi
+
 export HYDRAS_HOME="$HOME_DIR"
 
 TTY_NAME="$(tty 2>/dev/null || true)"
+set +e
 "$PYTHON" "$TARGET" "$@"
+RC=$?
+set -e
 
+# In caso di errore NON chiudere il Terminale: mostra il messaggio e attendi.
+if [[ $RC -ne 0 ]]; then
+  echo
+  echo "*** live_sim.py è uscito con errore (codice $RC). Leggi il messaggio sopra. ***"
+  read -n 1 -s -r -p "Premi un tasto per chiudere…"
+  exit $RC
+fi
+
+# Uscita normale: chiudi la finestra del Terminale.
 if [[ "$TTY_NAME" == /dev/* ]]; then
   ( sleep 0.4
     /usr/bin/osascript \
