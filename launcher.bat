@@ -35,7 +35,7 @@ if not exist "%TARGET%" (
 )
 
 set "PY="
-where python >nul 2>nul && set \"PY=python\"
+where python >nul 2>nul && set "PY=python"
 if not defined PY ( where py >nul 2>nul && set "PY=py" )
 if not defined PY (
   echo Error: Python is not installed. Install Python 3 and try again.
@@ -52,6 +52,14 @@ if errorlevel 1 (
   echo.
   pause
   exit /b 1
+)
+
+rem I modelli sono picklati con numpy 2.x: se questo Python ha numpy 0/1.x (o manca),
+rem aggiornalo, altrimenti il load fallisce con 'No module named numpy._core'.
+"%PY%" -c "import numpy,sys;sys.exit(int(numpy.__version__[0]) in (0,1))" >nul 2>nul
+if errorlevel 1 (
+  echo Ensuring numpy 2.x ^(required by the models^)...
+  "%PY%" -m pip install -U "numpy>=2.0,<3"
 )
 
 set "HYDRAS_HOME=%HOME_DIR%"

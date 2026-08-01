@@ -33,6 +33,13 @@ if ! "$PYTHON" -c "import tkinter" >/dev/null 2>&1; then
   read -n 1 -s -r -p "Premi un tasto per chiudere…"; exit 1
 fi
 
+# I modelli sono picklati con numpy 2.x: se questo Python ha numpy 1.x (o manca),
+# aggiornalo, altrimenti il caricamento fallisce con "No module named 'numpy._core'".
+if ! "$PYTHON" -c "import numpy,sys;sys.exit(int(numpy.__version__[0]) in (0,1))" >/dev/null 2>&1; then
+  echo "Aggiorno numpy a 2.x (richiesto dai modelli)…"
+  "$PYTHON" -m pip install -U "numpy>=2.0,<3" || true
+fi
+
 export HYDRAS_HOME="$HOME_DIR"
 
 TTY_NAME="$(tty 2>/dev/null || true)"
