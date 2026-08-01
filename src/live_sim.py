@@ -357,7 +357,7 @@ def load_field(dm: DataManager, source_id: str, version: str):
 # ─── Motore (indipendente dalla GUI, testabile headless) ─────────────────────
 
 def make_agent_env(dm: DataManager, root_dir: Path, tech: str, version: str,
-                   chunk: int, vmax: int, formation: str, source: str) -> Tuple:
+                   chunk: int, vmax: float, formation: str, source: str) -> Tuple:
     """Costruisce (agente, vec_env, is_fcm, label) per la scelta dell'utente.
 
     - PPO: trova il run (singola/doppia corona, v_max), carica modello +
@@ -386,7 +386,7 @@ def make_agent_env(dm: DataManager, root_dir: Path, tech: str, version: str,
         run_dir = _find_dualcorona_run(trained, vmax=float(vmax), K=5)
         form_lbl = "double ring"
     else:
-        run_dir = _find_velocity_run(trained, vmax=int(vmax), K=5)
+        run_dir = _find_velocity_run(trained, vmax=float(vmax), K=5)
         form_lbl = "single ring"
     if run_dir is None:
         raise RuntimeError(f"No PPO {form_lbl} model for max speed {vmax}.")
@@ -403,7 +403,7 @@ def make_agent_env(dm: DataManager, root_dir: Path, tech: str, version: str,
                         wind_data=None, current_data=None,
                         wind_mapping=WIND_MAPPING, current_mapping=CURRENT_MAPPING)
     model = load_model(str(model_path))
-    label = f"PPO {form_lbl}, v_max={vmax}"
+    label = f"PPO {form_lbl}, v_max={vmax:g}"
     return model, vec_env, False, label
 
 
@@ -484,6 +484,13 @@ def draw_scene(ax, inner, title: str) -> None:
     if inner.state.vx != 0 or inner.state.vy != 0:
         ax.arrow(inner.state.x, inner.state.y, inner.state.vx * 50, inner.state.vy * 50,
                  head_width=30, head_length=20, fc="#0b3d91", ec="#0b3d91", zorder=5)
+        # Velocità del passo corrente (modulo di (vx, vy), in m/s) accanto al pallino.
+        speed = float(np.hypot(inner.state.vx, inner.state.vy))
+        ax.annotate(f"{speed:.2f} m/s", (inner.state.x, inner.state.y),
+                    textcoords="offset points", xytext=(12, 10),
+                    fontsize=9, fontweight="bold", color="#0b3d91",
+                    bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="#0b3d91",
+                              alpha=0.8), zorder=8)
 
     # Sorgente (stella gialla) e raggio di successo.
     sx, sy = inner.source_position
@@ -536,10 +543,15 @@ def build_gui(root, dm, fps: float = 15.0) -> None:
         cb.grid(row=0, column=col * 2 + 1, padx=(0, 6))
         return cb
 
+    # v_max selezionabili: gli stadi intermedi 1.2–1.9 esistono solo a corona
+    # SINGOLA (a doppia corona i modelli sono solo interi 1–5).
+    SPEEDS_SINGLE = ["1", "1.2", "1.5", "1.7", "1.9", "2", "3", "4", "5"]
+    SPEEDS_DOUBLE = ["1", "2", "3", "4", "5"]
+
     tech_cb = combo(ctrl, "Technology", tech_var, ["PPO", "FCM"], 0)
     ver_cb = combo(ctrl, "Wind", ver_var, VERSIONS, 1)
     chunk_cb = combo(ctrl, "Time Chunk", chunk_var, list(CHUNK_BY_LABEL.keys()), 2)
-    vmax_cb = combo(ctrl, "Max Speed", vmax_var, ["1", "2", "3", "4", "5"], 3)
+    vmax_cb = combo(ctrl, "Max Speed", vmax_var, SPEEDS_SINGLE, 3)
     form_cb = combo(ctrl, "Formation", form_var, ["Single", "Double"], 4)
 
     # Centro: la simulazione live occupa la maggior parte della finestra. Il canvas
@@ -585,6 +597,18 @@ def build_gui(root, dm, fps: float = 15.0) -> None:
 
     tech_cb.bind("<<ComboboxSelected>>", sync_ppo_visibility)
 
+    def sync_speed_options(*_):
+        """Adatta i valori di Max Speed alla formazione: gli intermedi 1.2–1.9
+        solo a corona singola. Se il valore corrente non è più valido, ripristina
+        il default."""
+        vals = SPEEDS_SINGLE if form_var.get() == "Single" else SPEEDS_DOUBLE
+        vmax_cb.configure(values=vals)
+        if vmax_var.get() not in vals:
+            vmax_var.set(DEFAULTS["vmax"])
+
+    form_cb.bind("<<ComboboxSelected>>", sync_speed_options)
+    sync_speed_options()
+
     state = {"vec_env": None, "obs": None, "agent": None, "is_fcm": False,
              "label": "", "running": False, "steps": 0, "dm": dm}
 
@@ -610,6 +634,7 @@ def build_gui(root, dm, fps: float = 15.0) -> None:
         chunk_var.set(DEFAULTS["chunk"]); vmax_var.set(DEFAULTS["vmax"])
         form_var.set(DEFAULTS["formation"])
         sync_ppo_visibility()
+        sync_speed_options()
         set_controls(True)
 
     def finish(info: dict):
@@ -651,7 +676,7 @@ def build_gui(root, dm, fps: float = 15.0) -> None:
         tech = tech_var.get()
         version = ver_var.get()
         chunk = CHUNK_BY_LABEL[chunk_var.get()]
-        vmax = int(vmax_var.get())
+        vmax = float(vmax_var.get())
         formation = form_var.get()
 
         source = pick_source(state["dm"], version, rng)
