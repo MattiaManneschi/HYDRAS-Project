@@ -470,6 +470,50 @@ def resolve_termination(info: dict) -> str:
     return "timeout"
 
 
+# ─── Tema scuro ──────────────────────────────────────────────────────────────
+DARK_BG     = "#1b1f2a"   # sfondo finestra / pannelli / figura
+DARK_PANEL  = "#232a3a"   # bottoni / bordi (leggermente più chiari)
+DARK_FIELD  = "#2a3244"   # sfondo dei menu a tendina
+DARK_FG     = "#e6e9ef"   # testo principale
+DARK_MUTED  = "#95a0b3"   # testo/assi secondari
+DARK_ACCENT = "#3b82f6"   # blu accento (bottoni attivi, barra di caricamento)
+
+
+def _apply_dark_theme(root) -> None:
+    """Tema scuro coerente per i widget ttk. Usa il tema 'clam' perché, a
+    differenza di 'aqua'/'vista', è completamente ricolorabile."""
+    from tkinter import ttk
+    root.configure(bg=DARK_BG)
+    style = ttk.Style()
+    try:
+        style.theme_use("clam")
+    except Exception:
+        pass
+    style.configure(".", background=DARK_BG, foreground=DARK_FG,
+                    fieldbackground=DARK_FIELD, bordercolor=DARK_PANEL,
+                    lightcolor=DARK_PANEL, darkcolor=DARK_BG)
+    style.configure("TFrame", background=DARK_BG)
+    style.configure("TLabel", background=DARK_BG, foreground=DARK_FG)
+    style.configure("TButton", background=DARK_PANEL, foreground=DARK_FG,
+                    bordercolor=DARK_PANEL)
+    style.map("TButton",
+              background=[("active", DARK_ACCENT), ("pressed", DARK_ACCENT),
+                          ("disabled", DARK_BG)],
+              foreground=[("active", "#ffffff"), ("disabled", DARK_MUTED)])
+    style.configure("TCombobox", fieldbackground=DARK_FIELD, background=DARK_PANEL,
+                    foreground=DARK_FG, arrowcolor=DARK_FG, bordercolor=DARK_PANEL)
+    style.map("TCombobox",
+              fieldbackground=[("readonly", DARK_FIELD), ("disabled", DARK_BG)],
+              foreground=[("readonly", DARK_FG), ("disabled", DARK_MUTED)])
+    style.configure("Horizontal.TProgressbar", background=DARK_ACCENT,
+                    troughcolor=DARK_FIELD, bordercolor=DARK_PANEL)
+    # La lista a discesa del Combobox è un widget Tk classico (non ttk).
+    root.option_add("*TCombobox*Listbox.background", DARK_FIELD)
+    root.option_add("*TCombobox*Listbox.foreground", DARK_FG)
+    root.option_add("*TCombobox*Listbox.selectBackground", DARK_ACCENT)
+    root.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
+
+
 def draw_scene(ax, inner, title: str) -> None:
     """Disegna la scena corrente nell'axes dato, con lo stesso stile dei plot
     standard del progetto (mare azzurro, terra bianca, plume YlOrRd) — cfr.
@@ -528,13 +572,17 @@ def draw_scene(ax, inner, title: str) -> None:
     ax.add_patch(Circle((sx, sy), inner.config.source_distance_threshold,
                         fill=False, color="red", linestyle="--", zorder=7))
 
-    ax.set_xlabel("X (m)")
-    ax.set_ylabel("Y (m)")
-    ax.set_title(title)
+    ax.set_xlabel("X (m)", color=DARK_FG)
+    ax.set_ylabel("Y (m)", color=DARK_FG)
+    ax.set_title(title, color=DARK_FG)
+    ax.tick_params(colors=DARK_MUTED)
+    for _sp in ax.spines.values():
+        _sp.set_color(DARK_MUTED)
     ax.set_aspect("equal")
     ax.set_xlim(float(xc[0]), float(xc[-1]))
     ax.set_ylim(float(yc[0]), float(yc[-1]))
-    ax.legend(loc="upper right", fontsize=8)
+    ax.legend(loc="upper right", fontsize=8, facecolor=DARK_PANEL,
+              edgecolor=DARK_MUTED, labelcolor=DARK_FG)
 
 
 # ─── GUI ─────────────────────────────────────────────────────────────────────
@@ -553,6 +601,7 @@ def build_gui(root, dm, fps: float = 15.0) -> None:
     delay_ms = int(1000.0 / max(fps, 1.0))
 
     root.title("HYDRAS — Live Simulation")
+    _apply_dark_theme(root)
     root.rowconfigure(1, weight=1)
     root.columnconfigure(0, weight=1)
 
@@ -586,9 +635,10 @@ def build_gui(root, dm, fps: float = 15.0) -> None:
     # Centro: la simulazione live occupa la maggior parte della finestra. Il canvas
     # viene messo in griglia solo a caricamento completato (finalize_loading);
     # durante il caricamento la stessa cella (row 1) ospita la schermata di attesa.
-    fig = Figure(figsize=(9, 7))
+    fig = Figure(figsize=(9, 7), facecolor=DARK_BG)
     ax = fig.add_subplot(111)
     canvas = FigureCanvasTkAgg(fig, master=root)
+    canvas.get_tk_widget().configure(bg=DARK_BG, highlightthickness=0)
     root.rowconfigure(1, weight=1)
     root.columnconfigure(0, weight=1)
 
@@ -597,10 +647,11 @@ def build_gui(root, dm, fps: float = 15.0) -> None:
         reset. Imposta il facecolor in modo esplicito perché ax.clear() NON lo
         ripristina — senza questo, dopo un episodio lo sfondo resterebbe blu."""
         ax.clear()
-        ax.set_facecolor("white")
-        ax.set_xticks([])
-        ax.set_yticks([])
-        ax.set_title("No simulation running")
+        ax.set_facecolor(DARK_BG)
+        ax.set_xticks([]); ax.set_yticks([])
+        for _sp in ax.spines.values():
+            _sp.set_color(DARK_PANEL)
+        ax.set_title("No simulation running", color=DARK_MUTED)
         canvas.draw_idle()
 
     # Basso: pulsanti Avvia / Annulla.
@@ -778,6 +829,7 @@ def main() -> None:
     root = tk.Tk()
     root.title("HYDRAS — Startup")
     root.geometry("900x680")
+    _apply_dark_theme(root)
     root.rowconfigure(1, weight=1)
     root.columnconfigure(0, weight=1)
 
