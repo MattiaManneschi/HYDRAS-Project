@@ -143,9 +143,9 @@ def missing_packages() -> list:
 def install_requirements(root_dir: Path, progress_cb=None) -> None:
     """pip install -r requirements.txt nell'interprete corrente.
 
-    Se `progress_cb` è dato, riceve il nome del pacchetto man mano che pip lo
-    raccoglie/scarica (per aggiornare la didascalia); le righe di pip sono comunque
-    ri-emesse su stdout, così restano visibili nel terminale del launcher."""
+    Se `progress_cb` è dato, riceve una stringa di stato ("Downloading torch…",
+    "Building X…", "Installing packages…") per aggiornare la didascalia; le righe di
+    pip sono comunque ri-emesse su stdout, così restano visibili nel terminale."""
     import subprocess, re
     cmd = [sys.executable, "-m", "pip", "install", "-r",
            str(root_dir / "requirements.txt")]
@@ -157,15 +157,20 @@ def install_requirements(root_dir: Path, progress_cb=None) -> None:
     for line in proc.stdout:
         sys.stdout.write(line)                        # tee: resta visibile nel terminale
         s = line.strip()
-        name = None
+        status = None
         if s.startswith("Collecting "):
             name = re.split(r"[<>=!~;\[\s]", s[11:].strip(), maxsplit=1)[0]
+            status = f"Downloading {name}…"
         elif s.startswith("Downloading "):
             tok = s[12:].strip().split()[0]           # nome file del wheel/sdist
             m = re.match(r"(.+?)-\d", tok)             # 'torch-2.5.0-...' -> 'torch'
-            name = m.group(1) if m else tok
-        if name:
-            progress_cb(name)
+            status = f"Downloading {m.group(1) if m else tok}…"
+        elif s.startswith("Building wheel for "):
+            status = f"Building {s[19:].split()[0]}…"
+        elif s.startswith("Installing collected packages"):
+            status = "Installing packages…"           # fase finale: niente più download
+        if status:
+            progress_cb(status)
     proc.wait()
     if proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, cmd)
@@ -810,9 +815,9 @@ def main() -> None:
                 loader["install_start"] = time.perf_counter()
                 loader["installing"] = True
 
-                def _pip_cb(pkg):
-                    loader["pkgs"].add(pkg)
-                    rep(f"Downloading {pkg}…")
+                def _pip_cb(status):
+                    loader["pkgs"].add(status)        # stati distinti ≈ progresso (per la %)
+                    rep(status)
 
                 install_requirements(root_dir, progress_cb=_pip_cb)
                 loader["installing"] = False
