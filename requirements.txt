@@ -3,7 +3,7 @@
 
 # Core ML
 torch>=2.0.0
-numpy>=1.24.0
+numpy>=2.0.0,<3   # numpy 2.x OBBLIGATORIO: i modelli/vec_normalize sono picklati con numpy 2.x (numpy._core)
 scipy>=1.10.0
 
 # Reinforcement Learning
