@@ -23,7 +23,7 @@ if not exist "%TARGET%" (
   if !errorlevel! equ 0 (
     curl -fSL -o "%TARGET%" "%RAW_URL%"
   ) else (
-    powershell -NoProfile -Command "Invoke-WebRequest -Uri '%RAW_URL%' -OutFile '%TARGET%'"
+    powershell -NoProfile -Command \"Invoke-WebRequest -Uri '%RAW_URL%' -OutFile '%TARGET%'\"
   )
 )
 
@@ -35,7 +35,7 @@ if not exist "%TARGET%" (
 )
 
 set "PY="
-where python >nul 2>nul && set "PY=python"
+where python >nul 2>nul && set \"PY=python\"
 if not defined PY ( where py >nul 2>nul && set "PY=py" )
 if not defined PY (
   echo Error: Python is not installed. Install Python 3 and try again.
@@ -44,5 +44,22 @@ if not defined PY (
   exit /b 1
 )
 
+rem Tkinter (tcl/tk) serve alla GUI: senza, live_sim.py si chiude subito.
+"%PY%" -c "import tkinter" >nul 2>nul
+if errorlevel 1 (
+  echo Error: this Python has no Tkinter ^(tcl/tk^) module.
+  echo Reinstall Python from python.org keeping "tcl/tk and IDLE" checked.
+  echo.
+  pause
+  exit /b 1
+)
+
 set "HYDRAS_HOME=%HOME_DIR%"
 "%PY%" "%TARGET%" %*
+set "RC=%errorlevel%"
+if not "%RC%"=="0" (
+  echo.
+  echo *** live_sim.py exited with error ^(code %RC%^). Read the message above. ***
+  echo.
+  pause
+)
