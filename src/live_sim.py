@@ -386,7 +386,8 @@ def load_field(dm: DataManager, source_id: str, version: str):
 # ─── Motore (indipendente dalla GUI, testabile headless) ─────────────────────
 
 def make_agent_env(dm: DataManager, root_dir: Path, tech: str, version: str,
-                   chunk: int, vmax: float, formation: str, source: str) -> Tuple:
+                   chunk: int, vmax: float, formation: str, source: str,
+                   fcm_lr: float = FCM_LR) -> Tuple:
     """Costruisce (agente, vec_env, is_fcm, label) per la scelta dell'utente.
 
     - PPO: trova il run (singola/doppia corona, v_max), carica modello +
@@ -404,9 +405,9 @@ def make_agent_env(dm: DataManager, root_dir: Path, tech: str, version: str,
         vec_env = build_env_fcm(env_cfg, field, use_masking=MASKABLE_PPO_AVAILABLE,
                                 data_manager=dm, wind_mapping=WIND_MAPPING,
                                 current_mapping=CURRENT_MAPPING)
-        agent = AdamFCMAgent(sensor_range=FCM_SENSOR_RANGE, lr=FCM_LR)
+        agent = AdamFCMAgent(sensor_range=FCM_SENSOR_RANGE, lr=fcm_lr)
         agent.reset()
-        label = f"FCM Adam (lr={int(FCM_LR)} m)"
+        label = f"FCM Adam (lr={int(fcm_lr)} m)"
         return agent, vec_env, True, label
 
     # PPO ---------------------------------------------------------------------
@@ -494,19 +495,42 @@ def _apply_dark_theme(root) -> None:
                     lightcolor=DARK_PANEL, darkcolor=DARK_BG)
     style.configure("TFrame", background=DARK_BG)
     style.configure("TLabel", background=DARK_BG, foreground=DARK_FG)
-    style.configure("TButton", background=DARK_PANEL, foreground=DARK_FG,
-                    bordercolor=DARK_PANEL)
-    style.map("TButton",
-              background=[("active", DARK_ACCENT), ("pressed", DARK_ACCENT),
-                          ("disabled", DARK_BG)],
-              foreground=[("active", "#ffffff"), ("disabled", DARK_MUTED)])
-    style.configure("TCombobox", fieldbackground=DARK_FIELD, background=DARK_PANEL,
-                    foreground=DARK_FG, arrowcolor=DARK_FG, bordercolor=DARK_PANEL)
+    style.configure("TCombobox", fieldbackground=DARK_FIELD, background=DARK_FIELD,
+                    foreground=DARK_FG, arrowcolor=DARK_MUTED, bordercolor=DARK_PANEL,
+                    padding=(8, 6), relief="flat",
+                    selectbackground=DARK_FIELD, selectforeground=DARK_FG)
     style.map("TCombobox",
-              fieldbackground=[("readonly", DARK_FIELD), ("disabled", DARK_BG)],
-              foreground=[("readonly", DARK_FG), ("disabled", DARK_MUTED)])
+              fieldbackground=[("readonly", DARK_FIELD), ("focus", DARK_FIELD),
+                               ("active", DARK_FIELD), ("disabled", DARK_BG)],
+              background=[("readonly", DARK_FIELD), ("active", DARK_FIELD),
+                          ("pressed", DARK_FIELD), ("disabled", DARK_BG)],
+              foreground=[("readonly", DARK_FG), ("disabled", DARK_MUTED)],
+              arrowcolor=[("disabled", DARK_PANEL), ("pressed", DARK_MUTED),
+                          ("active", DARK_MUTED), ("focus", DARK_MUTED),
+                          ("readonly", DARK_MUTED)],
+              selectbackground=[("readonly", DARK_FIELD)],
+              selectforeground=[("readonly", DARK_FG)])
     style.configure("Horizontal.TProgressbar", background=DARK_ACCENT,
                     troughcolor=DARK_FIELD, bordercolor=DARK_PANEL)
+
+    # ── Stili "minimal" per la barra configurazioni ──────────────────────────
+    style.configure("Card.TFrame", background=DARK_PANEL)
+    style.configure("Field.TLabel", background=DARK_PANEL, foreground=DARK_MUTED,
+                    font=("", 9))
+    style.configure("Muted.TLabel", background=DARK_BG, foreground=DARK_MUTED)
+    style.configure("TButton", background=DARK_PANEL, foreground=DARK_FG,
+                    padding=(16, 7), relief="flat", borderwidth=0)
+    style.map("TButton",
+              background=[("active", DARK_FIELD), ("pressed", DARK_FIELD),
+                          ("disabled", DARK_BG)],
+              foreground=[("disabled", DARK_MUTED)])
+    style.configure("Accent.TButton", background=DARK_ACCENT, foreground="#ffffff",
+                    padding=(20, 7), relief="flat", borderwidth=0,
+                    focuscolor=DARK_ACCENT)
+    style.map("Accent.TButton",
+              background=[("active", "#2f6fd0"), ("pressed", "#2a63bb"),
+                          ("disabled", DARK_FIELD)],
+              foreground=[("disabled", DARK_MUTED)])
     # La lista a discesa del Combobox è un widget Tk classico (non ttk).
     root.option_add("*TCombobox*Listbox.background", DARK_FIELD)
     root.option_add("*TCombobox*Listbox.foreground", DARK_FG)
@@ -605,8 +629,10 @@ def build_gui(root, dm, fps: float = 15.0) -> None:
     root.rowconfigure(1, weight=1)
     root.columnconfigure(0, weight=1)
 
-    ctrl = ttk.Frame(root, padding=10)
-    ctrl.grid(row=0, column=0, sticky="ew")
+    # Barra-configurazioni come "card" (pannello più chiaro, staccato dai bordi).
+    ctrl = ttk.Frame(root, style="Card.TFrame", padding=(18, 14))
+    ctrl.grid(row=0, column=0, sticky="ew", padx=14, pady=(14, 8))
+    ctrl.columnconfigure(5, weight=1)     # spacer: spinge i bottoni a destra
 
     tech_var = tk.StringVar(value=DEFAULTS["tech"])
     ver_var = tk.StringVar(value=DEFAULTS["version"])
@@ -614,23 +640,33 @@ def build_gui(root, dm, fps: float = 15.0) -> None:
     vmax_var = tk.StringVar(value=DEFAULTS["vmax"])
     form_var = tk.StringVar(value=DEFAULTS["formation"])
 
-    def combo(parent, label, var, values, col):
-        ttk.Label(parent, text=label).grid(row=0, column=col * 2, sticky="w", padx=(8, 2))
-        cb = ttk.Combobox(parent, textvariable=var, values=values, state="readonly",
-                          width=9)
-        cb.grid(row=0, column=col * 2 + 1, padx=(0, 6))
-        return cb
+    def field(col, label, var, values):
+        """Un campo = etichetta minuscola in alto + menu a tendina sotto, come celle
+        affiancate nella barra. Ritorna (cella, combobox)."""
+        cell = ttk.Frame(ctrl, style="Card.TFrame")
+        cell.grid(row=0, column=col, padx=(0, 22), sticky="w")
+        ttk.Label(cell, text=label.upper(), style="Field.TLabel").pack(anchor="w")
+        cb = ttk.Combobox(cell, textvariable=var, values=values, state="readonly",
+                          width=11)
+        cb.pack(anchor="w", pady=(4, 0))
+        return cell, cb
 
     # v_max selezionabili: gli stadi intermedi 1.2–1.9 esistono solo a corona
     # SINGOLA (a doppia corona i modelli sono solo interi 1–5).
     SPEEDS_SINGLE = ["1", "1.2", "1.5", "1.7", "1.9", "2", "3", "4", "5"]
     SPEEDS_DOUBLE = ["1", "2", "3", "4", "5"]
 
-    tech_cb = combo(ctrl, "Technology", tech_var, ["PPO", "FCM"], 0)
-    ver_cb = combo(ctrl, "Wind", ver_var, VERSIONS, 1)
-    chunk_cb = combo(ctrl, "Time Chunk", chunk_var, list(CHUNK_BY_LABEL.keys()), 2)
-    vmax_cb = combo(ctrl, "Max Speed", vmax_var, SPEEDS_SINGLE, 3)
-    form_cb = combo(ctrl, "Formation", form_var, ["Single", "Double"], 4)
+    tech_cell, tech_cb = field(0, "Technology", tech_var, ["PPO", "FCM"])
+    ver_cell, ver_cb = field(1, "Wind", ver_var, VERSIONS)
+    chunk_cell, chunk_cb = field(2, "Time Chunk", chunk_var, list(CHUNK_BY_LABEL.keys()))
+    vmax_cell, vmax_cb = field(3, "Max Speed", vmax_var, SPEEDS_SINGLE)
+    form_cell, form_cb = field(4, "Formation", form_var, ["Single", "Double"])
+
+    # FCM: il "learning rate" (passo di Adam, in metri) è il corrispettivo del v_max
+    # del PPO. Compare solo con Technology == FCM, nella stessa cella di Max Speed.
+    FCM_LRS = ["10", "20", "30", "40", "50"]
+    lr_var = tk.StringVar(value=str(int(FCM_LR)))
+    lr_cell, lr_cb = field(3, "Step (lr, m)", lr_var, FCM_LRS)
 
     # Centro: la simulazione live occupa la maggior parte della finestra. Il canvas
     # viene messo in griglia solo a caricamento completato (finalize_loading);
@@ -654,28 +690,31 @@ def build_gui(root, dm, fps: float = 15.0) -> None:
         ax.set_title("No simulation running", color=DARK_MUTED)
         canvas.draw_idle()
 
-    # Basso: pulsanti Avvia / Annulla.
-    btns = ttk.Frame(root, padding=(10, 6))
-    btns.grid(row=2, column=0, sticky="ew")
-    start_btn = ttk.Button(btns, text="Start")
-    start_btn.grid(row=0, column=0, padx=(0, 8))
+    # Pulsanti a destra nella stessa barra (l'etichetta vuota li allinea coi menu).
+    btns = ttk.Frame(ctrl, style="Card.TFrame")
+    btns.grid(row=0, column=6, sticky="e")
+    ttk.Label(btns, text=" ", style="Field.TLabel").grid(row=0, column=0, columnspan=2)
+    start_btn = ttk.Button(btns, text="Start", style="Accent.TButton")
+    start_btn.grid(row=1, column=0, padx=(0, 8), pady=(4, 0))
     cancel_btn = ttk.Button(btns, text="Cancel")
-    cancel_btn.grid(row=0, column=1)
+    cancel_btn.grid(row=1, column=1, pady=(4, 0))
 
     status = ttk.Label(root, text="Ready — choose the options and press Start.",
-                       padding=(10, 4))
-    status.grid(row=3, column=0, sticky="w")
+                       style="Muted.TLabel", padding=(16, 6))
+    status.grid(row=2, column=0, sticky="w")
 
-    # I widget PPO-only compaiono solo quando Tecnologia == PPO.
-    ppo_widgets = [w for w in ctrl.grid_slaves()
-                   if int(w.grid_info()["column"]) in (6, 7, 8, 9)]
+    # Campi dipendenti dalla tecnologia: PPO → Max Speed + Formation; FCM → Step (lr).
+    # vmax_cell e lr_cell condividono la colonna 3 (mutuamente esclusivi).
+    def sync_tech_fields(*_):
+        if tech_var.get() == "PPO":
+            lr_cell.grid_remove()
+            vmax_cell.grid(); form_cell.grid()
+        else:
+            vmax_cell.grid_remove(); form_cell.grid_remove()
+            lr_cell.grid()
 
-    def sync_ppo_visibility(*_):
-        show = tech_var.get() == "PPO"
-        for w in ppo_widgets:
-            (w.grid() if show else w.grid_remove())
-
-    tech_cb.bind("<<ComboboxSelected>>", sync_ppo_visibility)
+    tech_cb.bind("<<ComboboxSelected>>", sync_tech_fields)
+    sync_tech_fields()     # init: default PPO → nasconde il campo lr (stessa cella)
 
     def sync_speed_options(*_):
         """Adatta i valori di Max Speed alla formazione: gli intermedi 1.2–1.9
@@ -694,7 +733,7 @@ def build_gui(root, dm, fps: float = 15.0) -> None:
 
     def set_controls(enabled: bool):
         st = "readonly" if enabled else "disabled"
-        for cb in (tech_cb, ver_cb, chunk_cb, vmax_cb, form_cb):
+        for cb in (tech_cb, ver_cb, chunk_cb, vmax_cb, form_cb, lr_cb):
             cb.configure(state=st)
         start_btn.configure(state=("normal" if enabled else "disabled"))
 
@@ -709,11 +748,11 @@ def build_gui(root, dm, fps: float = 15.0) -> None:
     def reset_program():
         """Ripristina tutte le configurazioni ai default e riabilita i controlli."""
         cleanup_env()
-        state.update(running=False, obs=None, agent=None, steps=0)
+        state.update(running=False, obs=None, agent=None, steps=0, load_token=None)
         tech_var.set(DEFAULTS["tech"]); ver_var.set(DEFAULTS["version"])
         chunk_var.set(DEFAULTS["chunk"]); vmax_var.set(DEFAULTS["vmax"])
-        form_var.set(DEFAULTS["formation"])
-        sync_ppo_visibility()
+        form_var.set(DEFAULTS["formation"]); lr_var.set(str(int(FCM_LR)))
+        sync_tech_fields()
         sync_speed_options()
         set_controls(True)
 
@@ -758,6 +797,7 @@ def build_gui(root, dm, fps: float = 15.0) -> None:
         chunk = CHUNK_BY_LABEL[chunk_var.get()]
         vmax = float(vmax_var.get())
         formation = form_var.get()
+        fcm_lr = float(lr_var.get())
 
         source = pick_source(state["dm"], version, rng)
         if source is None:
@@ -767,22 +807,48 @@ def build_gui(root, dm, fps: float = 15.0) -> None:
         set_controls(False)
         status.configure(text=f"Loading {tech} … scenario {source} {version} "
                               f"{chunk_var.get()}")
-        root.update_idletasks()
 
-        try:
-            agent, vec_env, is_fcm, label = make_agent_env(
-                state["dm"], root_dir, tech, version, chunk, vmax, formation, source)
-        except Exception as e:
-            status.configure(text=f"Loading error: {e}")
-            set_controls(True)
-            return
+        # Caricamento modello/ambiente in un THREAD di sfondo: così il click sul
+        # bottone ha feedback immediato e la GUI non si "congela" durante il load
+        # (make_agent_env non tocca Tk/matplotlib → sicuro fuori dal thread GUI).
+        token = object()
+        state["load_token"] = token             # invalidato da Cancel/reset
+        result = {}
 
-        state.update(vec_env=vec_env, agent=agent, is_fcm=is_fcm,
-                     label=f"{label} · {source} {version} {chunk_var.get()}",
-                     steps=0, running=True)
-        state["obs"] = vec_env.reset()
-        status.configure(text=f"Running: {state['label']}")
-        root.after(delay_ms, step)
+        def _load():
+            try:
+                result["value"] = make_agent_env(
+                    state["dm"], root_dir, tech, version, chunk, vmax, formation,
+                    source, fcm_lr=fcm_lr)
+            except Exception as e:              # marshallato nel poll (thread GUI)
+                result["error"] = e
+
+        def _await_load():
+            if state.get("load_token") is not token:   # Cancel/nuovo Start nel frattempo
+                v = result.get("value")
+                if v is not None:
+                    try:
+                        v[1].close()
+                    except Exception:
+                        pass
+                return
+            if "error" in result:
+                status.configure(text=f"Loading error: {result['error']}")
+                set_controls(True)
+                return
+            if "value" not in result:
+                root.after(50, _await_load)     # ancora in caricamento
+                return
+            agent, vec_env, is_fcm, label = result["value"]
+            state.update(vec_env=vec_env, agent=agent, is_fcm=is_fcm,
+                         label=f"{label} · {source} {version} {chunk_var.get()}",
+                         steps=0, running=True)
+            state["obs"] = vec_env.reset()
+            status.configure(text=f"Running: {state['label']}")
+            root.after(delay_ms, step)
+
+        threading.Thread(target=_load, daemon=True).start()
+        root.after(50, _await_load)
 
     def cancel():
         """Interrompe la simulazione (se in corso) e ripristina le configurazioni.
@@ -802,10 +868,10 @@ def build_gui(root, dm, fps: float = 15.0) -> None:
         root.destroy()
 
     root.protocol("WM_DELETE_WINDOW", on_close)
-    sync_ppo_visibility()
+    sync_tech_fields()
 
     # GUI pronta: mostra il canvas, abilita i controlli, schermata inerte.
-    canvas.get_tk_widget().grid(row=1, column=0, sticky="nsew")
+    canvas.get_tk_widget().grid(row=1, column=0, sticky="nsew", padx=14, pady=(0, 6))
     set_controls(True)
     show_idle()
     status.configure(text="Ready — choose the options and press Start.")
