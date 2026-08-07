@@ -10,11 +10,11 @@ Drop-down menus:
   - Technology  : PPO  or  FCM Adam
   - Wind        : V0 / V1 / V2 / V3
   - Time Chunk  : Q1/4 / Q1/2 / Q3/4
-  - Max Speed   : 1..5                (PPO only)
+  - Max Speed   : 0.1..5              (PPO only)
   - Formation   : Single / Double ring   (PPO only)
 
-Once Wind and Time Chunk are set, a random source is picked for that scenario. FCM always uses FCM Adam in its best configuration (lr=40 m,
-sensor_range=50 m).
+Once Wind and Time Chunk are set, a random source is picked for that scenario. FCM
+uses Adam with a selectable step (lr, in metres; default 40) and sensor_range=50 m.
 
 The code has two parts:
   - the ENGINE (make_agent_env / step_once / draw_scene): builds agent+env, steps
@@ -186,17 +186,22 @@ def data_present(root_dir: Path) -> bool:
     return len(conc) > 0 and len(cur) >= 4 and len(wind) >= 4
 
 
+# v_max coperti dai modelli PPO: singola e doppia corona coprono ora l'intero
+# range (basse 0.1/0.4/0.7, intermedie 1.2–1.9 e interi 1–5).
+PPO_VMAX = (0.1, 0.4, 0.7, 1, 1.2, 1.5, 1.7, 1.9, 2, 3, 4, 5)
+
+
 def missing_models(root_dir: Path) -> list:
     """Combinazioni (formazione, v_max) per cui manca il modello PPO."""
     trained = root_dir / "trained_models"
     miss = []
-    for vmax in (1, 2, 3, 4, 5):
-        s = _find_velocity_run(trained, vmax, 5)
+    for vmax in PPO_VMAX:
+        s = _find_velocity_run(trained, float(vmax), 5)
         if s is None or not (s / "models" / "final_model.zip").exists():
-            miss.append(f"singola v{vmax}")
+            miss.append(f"singola v{vmax:g}")
         d = _find_dualcorona_run(trained, float(vmax), 5)
         if d is None or not (d / "models" / "final_model.zip").exists():
-            miss.append(f"doppia v{vmax}")
+            miss.append(f"doppia v{vmax:g}")
     return miss
 
 
@@ -400,7 +405,7 @@ def make_agent_env(dm: DataManager, root_dir: Path, tech: str, version: str,
         raise RuntimeError(f"Campo non caricabile per {source} {version}.")
 
     if tech == "FCM":
-        config = load_config(str(root_dir / "utils" / "config_base_no_wind_reward.yaml"))
+        config = load_config(str(root_dir / "utils" / "config" / "config_base_no_wind_reward.yaml"))
         env_cfg = make_env_config(config, chunk_id=chunk)
         vec_env = build_env_fcm(env_cfg, field, use_masking=MASKABLE_PPO_AVAILABLE,
                                 data_manager=dm, wind_mapping=WIND_MAPPING,
@@ -651,10 +656,10 @@ def build_gui(root, dm, fps: float = 15.0) -> None:
         cb.pack(anchor="w", pady=(4, 0))
         return cell, cb
 
-    # v_max selezionabili: gli stadi intermedi 1.2–1.9 esistono solo a corona
-    # SINGOLA (a doppia corona i modelli sono solo interi 1–5).
-    SPEEDS_SINGLE = ["1", "1.2", "1.5", "1.7", "1.9", "2", "3", "4", "5"]
-    SPEEDS_DOUBLE = ["1", "2", "3", "4", "5"]
+    # v_max selezionabili: singola e doppia corona coprono ora l'intero range
+    # (basse 0.1/0.4/0.7, intermedie 1.2–1.9 e interi 1–5).
+    SPEEDS_SINGLE = ["0.1", "0.4", "0.7", "1", "1.2", "1.5", "1.7", "1.9", "2", "3", "4", "5"]
+    SPEEDS_DOUBLE = ["0.1", "0.4", "0.7", "1", "1.2", "1.5", "1.7", "1.9", "2", "3", "4", "5"]
 
     tech_cell, tech_cb = field(0, "Technology", tech_var, ["PPO", "FCM"])
     ver_cell, ver_cb = field(1, "Wind", ver_var, VERSIONS)
@@ -664,7 +669,7 @@ def build_gui(root, dm, fps: float = 15.0) -> None:
 
     # FCM: il "learning rate" (passo di Adam, in metri) è il corrispettivo del v_max
     # del PPO. Compare solo con Technology == FCM, nella stessa cella di Max Speed.
-    FCM_LRS = ["10", "20", "30", "40", "50"]
+    FCM_LRS = ["1", "4", "7", "10", "12", "15", "17", "19", "20", "30", "40", "50"]
     lr_var = tk.StringVar(value=str(int(FCM_LR)))
     lr_cell, lr_cb = field(3, "Step (lr, m)", lr_var, FCM_LRS)
 
@@ -717,9 +722,9 @@ def build_gui(root, dm, fps: float = 15.0) -> None:
     sync_tech_fields()     # init: default PPO → nasconde il campo lr (stessa cella)
 
     def sync_speed_options(*_):
-        """Adatta i valori di Max Speed alla formazione: gli intermedi 1.2–1.9
-        solo a corona singola. Se il valore corrente non è più valido, ripristina
-        il default."""
+        """Adatta i valori di Max Speed alla formazione. Singola e doppia corona
+        coprono lo stesso range completo (0.1–5); se il valore corrente non è
+        valido per la formazione scelta, ripristina il default."""
         vals = SPEEDS_SINGLE if form_var.get() == "Single" else SPEEDS_DOUBLE
         vmax_cb.configure(values=vals)
         if vmax_var.get() not in vals:
