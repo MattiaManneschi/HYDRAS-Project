@@ -15,6 +15,24 @@ simulations of the Cecina bay.
 3. Configure the scenario and the agent with the drop-down menus (see below), then
    press **Start** to watch one episode play out in real time.
 
+### Requirements
+
+To run the launcher you only need to provide **Python** — it installs every Python
+package it needs by itself (via `pip`). Specifically:
+
+- **Python 3.9 or newer** (a recent build, e.g. 3.11+, is recommended), and it must
+  include **Tcl/Tk** (the `tkinter` module that draws the interface). Install it from
+  [python.org](https://www.python.org/downloads/) — on Windows keep *"tcl/tk and
+  IDLE"* checked in the installer. The version floor is not optional: the launcher
+  installs **NumPy 2.x**, which the trained models require (they are pickled with
+  NumPy 2.x), and NumPy 2.x needs Python ≥ 3.9.
+- An **internet connection** on first launch: it downloads the code, ~7.4 GB of data
+  and the models. Later launches reuse the local copy and start offline.
+- About **8 GB of free disk space** in the launcher's folder.
+
+`curl`/`wget` (macOS) or `curl`/PowerShell (Windows), used for the very first
+download, are already bundled in recent macOS and Windows 10/11.
+
 ### Scenario configuration
 
 | Menu | Options | Meaning |
@@ -22,7 +40,7 @@ simulations of the Cecina bay.
 | **Technology** | PPO · FCM Adam | Which algorithm drives the agent: the learned PPO policy or the gradient method (FCM with Adam). |
 | **Wind** | V0 · V1 · V2 · V3 | Wind scenario (four hydrodynamic runs with different wind conditions). |
 | **Time Chunk** | Q1/4 · Q1/2 · Q3/4 | When in the simulation the episode starts — first quarter, middle, or third quarter (plume more or less dispersed). |
-| **Max Speed** | 1–5 m/s | Agent's maximum speed. *(PPO only.)* |
+| **Max Speed** | 0.1–5 m/s | Agent's maximum speed (single and double ring cover the full range). *(PPO only.)* |
 | **Formation** | Single · Double ring | Single sensor ring (20 m) or double ring (20 m + 50 m). *(PPO only.)* |
 
 Once **Wind** and **Time Chunk** are set, a random source is picked for
