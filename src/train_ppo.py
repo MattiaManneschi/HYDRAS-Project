@@ -626,7 +626,7 @@ def _transplant_obs_rms_116_to_196(dual_vecnorm, single_vecnorm_path):
 
 
 def train(
-    config_path: str = "utils/config.yaml",
+    config_path: str = "utils/config/config.yaml",
     output_dir: str = "trained_models",
     n_envs: int = 4,
     total_timesteps: Optional[int] = None,
@@ -1135,7 +1135,7 @@ def main():
     import os
     os.chdir(PROJECT_ROOT)  # Assicura CWD = root del progetto
 
-    config_path = str(PROJECT_ROOT / "utils" / "config.yaml")
+    config_path = str(PROJECT_ROOT / "utils" / "config" / "config.yaml")
     config = load_config(config_path)
     output_dir = str(PROJECT_ROOT / "trained_models")
     data_dir = str(PROJECT_ROOT / "data")
@@ -1222,7 +1222,7 @@ def main_velocity_sweep():
     os.chdir(PROJECT_ROOT)
 
     # Config "migliore" (modello minimal 96.9%): reward minimal, sensori 20 m, singola corona.
-    base_config = str(PROJECT_ROOT / "utils" / "config_base_no_wind_reward.yaml")
+    base_config = str(PROJECT_ROOT / "utils" / "config" / "config_base_no_wind_reward.yaml")
     output_dir  = str(PROJECT_ROOT / "trained_models")
     data_dir    = str(PROJECT_ROOT / "data")
 
@@ -1248,7 +1248,7 @@ def main_velocity_sweep():
         if prev_model is not None:
             cfg.setdefault('training', {}).pop('lr_schedule', None)
             cfg['training']['learning_rate'] = FINETUNE_LR
-        cfg_path = str(PROJECT_ROOT / "utils" / f"config_vmax{vmax}.yaml")
+        cfg_path = str(PROJECT_ROOT / "utils" / "config" / f"config_vmax{vmax}.yaml")
         with open(cfg_path, 'w') as f:
             yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False)
 
