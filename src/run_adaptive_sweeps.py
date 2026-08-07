@@ -14,9 +14,17 @@ e SENZA generazione video (più rapido; i video si fanno eventualmente dopo):
                           Le inferenze si faranno dopo, separatamente.
 
 Uso:
-  python3 src/run_adaptive_sweeps.py            # DEFAULT: catena v_max INTERMEDI 1.2/1.5/1.7/1.9 (fine-tuning da v1)
-  STAGE=ppo python3 src/run_adaptive_sweeps.py  # catena piena v_max 1→5
-  STAGE=fcm python3 src/run_adaptive_sweeps.py  # solo sweep FCM
+  python3 src/run_adaptive_sweeps.py                # DEFAULT (canonico): SEQUENZA COMPLETA prof, in automatico e in
+                                                    #   sequenza -> 1) singola-corona 0.7/0.4/0.1 (catena da v1)
+                                                    #   2) doppia-corona 0.7/0.4/0.1  3) doppia-corona 1.2/1.5/1.7/1.9
+                                                    #   [TRAINING] log live in trained_models/train_prof.log
+  STAGE=ppo_mid python3 src/run_adaptive_sweeps.py  # solo catena v_max INTERMEDI 1.2/1.5/1.7/1.9 (fine-tuning da v1)
+  STAGE=ppo python3 src/run_adaptive_sweeps.py      # catena piena v_max 1→5
+  STAGE=ppo_low python3 src/run_adaptive_sweeps.py  # solo singola BASSE velocità 0.7/0.4/0.1 (discendente da v1) [TRAINING]
+  STAGE=fcm python3 src/run_adaptive_sweeps.py      # sweep FCM (lr 10→50)
+  STAGE=fcm_low python3 src/run_adaptive_sweeps.py  # sweep FCM basse velocità (lr 7/4/1) [solo inferenza]
+  STAGE=dc_mid python3 src/run_adaptive_sweeps.py   # solo DOPPIA corona intermedi 1.2/1.5/1.7/1.9 (warm-start da single_vX) [TRAINING]
+  STAGE=dc_low python3 src/run_adaptive_sweeps.py   # solo DOPPIA corona bassi 0.7/0.4/0.1 (serve prima STAGE=ppo_low) [TRAINING]
 """
 import os
 import re
@@ -35,7 +43,7 @@ from src.train_ppo import train, load_config                     # noqa: E402
 DATA_DIR    = str(ROOT / "data")
 # Config "migliore" dalle analisi precedenti: reward minimal (base_no_wind_reward),
 # sensori a 20 m, singola corona (no sensor_range_2). È il config del modello minimal (96.9%).
-MINIMAL_CONFIG = str(ROOT / "utils" / "config_base_no_wind_reward.yaml")
+MINIMAL_CONFIG = str(ROOT / "utils" / "config" / "config_base_no_wind_reward.yaml")
 BASE_CONFIG = MINIMAL_CONFIG   # base sia per FCM sia per PPO
 FCM_CONFIG  = MINIMAL_CONFIG
 
@@ -69,9 +77,9 @@ def _read_sr(output_dir) -> float:
 
 # ─── 1) Sweep FCM Adam ────────────────────────────────────────────────────────
 
-def fcm_sweep():
+def fcm_sweep(lrs=None):
     out_root = ROOT / "thesis" / "evaluations" / "evaluations_FCM" / "fcm_adaptive"
-    lrs = [10, 20, 30, 40, 50]
+    lrs = lrs if lrs is not None else [10, 20, 30, 40, 50]
     results = []
     for i, lr in enumerate(lrs, 1):
         _banner(f"  [FCM {i}/{len(lrs)}]  Adam — passo lr = {lr} m   "
@@ -129,6 +137,10 @@ DC_TIMESTEPS = 2_000_000
 # (gli step, a differenza dell'SR, non hanno soffitto). NON è una catena: ogni dual_vX si
 # stacca dal proprio single_vX, quindi i 4 addestramenti sono indipendenti (parallelizzabili).
 DC_CHAIN_VMAX = [2, 3, 4, 5]
+# Doppia corona anche ai v_max INTERMEDI e BASSI (warm-start dal single_vX omologo, che
+# deve esistere: intermedi già addestrati; bassi creati prima da STAGE=ppo_low).
+DC_MID_VMAX = [1.2, 1.5, 1.7, 1.9]        # richiesta prof: doppia corona intermedi
+DC_LOW_VMAX = [0.7, 0.4, 0.1]             # richiesta prof: doppia corona bassi
 
 
 def ppo_sweep():
@@ -165,7 +177,7 @@ def ppo_sweep():
         # Sostituisce lo schedule α 6M del config (che su 2M resterebbe a α=0, uniforme).
         cfg['training']['scenario_curriculum'] = [{'end': timesteps, 'alpha': FINETUNE_ALPHA}]
 
-        cfg_path = str(ROOT / "utils" / f"config_vmax{vmax}.yaml")
+        cfg_path = str(ROOT / "utils" / "config" / f"config_vmax{vmax}.yaml")
         with open(cfg_path, 'w') as f:
             yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False)
 
@@ -210,13 +222,18 @@ def ppo_sweep():
 # Catena:  v1(esistente) → 1.2 → 1.5 → 1.7 → 1.9   (ogni stadio parte dall'ultimo).
 # SOLO training; le inferenze si fanno dopo con la stessa pipeline della tabella.
 VMAX_MID_LIST = [1.2, 1.5, 1.7, 1.9]      # m/s, fra v1 e v2
+# Basse velocità (< v1): catena DISCENDENTE v1(esistente) → 0.7 → 0.4 → 0.1, stesso
+# protocollo degli intermedi (fine-tuning puro dell'ultimo modello, ancora = single v1).
+# Servono a estendere la curva SR–v_max sotto 1 m/s (richiesta 0.1–2.0 m/s).
+VMAX_LOW_LIST = [0.7, 0.4, 0.1]           # m/s, sotto v1
 
 
-def ppo_intermediate_sweep():
+def ppo_intermediate_sweep(default_list=None, label="MID"):
+    default_list = default_list if default_list is not None else VMAX_MID_LIST
     # Override via env (usati dal micro-run di calibrazione, non dal run reale):
     #   MID_VMAX="1.2"  MID_TIMESTEPS=20000  MID_OUTDIR=/tmp/...
     vmax_list = [float(x) for x in os.environ.get(
-        "MID_VMAX", ",".join(str(v) for v in VMAX_MID_LIST)).split(",") if x.strip()]
+        "MID_VMAX", ",".join(str(v) for v in default_list)).split(",") if x.strip()]
     timesteps = int(os.environ.get("MID_TIMESTEPS", TIMESTEPS_FINETUNE))
     out_dir = os.environ.get("MID_OUTDIR", str(ROOT / "trained_models"))
 
@@ -243,12 +260,12 @@ def ppo_intermediate_sweep():
         cfg['training']['eval_scenarios'] = []
         cfg['training']['scenario_curriculum'] = [{'end': timesteps, 'alpha': FINETUNE_ALPHA}]
 
-        cfg_path = str(ROOT / "utils" / f"config_vmax{vmax}.yaml")
+        cfg_path = str(ROOT / "utils" / "config" / f"config_vmax{vmax}.yaml")
         with open(cfg_path, 'w') as f:
             yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False)
 
         levels = [round((j + 1) / K_VELOCITY_LEVELS * vmax, 2) for j in range(K_VELOCITY_LEVELS)]
-        _banner(f"  [PPO MID {i}/{len(vmax_list)}]  v_max = {vmax} m/s   "
+        _banner(f"  [PPO {label} {i}/{len(vmax_list)}]  v_max = {vmax} m/s   "
                 f"(livelli {levels} m/s, K={K_VELOCITY_LEVELS})")
         print(f"    tipo      : fine-tuning (lr {FINETUNE_LR:g}, α={FINETUNE_ALPHA:g})")
         print(f"    timesteps : {timesteps:,}")
@@ -267,9 +284,14 @@ def ppo_intermediate_sweep():
         prev_model = model_path             # catena: il prossimo stadio parte da qui
         dt = time.time() - t0
         results.append((f"v_max={vmax}m/s", "addestrato", dt))
-        print(f"\n  ✓ [PPO MID {i}/{len(vmax_list)}] v_max={vmax} m/s addestrato   ({_fmt_dt(dt)})\n"
+        print(f"\n  ✓ [PPO {label} {i}/{len(vmax_list)}] v_max={vmax} m/s addestrato   ({_fmt_dt(dt)})\n"
               f"    modello: {model_path}", flush=True)
     return results
+
+
+def ppo_low_sweep():
+    """Catena DISCENDENTE v1 → 0.8 → 0.5 → 0.2 (protocollo identico agli intermedi)."""
+    return ppo_intermediate_sweep(default_list=VMAX_LOW_LIST, label="LOW")
 
 
 def _summary(title, rows, col="esito"):
@@ -306,7 +328,7 @@ def radius10_experiment():
     rew['distance_threshold'] = R10_RADIUS
     rew['stagnation_distance_threshold'] = R10_STAGNATION
 
-    cfg_path = str(ROOT / "utils" / "config_vmax5_r10.yaml")
+    cfg_path = str(ROOT / "utils" / "config" / "config_vmax5_r10.yaml")
     with open(cfg_path, 'w') as f:
         yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False)
 
@@ -350,7 +372,7 @@ def dualcorona_experiment():
     rew['stagnation_distance_threshold'] = 20.0
     # eval_scenarios lasciati attivi (dal config base): curva SR in diretta
 
-    cfg_path = str(ROOT / "utils" / "config_dualcorona_v1.yaml")
+    cfg_path = str(ROOT / "utils" / "config" / "config_dualcorona_v1.yaml")
     with open(cfg_path, 'w') as f:
         yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False)
 
@@ -398,16 +420,18 @@ def _find_single_vmax_model(vmax, K: int = K_VELOCITY_LEVELS):
     return best
 
 
-def dualcorona_chain_experiment():
-    """Opzione 2: doppia corona a v_max=2..5, ciascuna warm-startata dal single_vX omologo.
+def dualcorona_chain_experiment(vmax_list=None):
+    """Doppia corona a più v_max, ciascuna warm-startata dal single_vX omologo.
 
     Replica a ogni livello il protocollo di dual_v1 (warm-start della corona-2 azzerata,
     lr DC_LR, 2M step, α 0.8, sensor_range_2=50, raggio 50 m). NON è una catena: ogni
     dual_vX si stacca dal proprio single_vX. Serve a misurare il guadagno di STEP per
     livello. SOLO training; le inferenze (dualcorona_vX) si lanciano dopo, separatamente.
+    `vmax_list` default = DC_CHAIN_VMAX (2..5); usata anche per gli intermedi e i bassi.
     """
+    vmax_list = vmax_list if vmax_list is not None else DC_CHAIN_VMAX
     results = []
-    for i, vmax in enumerate(DC_CHAIN_VMAX, 1):
+    for i, vmax in enumerate(vmax_list, 1):
         single = _find_single_vmax_model(vmax)
         if single is None:
             print(f"  [SKIP] single_v{vmax} non trovato "
@@ -429,11 +453,11 @@ def dualcorona_chain_experiment():
         rew['distance_threshold'] = 50
         rew['stagnation_distance_threshold'] = 20.0
 
-        cfg_path = str(ROOT / "utils" / f"config_dualcorona_v{vmax}.yaml")
+        cfg_path = str(ROOT / "utils" / "config" / f"config_dualcorona_v{vmax}.yaml")
         with open(cfg_path, 'w') as f:
             yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False)
 
-        _banner(f"  [DOPPIA CORONA v{vmax} — opzione 2/{len(DC_CHAIN_VMAX)}]  "
+        _banner(f"  [DOPPIA CORONA v{vmax} — {i}/{len(vmax_list)}]  "
                 f"warm-start da single_v{vmax} (116 -> 196 dim)")
         print(f"    base       : {single}")
         print(f"    v_max      : {vmax} m/s   |   sensori: corona 1 @ 20 m + corona 2 @ 50 m")
@@ -453,23 +477,111 @@ def dualcorona_chain_experiment():
     return results
 
 
+class _Tee:
+    """Duplica la scrittura su più stream (console + file di log), con flush immediato
+    così il log si aggiorna LIVE (seguibile con `tail -f`). Delega isatty/fileno/ecc. al
+    primo stream (la console) per restare 'trasparente' verso chi lo interroga."""
+    def __init__(self, *streams):
+        self._streams = streams
+
+    def write(self, data):
+        for s in self._streams:
+            try:
+                s.write(data); s.flush()
+            except Exception:
+                pass
+        return len(data)
+
+    def flush(self):
+        for s in self._streams:
+            try:
+                s.flush()
+            except Exception:
+                pass
+
+    def isatty(self):
+        try:
+            return self._streams[0].isatty()
+        except Exception:
+            return False
+
+    def __getattr__(self, name):
+        # Attributi non definiti (fileno, encoding, ...) delegati alla console reale.
+        return getattr(self._streams[0], name)
+
+
+def run_prof_training_sequence():
+    """Sequenza COMPLETA richiesta dal prof, AUTOMATICA e CONSECUTIVA (finito uno parte l'altro):
+      1) SINGOLA corona basse velocità: catena discendente v1 -> 0.7 -> 0.4 -> 0.1
+         (ogni stadio fine-tuning del precedente).
+      2) DOPPIA corona basse: 0.7/0.4/0.1, ogni v_max warm-start dal single_vX omologo
+         (creato al passo 1) — stesso protocollo dei modelli 1-5.
+      3) DOPPIA corona intermedie: 1.2/1.5/1.7/1.9, ogni v_max warm-start dal single_vX
+         intermedio (già esistente) — stesso protocollo.
+    L'ordine garantisce anche la dipendenza (la fase 2 richiede i single-low della fase 1).
+    SOLO training; le inferenze si lanciano dopo.
+
+    Tutto l'output (banner di fase + tabelle di progresso SB3) viene scritto LIVE anche su
+    trained_models/train_prof.log, così puoi seguire l'avanzamento con `tail -f`.
+    """
+    log_path = ROOT / "trained_models" / "train_prof.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    logf = open(log_path, "w", buffering=1, encoding="utf-8")   # line-buffered
+    # Tee SOLO su stdout (banner + tabelle SB3). NON tocco stderr: così la progress bar
+    # tqdm di SB3 (che scrive su stderr) resta visibile sul terminale.
+    orig_out = sys.stdout
+    sys.stdout = _Tee(orig_out, logf)
+
+    t0 = time.time()
+    all_res = []
+    try:
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}]  LOG LIVE → {log_path}", flush=True)
+        print(f"    (segui con:  tail -f {log_path} )", flush=True)
+
+        _banner("  ###  SEQUENZA PROF 1/3 — SINGOLA CORONA 0.7/0.4/0.1 (catena discendente da v1)  ###", "#")
+        all_res.append(("--- 1) singola corona 0.7/0.4/0.1 ---", "", 0.0))
+        all_res += ppo_low_sweep()
+
+        _banner("  ###  SEQUENZA PROF 2/3 — DOPPIA CORONA 0.7/0.4/0.1 (warm-start da single_vX)  ###", "#")
+        all_res.append(("--- 2) doppia corona 0.7/0.4/0.1 ---", "", 0.0))
+        all_res += dualcorona_chain_experiment(vmax_list=DC_LOW_VMAX)
+
+        _banner("  ###  SEQUENZA PROF 3/3 — DOPPIA CORONA 1.2/1.5/1.7/1.9 (warm-start da single_vX)  ###", "#")
+        all_res.append(("--- 3) doppia corona 1.2/1.5/1.7/1.9 ---", "", 0.0))
+        all_res += dualcorona_chain_experiment(vmax_list=DC_MID_VMAX)
+
+        _banner("  SEQUENZA PROF COMPLETATA", "#")
+        _summary("Riepilogo sequenza (1 singola-low -> 2 doppia-low -> 3 doppia-mid):", all_res, col="stato")
+        print(f"\n  [{time.strftime('%H:%M:%S')}]  Tempo totale sequenza: {_fmt_dt(time.time() - t0)}\n", flush=True)
+    finally:
+        sys.stdout = orig_out
+        logf.close()
+    return all_res
+
+
 def main():
-    stage = os.environ.get("STAGE", "ppo_mid")   # all | fcm | ppo | ppo_mid | r10 | dc | dc2
+    stage = os.environ.get("STAGE", "prof")   # prof(DEFAULT) | all | fcm | fcm_low | ppo | ppo_mid | ppo_low | r10 | dc | dc2 | dc_mid | dc_low
     t_start = time.time()
     fcm_res, ppo_res = [], []
 
     stage_labels = {
         "all":     "FCM + PPO (v_max 1→5)",
         "fcm":     "FCM Adam (passo 10→50 m)",
+        "fcm_low": "FCM Adam BASSE velocità (passo 7/4/1 m ≈ v_max 0.7/0.4/0.1)",
+        "fcm_mid": "FCM Adam INTERMEDI (passo 12/15/17/19 m ≈ v_max 1.2/1.5/1.7/1.9)",
         "ppo":     "PPO velocità adattiva (v_max 1→5, catena)",
         "ppo_mid": "PPO v_max INTERMEDI (1.2/1.5/1.7/1.9, catena da v1)",
+        "ppo_low": "PPO v_max BASSI (0.7/0.4/0.1, catena discendente da v1)",
         "r10":     "PPO raggio 10 m (modulazione forzata)",
         "dc":      "Doppia corona (warm-start da v1)",
         "dc2":     "Doppia corona a ogni v_max (opzione 2)",
+        "dc_mid":  "Doppia corona INTERMEDI (1.2/1.5/1.7/1.9, warm-start da single_vX)",
+        "dc_low":  "Doppia corona BASSI (0.7/0.4/0.1, warm-start da single_vX)",
+        "prof":    "SEQUENZA PROF: 1) singola 0.7/0.4/0.1  2) doppia 0.7/0.4/0.1  3) doppia 1.2/1.5/1.7/1.9",
     }
     _banner("  SWEEP ADATTIVI   (spawn distribuito, no video)", "#")
     label = stage_labels.get(stage, stage.upper())
-    if stage in ("all", "fcm"):
+    if stage in ("all", "fcm", "fcm_low", "fcm_mid"):
         print(f"  Stadio: {label}   |   episodi/scenario: {N_EPISODES}   |   sorgenti test: SRC107–SRC132")
     else:
         print(f"  Stadio: {label}   |   SOLO TRAINING (le inferenze si fanno dopo, separatamente)")
@@ -478,6 +590,14 @@ def main():
         _banner("  ###  STADIO 1/2 — SWEEP FCM ADAM (passo 10→50 m, sensor 50 m)  ###", "#")
         fcm_res = fcm_sweep()
 
+    if stage == "fcm_low":
+        _banner("  ###  SWEEP FCM ADAM BASSE VELOCITÀ (passo 7/4/1 m, sensor 50 m)  ###", "#")
+        fcm_res = fcm_sweep(lrs=[7, 4, 1])
+
+    if stage == "fcm_mid":
+        _banner("  ###  SWEEP FCM ADAM INTERMEDI (passo 12/15/17/19 m, sensor 50 m)  ###", "#")
+        fcm_res = fcm_sweep(lrs=[12, 15, 17, 19])
+
     if stage in ("all", "ppo"):
         _banner("  ###  STADIO 2/2 — SWEEP PPO VELOCITÀ ADATTIVA (v_max 1→5 m/s, catena)  ###", "#")
         ppo_res = ppo_sweep()
@@ -485,6 +605,10 @@ def main():
     if stage == "ppo_mid":
         _banner("  ###  SWEEP PPO v_max INTERMEDI (1.2/1.5/1.7/1.9, catena da v1)  ###", "#")
         ppo_res = ppo_intermediate_sweep()
+
+    if stage == "ppo_low":
+        _banner("  ###  SWEEP PPO v_max BASSI (0.7/0.4/0.1, catena discendente da v1)  ###", "#")
+        ppo_res = ppo_low_sweep()
 
     if stage == "r10":
         _banner("  ###  ESPERIMENTO RAGGIO 10 m (modulazione forzata)  ###", "#")
@@ -497,6 +621,17 @@ def main():
     if stage == "dc2":
         _banner("  ###  DOPPIA CORONA A OGNI v_max (opzione 2: warm-start da single_vX)  ###", "#")
         ppo_res = dualcorona_chain_experiment()
+
+    if stage == "dc_mid":
+        _banner("  ###  DOPPIA CORONA v_max INTERMEDI (1.2/1.5/1.7/1.9, warm-start da single_vX)  ###", "#")
+        ppo_res = dualcorona_chain_experiment(vmax_list=DC_MID_VMAX)
+
+    if stage == "dc_low":
+        _banner("  ###  DOPPIA CORONA v_max BASSI (0.7/0.4/0.1, warm-start da single_vX)  ###", "#")
+        ppo_res = dualcorona_chain_experiment(vmax_list=DC_LOW_VMAX)
+
+    if stage == "prof":
+        ppo_res = run_prof_training_sequence()
 
     # --- Riepilogo finale ---
     _banner("  RIEPILOGO FINALE", "#")
