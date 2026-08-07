@@ -83,7 +83,7 @@ def plot_trajectory(trajectory: np.ndarray, field, ax=None, title: str = "",
     plt.colorbar(im, ax=ax, label='Concentrazione')
     
     # Traiettoria
-    ax.plot(trajectory[:, 0], trajectory[:, 1], 'r-', linewidth=1.5, alpha=0.8, label='Traiettoria')
+    ax.plot(trajectory[:, 0], trajectory[:, 1], 'r-', linewidth=1.5, alpha=0.8, label='Trajectory')
     ax.scatter(trajectory[0, 0], trajectory[0, 1], c='green', s=100, marker='o', zorder=5, label='Start')
     ax.scatter(trajectory[-1, 0], trajectory[-1, 1], c='darkred', s=100, marker='X', zorder=5, label='End')
     
@@ -482,7 +482,7 @@ def plot_velocity_mean_over_time(results, output_path, max_velocity: float,
     keep = n_t >= 3          # taglia la coda con pochissimi episodi (rumorosa)
 
     fig, ax = plt.subplots(figsize=(11, 5))
-    ax.plot(t_min[keep], mean_t[keep], color='tab:blue', lw=2, label='velocità media')
+    ax.plot(t_min[keep], mean_t[keep], color='tab:blue', lw=2, label='mean velocity')
     # La velocità è fisicamente limitata a [0, v_max] (livelli discreti (vel_idx+1)/K·v_max):
     # la media è sempre <= v_max, ma la banda ±std, essendo simmetrica su una quantità
     # bounded, sfora v_max quando la media è vicina al tetto. Si clippa la banda ai limiti
@@ -493,12 +493,12 @@ def plot_velocity_mean_over_time(results, output_path, max_velocity: float,
                     color='tab:blue', alpha=0.2, label='±1 std')
     for lv in levels:
         ax.axhline(lv, ls='--', color='gray', lw=0.7, alpha=0.6)
-    ax.set_xlabel('tempo [min]'); ax.set_ylabel('velocità [m/s]')
+    ax.set_xlabel('time [min]'); ax.set_ylabel('velocity [m/s]')
     ax.set_ylim(0, max_velocity * 1.08); ax.grid(alpha=0.3); ax.legend(loc='upper right')
 
     overall = float(np.mean(np.concatenate(series)))
-    ax.set_title(f'Andamento medio della velocità nel tempo — v_max={max_velocity:g} m/s, K={n_levels}\n'
-                 f'media su {len(series)} run  (velocità media globale {overall:.2f} m/s)', fontsize=12)
+    ax.set_title(f'Mean velocity over time — v_max={max_velocity:g} m/s, K={n_levels}\n'
+                 f'mean over {len(series)} runs  (global mean velocity {overall:.2f} m/s)', fontsize=12)
     fig.tight_layout()
 
     analysis_dir = Path(output_path) / "analysis"
@@ -538,17 +538,17 @@ def plot_velocity_vs_distance(results, output_path, max_velocity: float,
     ok = ~np.isnan(bmean)
 
     fig, ax = plt.subplots(figsize=(11, 5))
-    ax.plot(centers[ok], bmean[ok], color='tab:green', lw=2, marker='o', ms=3, label='velocità media')
+    ax.plot(centers[ok], bmean[ok], color='tab:green', lw=2, marker='o', ms=3, label='mean velocity')
     lo = np.maximum(bmean - bstd, 0.0); hi = np.minimum(bmean + bstd, max_velocity)   # banda in [0, v_max]
     ax.fill_between(centers[ok], lo[ok], hi[ok], color='tab:green', alpha=0.15, label='±1 std')
     for lv in levels:
         ax.axhline(lv, ls='--', color='gray', lw=0.7, alpha=0.6)
-    ax.axvline(success_radius, ls=':', color='red', lw=1.2, label=f'raggio successo {success_radius:g} m')
-    ax.set_xlabel('distanza dalla sorgente [m]'); ax.set_ylabel('velocità media [m/s]')
+    ax.axvline(success_radius, ls=':', color='red', lw=1.2, label=f'success radius {success_radius:g} m')
+    ax.set_xlabel('distance from source [m]'); ax.set_ylabel('mean velocity [m/s]')
     ax.set_ylim(0, max_velocity * 1.08); ax.grid(alpha=0.3); ax.legend(loc='upper left')
-    ax.invert_xaxis()    # sinistra = lontano, destra = vicino
-    ax.set_title(f'Velocità media vs distanza dalla sorgente — v_max={max_velocity:g} m/s, K={n_levels}\n'
-                 f'(curva che scende a destra = rallenta avvicinandosi)', fontsize=12)
+    ax.invert_xaxis()    # left = far, right = near
+    ax.set_title(f'Mean velocity vs distance from source — v_max={max_velocity:g} m/s, K={n_levels}\n'
+                 f'(curve dropping to the right = slows down on approach)', fontsize=12)
     fig.tight_layout()
 
     analysis_dir = Path(output_path) / "analysis"
@@ -1288,7 +1288,7 @@ def main_fcm_adam_sweep():
     """
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
     DATA_DIR     = str(PROJECT_ROOT / "data")
-    CONFIG_PATH  = str(PROJECT_ROOT / "utils" / "config_base_no_wind_reward.yaml")
+    CONFIG_PATH  = str(PROJECT_ROOT / "utils" / "config" / "config_base_no_wind_reward.yaml")
 
     for lr in [10, 20, 30, 40, 50]:
         print(f"\n{'='*80}")
@@ -1344,13 +1344,13 @@ def generate_analysis_plots(
         ax.hist(clipped, bins=n_bins, color='#2196F3', edgecolor='white',
                 linewidth=0.5, alpha=0.8)
         ax.axvline(mean_val, color='red', linestyle='--', linewidth=1.5,
-                   label=f'Media: {mean_val:.1f} min')
+                   label=f'Mean: {mean_val:.1f} min')
         ax.axvline(p50, color='orange', linestyle=':', linewidth=1.8,
-                   label=f'Mediana: {p50:.1f} min')
+                   label=f'Median: {p50:.1f} min')
         ax.set_xlim(0, p95)
-        ax.set_xlabel('Tempo per raggiungere la sorgente (minuti simulati)', fontsize=11)
-        ax.set_ylabel('Numero di episodi', fontsize=11)
-        ax.set_title('Distribuzione dei Tempi di Successo', fontsize=13, fontweight='bold')
+        ax.set_xlabel('Time to reach the source (simulated minutes)', fontsize=11)
+        ax.set_ylabel('Number of episodes', fontsize=11)
+        ax.set_title('Distribution of Success Times', fontsize=13, fontweight='bold')
         ax.legend(fontsize=9, loc='upper right')
         ax.grid(axis='y', alpha=0.35)
         stats_txt = (
@@ -1363,7 +1363,7 @@ def generate_analysis_plots(
                 fontsize=8.5, va='bottom', ha='right',
                 bbox=dict(boxstyle='round,pad=0.4', facecolor='#F5F5F5', alpha=0.9))
     else:
-        ax.text(0.5, 0.5, 'Nessun episodio di successo', ha='center', va='center',
+        ax.text(0.5, 0.5, 'No successful episodes', ha='center', va='center',
                 transform=ax.transAxes, fontsize=12)
     fig.tight_layout()
     p1 = analysis_dir / "plot_success_time_dist.png"
@@ -1386,7 +1386,7 @@ def generate_analysis_plots(
     im = ax.imshow(matrix, vmin=0, vmax=100, cmap='RdYlGn', aspect='auto')
     ax.set_xticks(range(len(chunks)));  ax.set_xticklabels(chunks, fontsize=10)
     ax.set_yticks(range(len(versions))); ax.set_yticklabels(versions, fontsize=10)
-    ax.set_title('Success Rate (%) — Versione × Chunk', fontsize=11, fontweight='bold')
+    ax.set_title('Success Rate (%) — Version × Chunk', fontsize=11, fontweight='bold')
     for vi in range(len(versions)):
         for ci in range(len(chunks)):
             val = matrix[vi, ci]
@@ -1411,9 +1411,9 @@ def generate_analysis_plots(
         ax2.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 1,
                  f'n={n}', ha='center', va='bottom', fontsize=8)
     ax2.set_ylim(0, 110)
-    ax2.set_xlabel('Distanza iniziale dalla sorgente (m)', fontsize=10)
+    ax2.set_xlabel('Initial distance from source (m)', fontsize=10)
     ax2.set_ylabel('Success Rate (%)', fontsize=10)
-    ax2.set_title('SR in funzione della Distanza Iniziale', fontsize=11, fontweight='bold')
+    ax2.set_title('SR vs Initial Distance', fontsize=11, fontweight='bold')
     ax2.tick_params(axis='x', labelsize=9)
     ax2.grid(axis='y', alpha=0.4)
     fig.tight_layout()
@@ -1441,16 +1441,16 @@ def generate_analysis_plots(
     fai_mat = _pad_and_stack(fail_eps, max_len)
     if all_mat is not None:
         ax.plot(steps_axis, all_mat.mean(axis=0), color='steelblue',
-                linewidth=1.8, label=f'Tutti ({len(episodes)} ep.)')
+                linewidth=1.8, label=f'All ({len(episodes)} ep.)')
     if suc_mat is not None:
         ax.plot(steps_axis, suc_mat.mean(axis=0), color='green',
-                linewidth=1.8, linestyle='--', label=f'Successi ({len(success_eps)} ep.)')
+                linewidth=1.8, linestyle='--', label=f'Successes ({len(success_eps)} ep.)')
     if fai_mat is not None:
         ax.plot(steps_axis, fai_mat.mean(axis=0), color='crimson',
-                linewidth=1.8, linestyle=':', label=f'Fallimenti ({len(fail_eps)} ep.)')
-    ax.set_xlabel('Tempo (minuti)', fontsize=11)
-    ax.set_ylabel('Distanza media dalla sorgente (m)', fontsize=11)
-    ax.set_title('Evoluzione della Distanza dalla Sorgente nel Tempo', fontsize=13, fontweight='bold')
+                linewidth=1.8, linestyle=':', label=f'Failures ({len(fail_eps)} ep.)')
+    ax.set_xlabel('Time (minutes)', fontsize=11)
+    ax.set_ylabel('Mean distance from source (m)', fontsize=11)
+    ax.set_title('Distance from Source over Time', fontsize=13, fontweight='bold')
     ax.legend(fontsize=10)
     ax.grid(alpha=0.4)
     ax.set_xlim(0, max_steps * dt_seconds / 60.0)
@@ -1473,16 +1473,16 @@ def generate_analysis_plots(
     counts_suc  = np.histogram(init_dists_suc,  bins=bin_edges)[0] if len(init_dists_suc)  else np.zeros(len(bin_centers), int)
     counts_fail = np.histogram(init_dists_fail, bins=bin_edges)[0] if len(init_dists_fail) else np.zeros(len(bin_centers), int)
     ax.bar(bin_centers, counts_suc,  width=bar_w, color='#4CAF50', edgecolor='white',
-           linewidth=0.4, label=f'Successi ({len(success_eps)})', alpha=0.9)
+           linewidth=0.4, label=f'Successes ({len(success_eps)})', alpha=0.9)
     ax.bar(bin_centers, counts_fail, width=bar_w, bottom=counts_suc, color='#F44336',
-           edgecolor='white', linewidth=0.4, label=f'Fallimenti ({len(fail_eps)})', alpha=0.9)
+           edgecolor='white', linewidth=0.4, label=f'Failures ({len(fail_eps)})', alpha=0.9)
     ax.axvline(float(np.mean(init_dists)), color='navy', linestyle='--', linewidth=1.5,
-               label=f'Media: {np.mean(init_dists):.0f} m')
+               label=f'Mean: {np.mean(init_dists):.0f} m')
     ax.axvline(float(np.median(init_dists)), color='darkorange', linestyle=':', linewidth=1.8,
-               label=f'Mediana: {np.median(init_dists):.0f} m')
-    ax.set_xlabel('Distanza iniziale dalla sorgente (m)', fontsize=11)
-    ax.set_ylabel('Numero di episodi', fontsize=11)
-    ax.set_title('Distribuzione delle Distanze di Spawn', fontsize=12, fontweight='bold')
+               label=f'Median: {np.median(init_dists):.0f} m')
+    ax.set_xlabel('Initial distance from source (m)', fontsize=11)
+    ax.set_ylabel('Number of episodes', fontsize=11)
+    ax.set_title('Distribution of Spawn Distances', fontsize=12, fontweight='bold')
     ax.legend(fontsize=9)
     ax.grid(axis='y', alpha=0.35)
     stats_txt = (
@@ -1520,9 +1520,9 @@ def generate_analysis_plots(
     ax2.axhline(global_sr_val, color='navy', linestyle='--', linewidth=1.2,
                 label=f'SR globale {global_sr_val}%')
     ax2.set_ylim(0, 115)
-    ax2.set_xlabel('Distanza iniziale dalla sorgente (m)', fontsize=11)
+    ax2.set_xlabel('Initial distance from source (m)', fontsize=11)
     ax2.set_ylabel('Success Rate (%)', fontsize=11)
-    ax2.set_title('SR per Fascia di Distanza Iniziale (bins 250 m)', fontsize=12, fontweight='bold')
+    ax2.set_title('SR by Initial Distance Band (250 m bins)', fontsize=12, fontweight='bold')
     ax2.legend(fontsize=9)
     ax2.grid(axis='y', alpha=0.35)
     fig.tight_layout()
@@ -1539,7 +1539,7 @@ def main():
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
     DATA_DIR    = str(PROJECT_ROOT / "data")
-    CONFIG_PATH = str(PROJECT_ROOT / "utils" / "config.yaml")
+    CONFIG_PATH = str(PROJECT_ROOT / "utils" / "config" / "config.yaml")
     trained_dir = PROJECT_ROOT / "trained_models"
 
     config = load_config(CONFIG_PATH)
@@ -1664,7 +1664,7 @@ def main_spawn_map(mode: str = 'ppo'):
     model = None; fcm_agent = None; vec_norm_path = None
     if mode == 'fcm':
         OUTPUT_DIR = SPAWN_ROOT / "spawn_maps_fcm"
-        config = load_config(str(PROJECT_ROOT / "utils" / "config_base_no_wind_reward.yaml"))
+        config = load_config(str(PROJECT_ROOT / "utils" / "config" / "config_base_no_wind_reward.yaml"))
         config['agent']['sensor_range'] = 50          # FCM ottimale
         config['agent'].pop('sensor_range_2', None)
         config['agent']['n_velocity_levels'] = 1      # Discrete(8): FCM sceglie solo direzione
@@ -1836,7 +1836,7 @@ def main_spawn_map(mode: str = 'ppo'):
                     ax.add_patch(_Circle((sx0, sy0), dd, fill=False, ls='--',
                                          ec='black', lw=1.3, zorder=4))
                 ax.plot([], [], ls='--', color='black', lw=1.3,
-                        label=f'disco spawn ({d_min:.0f}–{d_max:.0f} m)')
+                        label=f'spawn disk ({d_min:.0f}–{d_max:.0f} m)')
             except Exception as _e:
                 print(f"    [disk] {source_id} {version} Q{chunk_id}: {_e}")
 
@@ -2239,7 +2239,7 @@ def main_agent_heatmap(scenarios=None, n_episodes: int = 10,
                        "_V2": "CL02_V2_SRC000_U_V_10mGrid.nc", "_V3": "CL02_V3_SRC000_U_V_10mGrid.nc"}
 
     # --- agenti: FCM Adam + PPO singola (v5) + PPO doppia (v5) ---
-    fcm_cfg = load_config(str(PROJECT_ROOT / "utils" / "config_base_no_wind_reward.yaml"))
+    fcm_cfg = load_config(str(PROJECT_ROOT / "utils" / "config" / "config_base_no_wind_reward.yaml"))
     fcm_cfg['agent']['sensor_range'] = fcm_sensor
     fcm_cfg['agent'].pop('sensor_range_2', None)
     fcm_cfg['agent']['n_velocity_levels'] = 1
@@ -2317,7 +2317,7 @@ def main_agent_heatmap(scenarios=None, n_episodes: int = 10,
             print(f"  [SKIP] {src} {ver}: campo non trovato"); continue
         sp = np.array(dm.get_source_coordinates(src), dtype=float)
         panels = []
-        for kind, name in zip(['fcm', 'ps', 'pd'], ['FCM (5 m/s)', 'PPO singola v5', 'PPO doppia v5']):
+        for kind, name in zip(['fcm', 'ps', 'pd'], ['FCM (5 m/s)', 'PPO single v5', 'PPO double v5']):
             pts, succ = _collect(kind, ch, fld)
             H, extent = _density(pts, fld)
             panels.append((H, extent, succ, name))
@@ -2326,10 +2326,10 @@ def main_agent_heatmap(scenarios=None, n_episodes: int = 10,
         fig, axes = plt.subplots(1, 3, figsize=(15.5, 4.6))
         im = None
         for ax, (H, extent, succ, name) in zip(axes, panels):
-            im = _draw(ax, H, extent, fld, sp, f'{name}  —  {succ}/{n_episodes} successi', vmax)
+            im = _draw(ax, H, extent, fld, sp, f'{name}  —  {succ}/{n_episodes} successes', vmax)
         cb = fig.colorbar(im, ax=list(axes), fraction=0.02, pad=0.015)
-        cb.set_label('densità di presenza (norm., scala comune)', fontsize=8); cb.ax.tick_params(labelsize=7)
-        fig.suptitle(f'Heatmap di occupazione — {src}, {ver}, {chunk_lbl[ch]}', fontsize=13)
+        cb.set_label('presence density (norm., common scale)', fontsize=8); cb.ax.tick_params(labelsize=7)
+        fig.suptitle(f'Occupancy heatmap — {src}, {ver}, {chunk_lbl[ch]}', fontsize=13)
         out = OUT / f'heatmap_{si}_{src}_{ver}_Q{ch}.png'
         fig.savefig(str(out), dpi=160, bbox_inches='tight'); plt.close(fig)
         print(f"  salvato: {out.name}")
@@ -2346,9 +2346,16 @@ if __name__ == "__main__":
         main_dualcorona_inference(vmax=_vmax)
     elif arg == "dc-sweep":
         if len(_sys.argv) > 2:
-            main_dualcorona_sweep_inference(vmax_list=[int(x) for x in _sys.argv[2:]])
+            main_dualcorona_sweep_inference(vmax_list=[
+                (int(float(x)) if float(x).is_integer() else float(x)) for x in _sys.argv[2:]])
         else:
             main_dualcorona_sweep_inference()
+    elif arg == "dc-mid":
+        # Doppia corona v_max INTERMEDI (dopo STAGE=dc_mid).
+        main_dualcorona_sweep_inference(vmax_list=[1.2, 1.5, 1.7, 1.9])
+    elif arg == "dc-low":
+        # Doppia corona v_max BASSI (dopo STAGE=dc_low).
+        main_dualcorona_sweep_inference(vmax_list=[0.7, 0.4, 0.1])
     elif arg == "spawn-fcm":
         main_spawn_map(mode='fcm')
     elif arg == "spawn-ppo":
@@ -2363,6 +2370,28 @@ if __name__ == "__main__":
     elif arg in ("full", "chain", "1-5"):
         # Catena INTERA v_max 1→5 m/s (5 run × 1560 ep).
         main_velocity_inference(vmax_list=[1, 2, 3, 4, 5])
+    elif arg in ("low", "0.1-0.7"):
+        # Basse velocità 0.7/0.4/0.1 m/s (3 run × 1560 ep) — dopo STAGE=ppo_low.
+        main_velocity_inference(vmax_list=[0.7, 0.4, 0.1])
+    elif arg in ("prof-all", "all-new"):
+        # Inferenza held-out (1560 ep/modello) su TUTTI i modelli del prof, in sequenza:
+        #   1) SINGOLA corona 0.7/0.4/0.1   2) DOPPIA corona 0.7/0.4/0.1
+        #   3) SINGOLA corona 1.2/1.5/1.7/1.9 (GIA' valutata -> saltata; "prof-all full" per rifarla)
+        #   4) DOPPIA  corona 1.2/1.5/1.7/1.9
+        _redo_single_mid = len(_sys.argv) > 2 and _sys.argv[2] == "full"
+        print("\n########## PROF-ALL 1/4 — SINGOLA corona 0.7/0.4/0.1 ##########", flush=True)
+        main_velocity_inference(vmax_list=[0.7, 0.4, 0.1])
+        print("\n########## PROF-ALL 2/4 — DOPPIA corona 0.7/0.4/0.1 ##########", flush=True)
+        main_dualcorona_sweep_inference(vmax_list=[0.7, 0.4, 0.1])
+        if _redo_single_mid:
+            print("\n########## PROF-ALL 3/4 — SINGOLA corona 1.2/1.5/1.7/1.9 (re-run) ##########", flush=True)
+            main_velocity_inference(vmax_list=[1.2, 1.5, 1.7, 1.9])
+        else:
+            print("\n########## PROF-ALL 3/4 — SINGOLA corona 1.2/1.5/1.7/1.9: GIA' PRESENTE, saltata "
+                  "(usa 'prof-all full' per rifarla) ##########", flush=True)
+        print("\n########## PROF-ALL 4/4 — DOPPIA corona 1.2/1.5/1.7/1.9 ##########", flush=True)
+        main_dualcorona_sweep_inference(vmax_list=[1.2, 1.5, 1.7, 1.9])
+        print("\n########## PROF-ALL COMPLETATO ##########", flush=True)
     else:
         # DEFAULT: catena v_max INTERMEDI 1.2/1.5/1.7/1.9 (4 run × 1560 ep).
         main_velocity_inference(vmax_list=[1.2, 1.5, 1.7, 1.9])
